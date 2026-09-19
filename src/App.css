@@ -77,6 +77,7 @@
   grid-template-columns: 80px repeat(4, 1fr);
   gap: 8px;
   max-width: 1200px;
+  grid-auto-rows: auto;
 }
 
 .scene-header {
@@ -146,4 +147,30 @@
 .corner-spacer {
   background: transparent;
   border: none;
+}
+
+.scene-launch-button {
+  padding: 12px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #999;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 16px;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scene-launch-button:hover {
+  background: #333;
+  border-color: #555;
+  color: #ccc;
+}
+
+.scene-launch-button.active {
+  background: #0a5;
+  border-color: #0c7;
+  color: #fff;
 }

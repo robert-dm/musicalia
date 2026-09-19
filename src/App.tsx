@@ -16,6 +16,7 @@ function App() {
   const [clips, setClips] = useState<ClipGrid>(new Map())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedCell, setSelectedCell] = useState<{ track: number; scene: number } | null>(null)
+  const [activeScene, setActiveScene] = useState<number | null>(null)
 
   const handlePlay = async () => {
     await Tone.start()
@@ -32,6 +33,7 @@ function App() {
     })
     setClips(new Map(clips))
     setIsPlaying(false)
+    setActiveScene(null)
   }
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -92,6 +94,35 @@ function App() {
     }
   }
 
+  const handleSceneLaunch = async (sceneIndex: number) => {
+    await Tone.start()
+    const updatedClips = new Map(clips)
+    
+    // For each track, stop any playing clip and start the clip in this scene if it exists
+    for (let trackIndex = 0; trackIndex < 8; trackIndex++) {
+      // Stop all clips on this track
+      for (let si = 0; si < 4; si++) {
+        const cellKey = getCellKey(trackIndex, si)
+        const clip = updatedClips.get(cellKey)
+        if (clip && clip.isPlaying) {
+          clip.player.stop()
+          clip.isPlaying = false
+        }
+      }
+      
+      // Start the clip in the launched scene if it exists
+      const sceneClipKey = getCellKey(trackIndex, sceneIndex)
+      const sceneClip = updatedClips.get(sceneClipKey)
+      if (sceneClip) {
+        sceneClip.player.start()
+        sceneClip.isPlaying = true
+      }
+    }
+    
+    setClips(updatedClips)
+    setActiveScene(sceneIndex)
+  }
+
   const tracks = Array.from({ length: 8 }, (_, i) => `Track ${i + 1}`)
   const scenes = Array.from({ length: 4 }, (_, i) => `Scene ${i + 1}`)
 
@@ -142,6 +173,17 @@ function App() {
             <div key={scene} className="scene-header">
               {scene}
             </div>
+          ))}
+          
+          <div className="corner-spacer"></div>
+          {scenes.map((_, sceneIndex) => (
+            <button
+              key={`launch-${sceneIndex}`}
+              className={`scene-launch-button ${activeScene === sceneIndex ? 'active' : ''}`}
+              onClick={() => handleSceneLaunch(sceneIndex)}
+            >
+              ▶
+            </button>
           ))}
           
           {tracks.map((track, trackIndex) => (

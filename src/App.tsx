@@ -24,6 +24,7 @@ function App() {
   const [selectedCell, setSelectedCell] = useState<{ track: number; scene: number } | null>(null)
   const [activeScene, setActiveScene] = useState<number | null>(null)
   const trackGainsRef = useRef<Tone.Gain[]>([])
+  const audioInitializedRef = useRef(false)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
     Array.from({ length: 8 }, () => ({
       mute: false,
@@ -32,13 +33,19 @@ function App() {
     }))
   )
 
-  useEffect(() => {
-    if (trackGainsRef.current.length === 0) {
-      trackGainsRef.current = Array.from({ length: 8 }, () => 
-        new Tone.Gain(0.8).toDestination()
-      )
+  const ensureAudio = async () => {
+    if (!audioInitializedRef.current) {
+      await Tone.start()
+      
+      if (trackGainsRef.current.length === 0) {
+        trackGainsRef.current = Array.from({ length: 8 }, () => 
+          new Tone.Gain(0.8).toDestination()
+        )
+      }
+      
+      audioInitializedRef.current = true
     }
-  }, [])
+  }
 
   useEffect(() => {
     const anySolo = trackStates.some(ts => ts.solo)
@@ -60,7 +67,7 @@ function App() {
   }, [trackStates])
 
   const handlePlay = async () => {
-    await Tone.start()
+    await ensureAudio()
     Tone.getTransport().bpm.value = bpm
     Tone.getTransport().start()
     setIsPlaying(true)
@@ -90,7 +97,7 @@ function App() {
     const clip = clips.get(cellKey)
 
     if (clip) {
-      await Tone.start()
+      await ensureAudio()
       if (clip.isPlaying) {
         clip.player.stop()
         clip.isPlaying = false
@@ -109,6 +116,8 @@ function App() {
     const file = e.target.files?.[0]
     if (!file || !selectedCell) return
 
+    await ensureAudio()
+
     const cellKey = getCellKey(selectedCell.track, selectedCell.scene)
     const existingClip = clips.get(cellKey)
     if (existingClip) {
@@ -117,10 +126,12 @@ function App() {
 
     const url = URL.createObjectURL(file)
     const trackGain = trackGainsRef.current[selectedCell.track]
-    const player = new Tone.Player(url).connect(trackGain)
+    
+    const player = new Tone.Player()
     player.loop = true
-
-    await Tone.loaded()
+    player.connect(trackGain)
+    
+    await player.load(url)
 
     const newClips = new Map(clips)
     newClips.set(cellKey, {
@@ -137,7 +148,7 @@ function App() {
   }
 
   const handleSceneLaunch = async (sceneIndex: number) => {
-    await Tone.start()
+    await ensureAudio()
     const updatedClips = new Map(clips)
     
     // For each track, stop any playing clip and start the clip in this scene if it exists

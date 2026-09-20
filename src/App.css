@@ -77,7 +77,7 @@
 .track-lane {
   display: flex;
   border-bottom: 1px solid #2a2a2a;
-  min-height: 80px;
+  height: 88px;
 }
 
 .track-header {
@@ -88,6 +88,8 @@
   border-right: 1px solid #333;
   padding: 8px;
   flex-shrink: 0;
+  height: 88px;
+  box-sizing: border-box;
 }
 
 .track-name {
@@ -103,7 +105,8 @@
   cursor: pointer;
   position: relative;
   transition: background 0.2s;
-  min-height: 80px;
+  height: 88px;
+  box-sizing: border-box;
 }
 
 .track-content:hover {
@@ -124,7 +127,6 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  min-height: 80px;
 }
 
 .import-hint {
@@ -143,24 +145,25 @@
 
 .clip-info {
   position: absolute;
-  top: 4px;
-  left: 8px;
+  top: 6px;
+  left: 12px;
   z-index: 2;
-  padding: 4px 8px;
-  background: rgba(0, 0, 0, 0.6);
-  border-radius: 3px;
+  padding: 3px 8px;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 2px;
+  pointer-events: none;
 }
 
 .clip-filename {
   font-size: 11px;
   color: #ccc;
+  line-height: 1.3;
 }
 
 .waveform-canvas {
   width: 100%;
   height: 100%;
   display: block;
-  min-height: 80px;
 }
 
 .track-controls {

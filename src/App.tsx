@@ -75,13 +75,18 @@ function App() {
     const height = canvas.height
     const data = buffer.getChannelData(0)
     const step = Math.ceil(data.length / width)
-    const amp = height / 2
+    
+    const topPadding = 48
+    const bottomPadding = 16
+    const waveformHeight = height - topPadding - bottomPadding
+    const amp = waveformHeight / 2
+    const centerY = topPadding + waveformHeight / 2
 
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(0, 0, width, height)
 
     ctx.strokeStyle = '#0a5'
-    ctx.lineWidth = 1
+    ctx.lineWidth = 1.5
     ctx.beginPath()
 
     for (let i = 0; i < width; i++) {
@@ -94,8 +99,8 @@ function App() {
         if (datum > max) max = datum
       }
       
-      const yMin = (1 + min) * amp
-      const yMax = (1 + max) * amp
+      const yMin = centerY + (min * amp)
+      const yMax = centerY + (max * amp)
       
       if (i === 0) {
         ctx.moveTo(i, yMin)

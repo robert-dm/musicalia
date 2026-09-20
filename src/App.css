@@ -83,9 +83,7 @@
 .track-header {
   display: flex;
   flex-direction: column;
-  width: 180px;
   background: #242424;
-  border-right: 1px solid #333;
   padding: 8px;
   flex-shrink: 0;
   height: 88px;
@@ -97,6 +95,24 @@
   color: #ccc;
   margin-bottom: 8px;
   font-weight: 500;
+}
+
+.resize-handle {
+  width: 4px;
+  background: #333;
+  cursor: col-resize;
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.2s;
+  height: 88px;
+}
+
+.resize-handle:hover {
+  background: #0a5;
+}
+
+.resize-handle:active {
+  background: #0c7;
 }
 
 .track-content {
@@ -251,4 +267,15 @@
 
 .volume-slider::-moz-range-thumb:hover {
   background: #0c7;
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #ff4444;
+  pointer-events: none;
+  z-index: 10;
+  box-shadow: 0 0 4px rgba(255, 68, 68, 0.6);
 }

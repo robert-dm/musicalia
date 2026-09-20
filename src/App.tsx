@@ -25,6 +25,11 @@ function App() {
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([])
+  const [sidebarWidth, setSidebarWidth] = useState(220)
+  const [isResizing, setIsResizing] = useState(false)
+  const [playheadPositions, setPlayheadPositions] = useState<number[]>(Array(8).fill(0))
+  const animationFrameRef = useRef<number>()
+  const playbackStartTimeRef = useRef<number>(0)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
     Array.from({ length: 8 }, () => ({
       mute: false,
@@ -66,6 +71,65 @@ function App() {
       gainNode.gain.value = gain
     })
   }, [trackStates])
+
+  useEffect(() => {
+    const updatePlayhead = () => {
+      if (!isPlaying) return
+      
+      const newPositions = trackStates.map((trackState) => {
+        if (!trackState.clip || !trackState.clip.isPlaying) return 0
+        
+        const buffer = trackState.clip.buffer
+        if (!buffer) return 0
+        
+        const duration = buffer.duration
+        const elapsed = Tone.now() - playbackStartTimeRef.current
+        const progress = duration > 0 ? (elapsed % duration) / duration : 0
+        
+        return Math.min(1, Math.max(0, progress))
+      })
+      
+      setPlayheadPositions(newPositions)
+      animationFrameRef.current = requestAnimationFrame(updatePlayhead)
+    }
+    
+    if (isPlaying) {
+      playbackStartTimeRef.current = Tone.now()
+      updatePlayhead()
+    } else {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+      setPlayheadPositions(Array(8).fill(0))
+    }
+    
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+    }
+  }, [isPlaying, trackStates])
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return
+      const newWidth = Math.min(400, Math.max(150, e.clientX))
+      setSidebarWidth(newWidth)
+    }
+    
+    const handleMouseUp = () => {
+      setIsResizing(false)
+    }
+    
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove)
+        document.removeEventListener('mouseup', handleMouseUp)
+      }
+    }
+  }, [isResizing])
 
   const drawWaveform = (canvas: HTMLCanvasElement, buffer: AudioBuffer) => {
     const ctx = canvas.getContext('2d')
@@ -117,6 +181,15 @@ function App() {
     await ensureAudio()
     Tone.getTransport().bpm.value = bpm
     Tone.getTransport().start()
+    
+    setTrackStates(prev => prev.map(track => {
+      if (track.clip && !track.clip.isPlaying) {
+        track.clip.player.start()
+        track.clip.isPlaying = true
+      }
+      return { ...track }
+    }))
+    
     setIsPlaying(true)
   }
 
@@ -281,7 +354,7 @@ function App() {
       <div className="arrangement-view">
         {trackStates.map((trackState, trackIndex) => (
           <div key={trackIndex} className="track-lane">
-            <div className="track-header">
+            <div className="track-header" style={{ width: `${sidebarWidth}px` }}>
               <div className="track-name">Track {trackIndex + 1}</div>
               <div className="track-controls">
                 <button
@@ -311,6 +384,11 @@ function App() {
               </div>
             </div>
             <div 
+              className="resize-handle"
+              onMouseDown={() => setIsResizing(true)}
+              title="Drag to resize"
+            />
+            <div 
               className={`track-content ${trackState.clip ? 'has-clip' : ''} ${trackState.clip?.isPlaying ? 'playing' : ''}`}
               onClick={() => handleLaneClick(trackIndex)}
             >
@@ -330,6 +408,12 @@ function App() {
                     }}
                     className="waveform-canvas"
                   />
+                  {isPlaying && trackState.clip.isPlaying && (
+                    <div 
+                      className="playhead"
+                      style={{ left: `${playheadPositions[trackIndex] * 100}%` }}
+                    />
+                  )}
                 </div>
               ) : (
                 <div className="empty-lane">

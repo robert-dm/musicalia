@@ -66,126 +66,101 @@
   border-color: #666;
 }
 
-.session-view {
+.arrangement-view {
   flex: 1;
-  padding: 24px;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
+  background: #1a1a1a;
 }
 
-.session-grid {
-  display: grid;
-  grid-template-columns: 80px repeat(4, 1fr) 180px;
-  gap: 8px;
-  max-width: 1400px;
-  grid-auto-rows: auto;
-}
-
-.scene-header {
+.track-lane {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  border-bottom: 1px solid #2a2a2a;
+  min-height: 80px;
+}
+
+.track-header {
+  display: flex;
+  flex-direction: column;
+  width: 180px;
+  background: #242424;
+  border-right: 1px solid #333;
   padding: 8px;
-  background: #242424;
-  border: 1px solid #333;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #999;
-  font-weight: 500;
+  flex-shrink: 0;
 }
 
-.track-label {
-  display: flex;
-  align-items: center;
-  padding: 8px 12px;
-  background: #242424;
-  border: 1px solid #333;
-  border-radius: 4px;
+.track-name {
   font-size: 13px;
   color: #ccc;
+  margin-bottom: 8px;
+  font-weight: 500;
 }
 
-.clip-cell {
-  aspect-ratio: 2 / 1;
-  background: #2a2a2a;
-  border: 1px solid #333;
-  border-radius: 4px;
+.track-content {
+  flex: 1;
+  background: #1e1e1e;
   cursor: pointer;
-  transition: border-color 0.2s, background 0.2s;
+  position: relative;
+  transition: background 0.2s;
+  min-height: 80px;
+}
+
+.track-content:hover {
+  background: #222;
+}
+
+.track-content.has-clip {
+  background: #252525;
+  cursor: pointer;
+}
+
+.track-content.playing {
+  background: #1a3a2a;
+}
+
+.empty-lane {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 8px;
+  height: 100%;
+  min-height: 80px;
 }
 
-.clip-cell:hover {
-  border-color: #555;
+.import-hint {
+  font-size: 12px;
+  color: #666;
+  user-select: none;
 }
 
-.clip-cell.clip-filled {
-  background: #3a4a5a;
-  border-color: #4a6a8a;
+.clip-region {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
-.clip-cell.clip-filled:hover {
-  background: #4a5a6a;
-  border-color: #5a7a9a;
+.clip-info {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  z-index: 2;
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 3px;
 }
 
-.clip-cell.clip-playing {
-  background: #0a5;
-  border-color: #0c7;
-}
-
-.clip-name {
+.clip-filename {
   font-size: 11px;
-  color: #e0e0e0;
-  text-align: center;
-  word-break: break-word;
-  line-height: 1.3;
-}
-
-.corner-spacer {
-  background: transparent;
-  border: none;
-}
-
-.scene-launch-button {
-  padding: 12px;
-  background: #2a2a2a;
-  border: 1px solid #444;
-  color: #999;
-  cursor: pointer;
-  border-radius: 4px;
-  font-size: 16px;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.scene-launch-button:hover {
-  background: #333;
-  border-color: #555;
   color: #ccc;
 }
 
-.scene-launch-button.active {
-  background: #0a5;
-  border-color: #0c7;
-  color: #fff;
-}
-
-.controls-header {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 8px;
-  background: #242424;
-  border: 1px solid #333;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #999;
-  font-weight: 500;
+.waveform-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  min-height: 80px;
 }
 
 .track-controls {

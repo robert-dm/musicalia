@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import * as Tone from 'tone'
 import './App.css'
 
@@ -10,6 +10,13 @@ interface Clip {
 
 type ClipGrid = Map<string, Clip>
 
+interface TrackState {
+  mute: boolean
+  solo: boolean
+  volume: number
+  gainNode: Tone.Gain
+}
+
 function App() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [bpm, setBpm] = useState(120)
@@ -17,6 +24,30 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedCell, setSelectedCell] = useState<{ track: number; scene: number } | null>(null)
   const [activeScene, setActiveScene] = useState<number | null>(null)
+  const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
+    Array.from({ length: 8 }, () => ({
+      mute: false,
+      solo: false,
+      volume: 0.8,
+      gainNode: new Tone.Gain(0.8).toDestination()
+    }))
+  )
+
+  useEffect(() => {
+    const anySolo = trackStates.some(ts => ts.solo)
+    
+    trackStates.forEach((trackState) => {
+      let gain = trackState.volume
+      
+      if (trackState.mute) {
+        gain = 0
+      } else if (anySolo && !trackState.solo) {
+        gain = 0
+      }
+      
+      trackState.gainNode.gain.value = gain
+    })
+  }, [trackStates])
 
   const handlePlay = async () => {
     await Tone.start()
@@ -75,7 +106,8 @@ function App() {
     }
 
     const url = URL.createObjectURL(file)
-    const player = new Tone.Player(url).toDestination()
+    const trackGain = trackStates[selectedCell.track].gainNode
+    const player = new Tone.Player(url).connect(trackGain)
     player.loop = true
 
     await Tone.loaded()
@@ -121,6 +153,39 @@ function App() {
     
     setClips(updatedClips)
     setActiveScene(sceneIndex)
+  }
+
+  const handleMuteToggle = (trackIndex: number) => {
+    setTrackStates(prev => {
+      const newStates = [...prev]
+      newStates[trackIndex] = {
+        ...newStates[trackIndex],
+        mute: !newStates[trackIndex].mute
+      }
+      return newStates
+    })
+  }
+
+  const handleSoloToggle = (trackIndex: number) => {
+    setTrackStates(prev => {
+      const newStates = [...prev]
+      newStates[trackIndex] = {
+        ...newStates[trackIndex],
+        solo: !newStates[trackIndex].solo
+      }
+      return newStates
+    })
+  }
+
+  const handleVolumeChange = (trackIndex: number, volume: number) => {
+    setTrackStates(prev => {
+      const newStates = [...prev]
+      newStates[trackIndex] = {
+        ...newStates[trackIndex],
+        volume
+      }
+      return newStates
+    })
   }
 
   const tracks = Array.from({ length: 8 }, (_, i) => `Track ${i + 1}`)
@@ -174,6 +239,7 @@ function App() {
               {scene}
             </div>
           ))}
+          <div className="controls-header">Controls</div>
           
           <div className="corner-spacer"></div>
           {scenes.map((_, sceneIndex) => (
@@ -185,6 +251,7 @@ function App() {
               ▶
             </button>
           ))}
+          <div className="corner-spacer"></div>
           
           {tracks.map((track, trackIndex) => (
             <>
@@ -211,6 +278,32 @@ function App() {
                   </div>
                 )
               })}
+              <div key={`controls-${trackIndex}`} className="track-controls">
+                <button
+                  className={`control-button mute-button ${trackStates[trackIndex].mute ? 'active' : ''}`}
+                  onClick={() => handleMuteToggle(trackIndex)}
+                  title="Mute"
+                >
+                  M
+                </button>
+                <button
+                  className={`control-button solo-button ${trackStates[trackIndex].solo ? 'active' : ''}`}
+                  onClick={() => handleSoloToggle(trackIndex)}
+                  title="Solo"
+                >
+                  S
+                </button>
+                <input
+                  type="range"
+                  className="volume-slider"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={trackStates[trackIndex].volume}
+                  onChange={(e) => handleVolumeChange(trackIndex, parseFloat(e.target.value))}
+                  title={`Volume: ${Math.round(trackStates[trackIndex].volume * 100)}%`}
+                />
+              </div>
             </>
           ))}
         </div>

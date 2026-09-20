@@ -14,7 +14,6 @@ interface TrackState {
   mute: boolean
   solo: boolean
   volume: number
-  gainNode: Tone.Gain
 }
 
 function App() {
@@ -24,19 +23,30 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedCell, setSelectedCell] = useState<{ track: number; scene: number } | null>(null)
   const [activeScene, setActiveScene] = useState<number | null>(null)
+  const trackGainsRef = useRef<Tone.Gain[]>([])
   const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
     Array.from({ length: 8 }, () => ({
       mute: false,
       solo: false,
-      volume: 0.8,
-      gainNode: new Tone.Gain(0.8).toDestination()
+      volume: 0.8
     }))
   )
 
   useEffect(() => {
+    if (trackGainsRef.current.length === 0) {
+      trackGainsRef.current = Array.from({ length: 8 }, () => 
+        new Tone.Gain(0.8).toDestination()
+      )
+    }
+  }, [])
+
+  useEffect(() => {
     const anySolo = trackStates.some(ts => ts.solo)
     
-    trackStates.forEach((trackState) => {
+    trackStates.forEach((trackState, index) => {
+      const gainNode = trackGainsRef.current[index]
+      if (!gainNode) return
+      
       let gain = trackState.volume
       
       if (trackState.mute) {
@@ -45,7 +55,7 @@ function App() {
         gain = 0
       }
       
-      trackState.gainNode.gain.value = gain
+      gainNode.gain.value = gain
     })
   }, [trackStates])
 
@@ -106,7 +116,7 @@ function App() {
     }
 
     const url = URL.createObjectURL(file)
-    const trackGain = trackStates[selectedCell.track].gainNode
+    const trackGain = trackGainsRef.current[selectedCell.track]
     const player = new Tone.Player(url).connect(trackGain)
     player.loop = true
 

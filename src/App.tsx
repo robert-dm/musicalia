@@ -113,20 +113,27 @@ function App() {
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizing) return
-      const newWidth = Math.min(400, Math.max(150, e.clientX))
+      e.preventDefault()
+      const newWidth = Math.min(420, Math.max(160, e.clientX))
       setSidebarWidth(newWidth)
     }
     
     const handleMouseUp = () => {
       setIsResizing(false)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
     }
     
     if (isResizing) {
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
       document.addEventListener('mousemove', handleMouseMove)
       document.addEventListener('mouseup', handleMouseUp)
       return () => {
         document.removeEventListener('mousemove', handleMouseMove)
         document.removeEventListener('mouseup', handleMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
       }
     }
   }, [isResizing])
@@ -352,9 +359,9 @@ function App() {
       </div>
 
       <div className="arrangement-view">
-        {trackStates.map((trackState, trackIndex) => (
-          <div key={trackIndex} className="track-lane">
-            <div className="track-header" style={{ width: `${sidebarWidth}px` }}>
+        <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
+          {trackStates.map((trackState, trackIndex) => (
+            <div key={trackIndex} className="track-header">
               <div className="track-name">Track {trackIndex + 1}</div>
               <div className="track-controls">
                 <button
@@ -383,12 +390,17 @@ function App() {
                 />
               </div>
             </div>
+          ))}
+        </div>
+        <div 
+          className="resize-handle"
+          onMouseDown={() => setIsResizing(true)}
+          title="Drag to resize sidebar"
+        />
+        <div className="lanes-column">
+          {trackStates.map((trackState, trackIndex) => (
             <div 
-              className="resize-handle"
-              onMouseDown={() => setIsResizing(true)}
-              title="Drag to resize"
-            />
-            <div 
+              key={trackIndex}
               className={`track-content ${trackState.clip ? 'has-clip' : ''} ${trackState.clip?.isPlaying ? 'playing' : ''}`}
               onClick={() => handleLaneClick(trackIndex)}
             >
@@ -421,8 +433,8 @@ function App() {
                 </div>
               )}
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   )

@@ -49,6 +49,7 @@ async function initializeRuntime(): Promise<void> {
 
 /**
  * Load or retrieve cached Demucs model
+ * Uses direct URL loading to avoid memory spikes from buffering entire model
  */
 async function loadDemucsModel(
   onProgress?: (progress: StemSeparationProgress) => void
@@ -57,79 +58,43 @@ async function loadDemucsModel(
     return cachedSession
   }
 
-  onProgress?.({ progress: 5, stage: 'Descargando modelo Demucs...' })
+  onProgress?.({ progress: 10, stage: 'Cargando modelo Demucs...' })
 
   try {
-    // Load model with progress tracking
-    const response = await fetch(DEMUCS_MODEL_URL)
-    if (!response.ok) {
-      throw new Error(`Error al descargar modelo: ${response.status} ${response.statusText}`)
-    }
-
-    const totalBytes = parseInt(response.headers.get('content-length') || '0')
-    const reader = response.body?.getReader()
+    // Load model directly from URL instead of pre-fetching into ArrayBuffer
+    // This allows ONNX Runtime to manage memory efficiently without holding
+    // a duplicate copy of the model in JavaScript memory
+    console.log('Loading ONNX model directly from URL to minimize memory usage...')
     
-    if (!reader) {
-      throw new Error('No se pudo leer el flujo del modelo')
-    }
-
-    const chunks: Uint8Array[] = []
-    let receivedBytes = 0
-
-    while (true) {
-      const { done, value } = await reader.read()
-      
-      if (done) break
-      
-      chunks.push(value)
-      receivedBytes += value.length
-      
-      if (totalBytes > 0) {
-        const downloadProgress = Math.min(15, 5 + (receivedBytes / totalBytes) * 10)
-        onProgress?.({ 
-          progress: downloadProgress, 
-          stage: `Descargando modelo: ${Math.round(receivedBytes / 1024 / 1024)}MB` 
-        })
-      }
-    }
-
-    // Combine chunks
-    const modelBuffer = new Uint8Array(receivedBytes)
-    let offset = 0
-    for (const chunk of chunks) {
-      modelBuffer.set(chunk, offset)
-      offset += chunk.length
-    }
-
-    onProgress?.({ progress: 20, stage: 'Inicializando modelo...' })
-
-    // Create session with WASM backend
-    // Using WASM-only to avoid any state poisoning from failed WebGPU attempts
-    // WebGPU can be added later if needed, but WASM is more reliable
-    try {
-      console.log('Creating ONNX session with WASM backend...')
-      const session = await ort.InferenceSession.create(modelBuffer.buffer, {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all',
-        enableCpuMemArena: true,
-        enableMemPattern: true,
-      })
-      console.log('Session created successfully with WASM backend')
-      
-      cachedSession = session
-      return session
-    } catch (error) {
-      console.error('Failed to create ONNX session:', error)
-      throw new Error(`No se pudo inicializar el modelo: ${error instanceof Error ? error.message : 'Error desconocido'}. Verifica que tu navegador soporte WebAssembly.`)
-    }
+    const session = await ort.InferenceSession.create(DEMUCS_MODEL_URL, {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'all',
+      enableCpuMemArena: true,
+      enableMemPattern: true,
+    })
+    
+    console.log('Session created successfully with WASM backend')
+    
+    cachedSession = session
+    return session
   } catch (error) {
     console.error('Failed to load Demucs model:', error)
-    if (error instanceof Error && error.message.includes('descargar')) {
-      throw new Error(`Error al descargar el modelo: ${error.message}. Verifica tu conexión a internet.`)
+    
+    // Provide accurate error messaging
+    const errorMsg = error instanceof Error ? error.message : String(error)
+    
+    if (errorMsg.includes('bad_alloc') || errorMsg.includes('memory')) {
+      throw new Error('Memoria insuficiente para cargar el modelo. Intenta cerrar otras pestañas o usar un navegador con más memoria disponible.')
     }
+    
+    if (errorMsg.includes('fetch') || errorMsg.includes('network') || errorMsg.includes('load')) {
+      throw new Error(`Error al descargar el modelo: ${errorMsg}. Verifica tu conexión a internet.`)
+    }
+    
     if (error instanceof Error) {
-      throw error
+      throw new Error(`No se pudo cargar el modelo: ${errorMsg}`)
     }
+    
     throw new Error('No se pudo cargar el modelo de separación. Intenta recargar la página.')
   }
 }
@@ -283,10 +248,10 @@ export async function separateStems(
     
     onProgress?.({ progress: 5, stage: 'Inicializando...' })
     
-    // Load Demucs model
+    // Load Demucs model (this will download ~80MB from CDN)
     const session = await loadDemucsModel(onProgress)
     
-    onProgress?.({ progress: 25, stage: 'Preparando audio...' })
+    onProgress?.({ progress: 20, stage: 'Preparando audio...' })
     
     // Check if audio is too long and needs chunking
     const maxDuration = MAX_CHUNK_SIZE / SAMPLE_RATE // ~60 seconds

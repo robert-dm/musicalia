@@ -40,10 +40,53 @@
   border-color: #0a5;
 }
 
+.time-display {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #2a2a2a;
+  border-radius: 4px;
+  border: 1px solid #444;
+}
+
+.time-label {
+  font-size: 12px;
+  color: #999;
+}
+
+.time-value {
+  font-size: 14px;
+  color: #0a5;
+  font-family: monospace;
+  font-weight: 600;
+}
+
+.loop-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #3a2a1a;
+  border-radius: 4px;
+  border: 1px solid #664;
+}
+
+.loop-label {
+  font-size: 12px;
+  color: #fa8;
+}
+
+.clear-loop {
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+}
+
 .bpm-control {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
 }
 
 .bpm-label {
@@ -149,11 +192,19 @@
   padding: 4px 8px;
   background: rgba(0, 0, 0, 0.6);
   border-radius: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .clip-filename {
   font-size: 11px;
   color: #ccc;
+}
+
+.clip-hint {
+  font-size: 9px;
+  color: #888;
 }
 
 .waveform-canvas {
@@ -275,6 +326,42 @@
   bottom: 0;
   width: 2px;
   background: #f44;
-  pointer-events: none;
+  pointer-events: auto;
   z-index: 10;
+  cursor: ew-resize;
+}
+
+.playhead:hover {
+  width: 3px;
+  background: #f66;
+}
+
+.loop-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.loop-marker.loop-start {
+  background: #fa8;
+  box-shadow: 2px 0 4px rgba(255, 170, 136, 0.5);
+}
+
+.loop-marker.loop-end {
+  background: #fa8;
+  box-shadow: -2px 0 4px rgba(255, 170, 136, 0.5);
+}
+
+.loop-region {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 170, 136, 0.15);
+  pointer-events: none;
+  z-index: 4;
+  border-left: 2px solid #fa8;
+  border-right: 2px solid #fa8;
 }

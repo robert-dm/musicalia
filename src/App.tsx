@@ -26,8 +26,8 @@ function App() {
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([])
-  const [sidebarWidth, setSidebarWidth] = useState(180)
-  const [isDraggingResize, setIsDraggingResize] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(220)
+  const [isResizing, setIsResizing] = useState(false)
   const [playheadPosition, setPlayheadPosition] = useState(0)
   const playheadAnimationRef = useRef<number | null>(null)
   const [loopStart, setLoopStart] = useState<number | null>(null)
@@ -99,13 +99,18 @@ function App() {
     const height = canvas.height
     const data = buffer.getChannelData(0)
     const step = Math.ceil(data.length / width)
-    const amp = height / 2
+    
+    const topPadding = 48
+    const bottomPadding = 16
+    const waveformHeight = height - topPadding - bottomPadding
+    const amp = waveformHeight / 2
+    const centerY = topPadding + waveformHeight / 2
 
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(0, 0, width, height)
 
     ctx.strokeStyle = '#0a5'
-    ctx.lineWidth = 1
+    ctx.lineWidth = 1.5
     ctx.beginPath()
 
     for (let i = 0; i < width; i++) {
@@ -118,8 +123,8 @@ function App() {
         if (datum > max) max = datum
       }
       
-      const yMin = (1 + min) * amp
-      const yMax = (1 + max) * amp
+      const yMin = centerY + (min * amp)
+      const yMax = centerY + (max * amp)
       
       if (i === 0) {
         ctx.moveTo(i, yMin)
@@ -338,11 +343,6 @@ function App() {
     })
   }
 
-  const handleResizeMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault()
-    setIsDraggingResize(true)
-  }
-
   const handlePlayheadMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation()
     setIsDraggingPlayhead(true)
@@ -409,29 +409,32 @@ function App() {
   }
 
   useEffect(() => {
-    if (!isDraggingResize) return
-
     const handleMouseMove = (e: MouseEvent) => {
-      const newWidth = Math.max(160, Math.min(420, e.clientX))
+      if (!isResizing) return
+      e.preventDefault()
+      const newWidth = Math.min(420, Math.max(160, e.clientX))
       setSidebarWidth(newWidth)
     }
-
+    
     const handleMouseUp = () => {
-      setIsDraggingResize(false)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'col-resize'
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.body.style.userSelect = ''
+      setIsResizing(false)
       document.body.style.cursor = ''
+      document.body.style.userSelect = ''
     }
-  }, [isDraggingResize])
+    
+    if (isResizing) {
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove)
+        document.removeEventListener('mouseup', handleMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+    }
+  }, [isResizing])
 
   useEffect(() => {
     if (!isDraggingPlayhead) return
@@ -527,9 +530,9 @@ function App() {
       </div>
 
       <div className="arrangement-view">
-        {trackStates.map((trackState, trackIndex) => (
-          <div key={trackIndex} className="track-lane">
-            <div className="track-header" style={{ width: `${sidebarWidth}px` }}>
+        <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
+          {trackStates.map((trackState, trackIndex) => (
+            <div key={trackIndex} className="track-header">
               <div className="track-name">Track {trackIndex + 1}</div>
               <div className="track-controls">
                 <button
@@ -558,11 +561,17 @@ function App() {
                 />
               </div>
             </div>
+          ))}
+        </div>
+        <div 
+          className="resize-handle"
+          onMouseDown={() => setIsResizing(true)}
+          title="Drag to resize sidebar"
+        />
+        <div className="lanes-column">
+          {trackStates.map((trackState, trackIndex) => (
             <div 
-              className="resize-handle"
-              onMouseDown={handleResizeMouseDown}
-            />
-            <div 
+              key={trackIndex}
               className={`track-content ${trackState.clip ? 'has-clip' : ''} ${trackState.clip?.isPlaying ? 'playing' : ''}`}
               onClick={(e) => handleWaveformClick(e, trackIndex)}
             >
@@ -624,8 +633,8 @@ function App() {
                 </div>
               )}
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   )

@@ -1,8 +1,9 @@
 /**
- * Browser-local stem separation using real Demucs (HTDemucs) via ONNX Runtime Web
+ * Browser-local stem separation using Spleeter ONNX models
  * 
  * This implementation uses actual ML-based source separation to produce distinct stems.
- * Models are loaded from Hugging Face or a CDN and run with WebGPU acceleration when available.
+ * Uses smaller Spleeter fp16 models (~20MB each) loaded sequentially to fit in WASM memory.
+ * Models are from Hugging Face Best-Practice/spleeter-4stems-onnx
  */
 
 import * as ort from 'onnxruntime-web'
@@ -19,17 +20,19 @@ export interface StemSeparationProgress {
   stage: string
 }
 
-// Model configuration for HTDemucs
-// Using StemSplitio public model (4-stem, fp16, ~80MB)
-// Source: https://huggingface.co/StemSplitio/htdemucs-onnx
-// Input: 'mix' tensor [1, 2, samples] float32
-// Output: 'stems' tensor [1, 4, 2, samples] - order: drums, bass, other, vocals
-const DEMUCS_MODEL_URL = 'https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx'
+// Spleeter 4-stem ONNX models (fp16, ~20MB each)
+// Source: https://huggingface.co/Best-Practice/spleeter-4stems-onnx
+// Each model processes the mix and outputs one stem
+const SPLEETER_BASE_URL = 'https://huggingface.co/Best-Practice/spleeter-4stems-onnx/resolve/main'
+const SPLEETER_MODELS = {
+  vocals: `${SPLEETER_BASE_URL}/vocals.fp16.onnx`,
+  drums: `${SPLEETER_BASE_URL}/drums.fp16.onnx`,
+  bass: `${SPLEETER_BASE_URL}/bass.fp16.onnx`,
+  other: `${SPLEETER_BASE_URL}/other.fp16.onnx`,
+}
 
 const SAMPLE_RATE = 44100
 const MAX_CHUNK_SIZE = 44100 * 60 // 60 seconds per chunk to manage memory
-
-let cachedSession: ort.InferenceSession | null = null
 
 /**
  * Initialize ONNX Runtime Web with appropriate backend
@@ -44,63 +47,102 @@ async function initializeRuntime(): Promise<void> {
   ort.env.wasm.numThreads = 1
   ort.env.wasm.simd = true
   
-  console.log('ONNX Runtime configured with CDN WASM backend')
+  console.log('ONNX Runtime configured with CDN WASM backend for Spleeter')
 }
 
 /**
- * Load or retrieve cached Demucs model
- * Uses direct URL loading to avoid memory spikes from buffering entire model
+ * Load and run a single Spleeter model for one stem
+ * Models are loaded one at a time and disposed immediately to minimize memory
  */
-async function loadDemucsModel(
+async function processSingleStem(
+  stemName: 'vocals' | 'drums' | 'bass' | 'other',
+  audioTensor: ort.Tensor,
   onProgress?: (progress: StemSeparationProgress) => void
-): Promise<ort.InferenceSession> {
-  if (cachedSession) {
-    return cachedSession
-  }
-
-  onProgress?.({ progress: 10, stage: 'Cargando modelo Demucs...' })
-
+): Promise<Float32Array> {
+  const modelUrl = SPLEETER_MODELS[stemName]
+  
   try {
-    // Load model directly from URL instead of pre-fetching into ArrayBuffer
-    // This allows ONNX Runtime to manage memory efficiently without holding
-    // a duplicate copy of the model in JavaScript memory
-    console.log('Loading ONNX model directly from URL to minimize memory usage...')
+    // Load model for this stem only
+    console.log(`Loading ${stemName} model (~20MB)...`)
+    onProgress?.({ 
+      progress: 0, 
+      stage: `Cargando modelo ${stemName}...` 
+    })
     
-    const session = await ort.InferenceSession.create(DEMUCS_MODEL_URL, {
+    const session = await ort.InferenceSession.create(modelUrl, {
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'all',
       enableCpuMemArena: true,
       enableMemPattern: true,
     })
     
-    console.log('Session created successfully with WASM backend')
+    console.log(`${stemName} model loaded, running inference...`)
+    onProgress?.({ 
+      progress: 0, 
+      stage: `Procesando ${stemName}...` 
+    })
     
-    cachedSession = session
-    return session
+    // Run inference
+    // Spleeter input: 'input' tensor [batch, samples, channels] float32
+    // Spleeter output: 'output' tensor [batch, samples, channels] float32
+    const feeds = { input: audioTensor }
+    const results = await session.run(feeds)
+    
+    const output = results.output
+    if (!output) {
+      throw new Error(`No output from ${stemName} model`)
+    }
+    
+    const outputData = output.data as Float32Array
+    const dims = output.dims as number[]
+    
+    console.log(`${stemName} output dims:`, dims)
+    
+    // Extract audio data (average stereo to mono)
+    // Output shape: [batch=1, samples, channels=2]
+    const [, samples, channels] = dims
+    const monoData = new Float32Array(samples)
+    
+    if (channels === 2) {
+      // Average stereo channels
+      for (let i = 0; i < samples; i++) {
+        const left = outputData[i * 2]
+        const right = outputData[i * 2 + 1]
+        monoData[i] = (left + right) / 2
+      }
+    } else {
+      // Already mono or unexpected format - copy as-is
+      for (let i = 0; i < samples; i++) {
+        monoData[i] = outputData[i]
+      }
+    }
+    
+    // Dispose session immediately to free memory
+    console.log(`${stemName} complete, disposing session...`)
+    session.release()
+    
+    return monoData
+    
   } catch (error) {
-    console.error('Failed to load Demucs model:', error)
+    console.error(`Failed to process ${stemName}:`, error)
     
-    // Provide accurate error messaging
     const errorMsg = error instanceof Error ? error.message : String(error)
     
     if (errorMsg.includes('bad_alloc') || errorMsg.includes('memory')) {
-      throw new Error('Memoria insuficiente para cargar el modelo. Intenta cerrar otras pestañas o usar un navegador con más memoria disponible.')
+      throw new Error(`Memoria insuficiente para procesar ${stemName}. Intenta cerrar otras pestañas o usar un navegador con más memoria disponible.`)
     }
     
     if (errorMsg.includes('fetch') || errorMsg.includes('network') || errorMsg.includes('load')) {
-      throw new Error(`Error al descargar el modelo: ${errorMsg}. Verifica tu conexión a internet.`)
+      throw new Error(`Error al descargar modelo de ${stemName}: ${errorMsg}. Verifica tu conexión a internet.`)
     }
     
-    if (error instanceof Error) {
-      throw new Error(`No se pudo cargar el modelo: ${errorMsg}`)
-    }
-    
-    throw new Error('No se pudo cargar el modelo de separación. Intenta recargar la página.')
+    throw new Error(`Error al procesar ${stemName}: ${errorMsg}`)
   }
 }
 
 /**
- * Prepare audio for Demucs inference
+ * Prepare audio for Spleeter inference
+ * Spleeter expects: [batch=1, samples, channels=2] float32
  */
 function prepareAudioTensor(audioBuffer: AudioBuffer): ort.Tensor {
   const channels = audioBuffer.numberOfChannels
@@ -110,104 +152,16 @@ function prepareAudioTensor(audioBuffer: AudioBuffer): ort.Tensor {
   const leftChannel = audioBuffer.getChannelData(0)
   const rightChannel = channels > 1 ? audioBuffer.getChannelData(1) : leftChannel
   
-  // Create tensor in format [batch=1, channels=2, samples]
-  const tensorData = new Float32Array(2 * samples)
+  // Create tensor in format [batch=1, samples, channels=2]
+  // Interleaved: [L0, R0, L1, R1, L2, R2, ...]
+  const tensorData = new Float32Array(samples * 2)
   
   for (let i = 0; i < samples; i++) {
-    tensorData[i] = leftChannel[i]
-    tensorData[samples + i] = rightChannel[i]
+    tensorData[i * 2] = leftChannel[i]      // Left
+    tensorData[i * 2 + 1] = rightChannel[i]  // Right
   }
   
-  return new ort.Tensor('float32', tensorData, [1, 2, samples])
-}
-
-/**
- * Run Demucs inference to separate stems
- */
-async function runDemucsInference(
-  session: ort.InferenceSession,
-  audioTensor: ort.Tensor,
-  onProgress?: (progress: StemSeparationProgress) => void
-): Promise<{ vocals: Float32Array, drums: Float32Array, bass: Float32Array, other: Float32Array }> {
-  
-  onProgress?.({ progress: 30, stage: 'Ejecutando modelo de separación...' })
-
-  try {
-    // Run inference with correct input name for StemSplitio model
-    const feeds = { mix: audioTensor }  // Input tensor name is 'mix'
-    const results = await session.run(feeds)
-    
-    // Extract stems from output
-    // StemSplitio model output: 'stems' tensor [1, 4, 2, samples]
-    // Stem order: drums, bass, other, vocals
-    const output = results.stems
-    
-    if (!output) {
-      throw new Error('No stems output from model')
-    }
-    
-    const outputData = output.data as Float32Array
-    const dims = output.dims as number[]
-    
-    // Expected shape: [batch=1, stems=4, channels=2, samples]
-    if (dims.length !== 4) {
-      throw new Error(`Unexpected output dimensions: ${dims.length}`)
-    }
-    
-    const [, numStems, channels, samples] = dims
-    
-    if (numStems !== 4) {
-      throw new Error(`Expected 4 stems, got ${numStems}`)
-    }
-    
-    if (channels !== 2) {
-      throw new Error(`Expected stereo (2 channels), got ${channels}`)
-    }
-    
-    onProgress?.({ progress: 60, stage: 'Extrayendo pistas...' })
-    
-    // Extract each stem (averaging stereo to mono)
-    // Output layout: [batch, stem, channel, sample]
-    // Flatten index: batch*stems*channels*samples + stem*channels*samples + channel*samples + sample
-    
-    const drums = new Float32Array(samples)
-    const bass = new Float32Array(samples)
-    const other = new Float32Array(samples)
-    const vocals = new Float32Array(samples)
-    
-    // StemSplitio order: drums (0), bass (1), other (2), vocals (3)
-    for (let i = 0; i < samples; i++) {
-      // Average left and right channels for each stem
-      const channelStride = samples
-      const stemStride = channels * samples
-      
-      // Drums (stem 0)
-      const drumsL = outputData[0 * stemStride + 0 * channelStride + i]
-      const drumsR = outputData[0 * stemStride + 1 * channelStride + i]
-      drums[i] = (drumsL + drumsR) / 2
-      
-      // Bass (stem 1)
-      const bassL = outputData[1 * stemStride + 0 * channelStride + i]
-      const bassR = outputData[1 * stemStride + 1 * channelStride + i]
-      bass[i] = (bassL + bassR) / 2
-      
-      // Other (stem 2)
-      const otherL = outputData[2 * stemStride + 0 * channelStride + i]
-      const otherR = outputData[2 * stemStride + 1 * channelStride + i]
-      other[i] = (otherL + otherR) / 2
-      
-      // Vocals (stem 3)
-      const vocalsL = outputData[3 * stemStride + 0 * channelStride + i]
-      const vocalsR = outputData[3 * stemStride + 1 * channelStride + i]
-      vocals[i] = (vocalsL + vocalsR) / 2
-    }
-    
-    return { vocals, drums, bass, other }
-    
-  } catch (error) {
-    console.error('Demucs inference failed:', error)
-    throw new Error('La separación de stems falló. Intenta con un archivo más corto.')
-  }
+  return new ort.Tensor('float32', tensorData, [1, samples, 2])
 }
 
 /**
@@ -232,7 +186,8 @@ function createStereoBuffer(
 }
 
 /**
- * Separate an audio buffer into stems (Vocals, Drums, Bass, Other) using real Demucs
+ * Separate an audio buffer into stems (Vocals, Drums, Bass, Other) using Spleeter
+ * Loads models sequentially (~20MB each) to stay within WASM memory limits
  * @param audioBuffer The input audio buffer to separate
  * @param onProgress Optional callback for progress updates
  * @returns Promise with separated stems as AudioBuffers
@@ -248,12 +203,7 @@ export async function separateStems(
     
     onProgress?.({ progress: 5, stage: 'Inicializando...' })
     
-    // Load Demucs model (this will download ~80MB from CDN)
-    const session = await loadDemucsModel(onProgress)
-    
-    onProgress?.({ progress: 20, stage: 'Preparando audio...' })
-    
-    // Check if audio is too long and needs chunking
+    // Check if audio is too long
     const maxDuration = MAX_CHUNK_SIZE / SAMPLE_RATE // ~60 seconds
     const audioDuration = audioBuffer.length / audioBuffer.sampleRate
     
@@ -261,15 +211,8 @@ export async function separateStems(
       throw new Error(`Audio demasiado largo (${Math.round(audioDuration)}s). Máximo recomendado: ${Math.round(maxDuration * 2)}s`)
     }
     
-    // Resample if needed (Demucs expects 44.1kHz)
-    let processBuffer = audioBuffer
-    if (audioBuffer.sampleRate !== SAMPLE_RATE) {
-      console.warn(`Processing at ${audioBuffer.sampleRate}Hz (model expects ${SAMPLE_RATE}Hz)`)
-      // Note: For best results, audio should be resampled to 44.1kHz
-      // Current implementation processes at original rate
-    }
-    
     // Ensure stereo (duplicate mono if needed)
+    let processBuffer = audioBuffer
     if (audioBuffer.numberOfChannels === 1) {
       console.log('Converting mono to stereo')
       const context = new AudioContext({ sampleRate: audioBuffer.sampleRate })
@@ -281,19 +224,33 @@ export async function separateStems(
       processBuffer = stereoBuffer
     }
     
-    // Prepare input tensor
+    onProgress?.({ progress: 10, stage: 'Preparando audio...' })
+    
+    // Prepare input tensor (same for all models)
     const inputTensor = prepareAudioTensor(processBuffer)
     
-    // Run inference
-    const separatedData = await runDemucsInference(session, inputTensor, onProgress)
+    // Process each stem sequentially to minimize memory usage
+    // Each model is ~20MB, loaded one at a time and disposed immediately
     
-    onProgress?.({ progress: 80, stage: 'Creando buffers de audio...' })
+    onProgress?.({ progress: 15, stage: 'Separando vocals...' })
+    const vocalsData = await processSingleStem('vocals', inputTensor, onProgress)
+    
+    onProgress?.({ progress: 35, stage: 'Separando drums...' })
+    const drumsData = await processSingleStem('drums', inputTensor, onProgress)
+    
+    onProgress?.({ progress: 55, stage: 'Separando bass...' })
+    const bassData = await processSingleStem('bass', inputTensor, onProgress)
+    
+    onProgress?.({ progress: 75, stage: 'Separando other...' })
+    const otherData = await processSingleStem('other', inputTensor, onProgress)
+    
+    onProgress?.({ progress: 90, stage: 'Creando buffers de audio...' })
     
     // Create AudioBuffers for each stem
-    const vocals = createStereoBuffer(separatedData.vocals, audioBuffer.sampleRate)
-    const drums = createStereoBuffer(separatedData.drums, audioBuffer.sampleRate)
-    const bass = createStereoBuffer(separatedData.bass, audioBuffer.sampleRate)
-    const other = createStereoBuffer(separatedData.other, audioBuffer.sampleRate)
+    const vocals = createStereoBuffer(vocalsData, audioBuffer.sampleRate)
+    const drums = createStereoBuffer(drumsData, audioBuffer.sampleRate)
+    const bass = createStereoBuffer(bassData, audioBuffer.sampleRate)
+    const other = createStereoBuffer(otherData, audioBuffer.sampleRate)
     
     onProgress?.({ progress: 100, stage: 'Completado' })
     
@@ -322,11 +279,6 @@ export function isStemSeparationSupported(): { supported: boolean, reason?: stri
     }
   }
   
-  // WebGPU is recommended but not required - WASM works as fallback
-  const hasWebGPU = 'gpu' in navigator
-  if (!hasWebGPU) {
-    console.log('WebGPU not available - using WASM backend (may be slower)')
-  }
-  
+  // WebGPU is not required for Spleeter WASM models
   return { supported: true }
 }

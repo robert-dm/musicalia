@@ -276,6 +276,20 @@ function App() {
     const file = e.target.files?.[0]
     if (!file || selectedTrack === null) return
 
+    // Check if stem separation is supported
+    const { supported, reason } = isStemSeparationSupported()
+    
+    if (!supported) {
+      console.warn('Stem separation not supported:', reason)
+      alert(`Separación de stems no disponible: ${reason}\n\nCargando como pista única.`)
+      await loadSingleTrack(file, selectedTrack)
+      setSelectedTrack(null)
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+      return
+    }
+
     // Store the file and show dialog
     pendingFileRef.current = file
     setShowStemDialog(true)
@@ -288,12 +302,23 @@ function App() {
     setIsProcessingStems(true)
     setStemProgress(0)
 
+    const file = pendingFileRef.current
+    const track = selectedTrack
+
     try {
-      await processStemSeparation(pendingFileRef.current, selectedTrack)
+      await processStemSeparation(file, track)
     } catch (error) {
       console.error('Stem separation failed:', error)
-      alert('Error al separar stems. Cargando como una sola pista.')
-      await loadSingleTrack(pendingFileRef.current, selectedTrack)
+      const errorMessage = error instanceof Error ? error.message : 'Error desconocido'
+      alert(`Error al separar stems: ${errorMessage}\n\nCargando como una sola pista.`)
+      
+      // Fall back to single track import
+      try {
+        await loadSingleTrack(file, track)
+      } catch (loadError) {
+        console.error('Failed to load single track:', loadError)
+        alert('Error al cargar el archivo de audio.')
+      }
     } finally {
       setIsProcessingStems(false)
       pendingFileRef.current = null

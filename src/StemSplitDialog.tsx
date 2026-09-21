@@ -12,12 +12,14 @@ export function StemSplitDialog({ onConfirm, onCancel }: StemSplitDialogProps) {
         <h2 className="modal-title">¿Este audio tiene varios instrumentos?</h2>
         <p className="modal-description">
           Se puede separar el audio en pistas individuales (Vocals, Drums, Bass, Other) 
-          procesándolo directamente en tu navegador.
+          usando inteligencia artificial directamente en tu navegador con Demucs.
         </p>
         <p className="modal-note">
-          <strong>Nota:</strong> La primera vez descargará un modelo de ~80MB. 
-          El proceso puede tardar unos minutos dependiendo de tu dispositivo.
-          Se recomienda usar un navegador con soporte WebGPU para mejor rendimiento.
+          <strong>Nota:</strong> La primera vez descargará el modelo Demucs (~80MB). 
+          El proceso puede tardar varios minutos dependiendo de la duración del audio.
+          <br /><br />
+          <strong>Requerimientos:</strong> Navegador moderno con WebGPU (Chrome/Edge 113+) 
+          y al menos 2GB RAM disponible.
         </p>
         <div className="modal-buttons">
           <button 

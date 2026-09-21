@@ -107,29 +107,40 @@ async function processSingleStem(
     console.log(`${stemName} output dims:`, dims)
     
     // Extract audio data (average stereo to mono)
-    // Output shape: [batch=1, samples, channels=2]
-    const [, samples, channels] = dims
-    const monoData = new Float32Array(samples)
+    // Output shape: [batch=1, channels=2, height=1, samples]
+    // Data layout: [L0, L1, ..., Ln, R0, R1, ..., Rn]
     
-    if (channels === 2) {
-      // Average stereo channels
-      for (let i = 0; i < samples; i++) {
-        const left = outputData[i * 2]
-        const right = outputData[i * 2 + 1]
-        monoData[i] = (left + right) / 2
+    if (dims.length === 4) {
+      // 4D tensor: [batch, channels, height, samples]
+      const [, channels, , samples] = dims
+      const monoData = new Float32Array(samples)
+      
+      if (channels === 2) {
+        // Average stereo channels
+        // Left channel: indices 0 to samples-1
+        // Right channel: indices samples to 2*samples-1
+        for (let i = 0; i < samples; i++) {
+          const left = outputData[i]
+          const right = outputData[samples + i]
+          monoData[i] = (left + right) / 2
+        }
+      } else if (channels === 1) {
+        // Mono output
+        for (let i = 0; i < samples; i++) {
+          monoData[i] = outputData[i]
+        }
+      } else {
+        throw new Error(`Unexpected number of channels: ${channels}`)
       }
+      
+      // Dispose session immediately to free memory
+      console.log(`${stemName} complete, disposing session...`)
+      session.release()
+      
+      return monoData
     } else {
-      // Already mono or unexpected format - copy as-is
-      for (let i = 0; i < samples; i++) {
-        monoData[i] = outputData[i]
-      }
+      throw new Error(`Unexpected output dimensions: expected 4D, got ${dims.length}D with shape ${dims}`)
     }
-    
-    // Dispose session immediately to free memory
-    console.log(`${stemName} complete, disposing session...`)
-    session.release()
-    
-    return monoData
     
   } catch (error) {
     console.error(`Failed to process ${stemName}:`, error)
@@ -150,7 +161,8 @@ async function processSingleStem(
 
 /**
  * Prepare audio for Spleeter inference
- * Spleeter expects: [batch=1, samples, channels=2] float32
+ * Spleeter ONNX models expect 4D tensor: [batch, channels, 1, samples]
+ * This treats audio as a 2D image with height=1
  */
 function prepareAudioTensor(audioBuffer: AudioBuffer): ort.Tensor {
   const channels = audioBuffer.numberOfChannels
@@ -160,16 +172,21 @@ function prepareAudioTensor(audioBuffer: AudioBuffer): ort.Tensor {
   const leftChannel = audioBuffer.getChannelData(0)
   const rightChannel = channels > 1 ? audioBuffer.getChannelData(1) : leftChannel
   
-  // Create tensor in format [batch=1, samples, channels=2]
-  // Interleaved: [L0, R0, L1, R1, L2, R2, ...]
-  const tensorData = new Float32Array(samples * 2)
+  // Create 4D tensor: [batch=1, channels=2, height=1, width=samples]
+  // Layout: [L0, L1, L2, ..., R0, R1, R2, ...]
+  const tensorData = new Float32Array(2 * samples)
   
+  // Channel 0 (left)
   for (let i = 0; i < samples; i++) {
-    tensorData[i * 2] = leftChannel[i]      // Left
-    tensorData[i * 2 + 1] = rightChannel[i]  // Right
+    tensorData[i] = leftChannel[i]
   }
   
-  return new ort.Tensor('float32', tensorData, [1, samples, 2])
+  // Channel 1 (right)
+  for (let i = 0; i < samples; i++) {
+    tensorData[samples + i] = rightChannel[i]
+  }
+  
+  return new ort.Tensor('float32', tensorData, [1, 2, 1, samples])
 }
 
 /**

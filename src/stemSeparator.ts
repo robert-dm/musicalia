@@ -40,7 +40,8 @@ const N_FFT = 4096
 const HOP_LENGTH = 1024
 const N_BINS = 1024  // Use first 1024 of 2049 bins
 const FRAMES_PER_SPLIT = 512
-const MAX_DURATION = 120 // Max 2 minutes
+const CHUNK_DURATION = 60 // Process in 60-second chunks to manage memory
+const CHUNK_OVERLAP = 2   // 2-second overlap between chunks for continuity
 
 /**
  * Initialize ONNX Runtime Web
@@ -384,7 +385,110 @@ async function applyMaskAndReconstruct(
 }
 
 /**
- * Main stem separation function
+ * Process a single audio chunk through the full pipeline
+ */
+async function processChunk(
+  audioChunk: Float32Array,
+  sampleRate: number,
+  chunkIndex: number,
+  totalChunks: number,
+  onProgress?: (progress: StemSeparationProgress) => void
+): Promise<StemSeparationResult> {
+  
+  const chunkLabel = totalChunks > 1 ? ` (parte ${chunkIndex + 1}/${totalChunks})` : ''
+  
+  // Compute STFT
+  onProgress?.({ progress: 0, stage: `Calculando STFT${chunkLabel}...` })
+  const { real, imag } = computeSTFT(audioChunk, onProgress)
+  
+  // Convert to stereo for model (duplicate mono)
+  const stereoReal = [real[0], real[0]]
+  const stereoImag = [imag[0], imag[0]]
+  
+  // Extract magnitude and create input
+  const magnitude = extractMagnitude(stereoReal, stereoImag)
+  const inputTensor = createModelInput(magnitude)
+  
+  // Process all 4 stems sequentially
+  onProgress?.({ progress: 0, stage: `Procesando vocals${chunkLabel}...` })
+  const vocalsEst = await processSingleStem('vocals', inputTensor, onProgress)
+  
+  onProgress?.({ progress: 0, stage: `Procesando drums${chunkLabel}...` })
+  const drumsEst = await processSingleStem('drums', inputTensor, onProgress)
+  
+  onProgress?.({ progress: 0, stage: `Procesando bass${chunkLabel}...` })
+  const bassEst = await processSingleStem('bass', inputTensor, onProgress)
+  
+  onProgress?.({ progress: 0, stage: `Procesando other${chunkLabel}...` })
+  const otherEst = await processSingleStem('other', inputTensor, onProgress)
+  
+  // Apply masks and reconstruct
+  const estimates = {
+    vocals: vocalsEst,
+    drums: drumsEst,
+    bass: bassEst,
+    other: otherEst
+  }
+  
+  return await applyMaskAndReconstruct(
+    stereoReal,
+    stereoImag,
+    estimates,
+    inputTensor.dims as number[],
+    sampleRate,
+    onProgress
+  )
+}
+
+/**
+ * Stitch overlapping audio buffers together
+ */
+function stitchChunks(
+  chunks: AudioBuffer[],
+  overlapSamples: number,
+  totalSamples: number,
+  sampleRate: number
+): AudioBuffer {
+  
+  const context = new AudioContext({ sampleRate })
+  const output = context.createBuffer(2, totalSamples, sampleRate)
+  
+  let position = 0
+  
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]
+    const chunkLength = chunk.length
+    
+    // Determine how much to copy from this chunk
+    const startSample = i === 0 ? 0 : overlapSamples / 2
+    const endSample = i === chunks.length - 1 ? chunkLength : chunkLength - overlapSamples / 2
+    const copyLength = endSample - startSample
+    
+    // Copy with crossfade in overlap regions
+    for (let ch = 0; ch < 2; ch++) {
+      const chunkData = chunk.getChannelData(ch)
+      const outputData = output.getChannelData(ch)
+      
+      for (let j = 0; j < copyLength; j++) {
+        const sourceIdx = startSample + j
+        const destIdx = position + j
+        
+        if (destIdx < totalSamples) {
+          // Simple copy (crossfade could be added here if needed)
+          outputData[destIdx] = chunkData[sourceIdx]
+        }
+      }
+    }
+    
+    position += copyLength
+  }
+  
+  context.close()
+  return output
+}
+
+/**
+ * Main stem separation function with chunking support
  */
 export async function separateStems(
   audioBuffer: AudioBuffer,
@@ -396,13 +500,10 @@ export async function separateStems(
     
     onProgress?.({ progress: 5, stage: 'Inicializando...' })
     
-    // Check duration
     const duration = audioBuffer.length / audioBuffer.sampleRate
-    if (duration > MAX_DURATION) {
-      throw new Error(`Audio demasiado largo (${Math.round(duration)}s). Máximo: ${MAX_DURATION}s`)
-    }
+    const sampleRate = audioBuffer.sampleRate
     
-    // Convert to mono for STFT
+    // Convert to mono
     const mono = new Float32Array(audioBuffer.length)
     const left = audioBuffer.getChannelData(0)
     const right = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : left
@@ -410,54 +511,104 @@ export async function separateStems(
       mono[i] = (left[i] + right[i]) / 2
     }
     
-    // Compute STFT
-    const { real, imag } = computeSTFT(mono, onProgress)
+    // Determine chunking strategy
+    const chunkSamples = Math.floor(CHUNK_DURATION * sampleRate)
+    const overlapSamples = Math.floor(CHUNK_OVERLAP * sampleRate)
+    const stride = chunkSamples - overlapSamples
     
-    onProgress?.({ progress: 20, stage: 'Extrayendo magnitudes...' })
+    // Check if we need chunking (process chunks if > 90 seconds to stay safe)
+    const needsChunking = duration > 90
     
-    // Convert to stereo for model (duplicate mono)
-    const stereoReal = [real[0], real[0]]
-    const stereoImag = [imag[0], imag[0]]
-    
-    // Extract magnitude and create input
-    const magnitude = extractMagnitude(stereoReal, stereoImag)
-    const inputTensor = createModelInput(magnitude)
-    
-    console.log('Input tensor shape:', inputTensor.dims)
-    
-    // Process all 4 stems sequentially
-    onProgress?.({ progress: 30, stage: 'Procesando vocals...' })
-    const vocalsEst = await processSingleStem('vocals', inputTensor, onProgress)
-    
-    onProgress?.({ progress: 45, stage: 'Procesando drums...' })
-    const drumsEst = await processSingleStem('drums', inputTensor, onProgress)
-    
-    onProgress?.({ progress: 60, stage: 'Procesando bass...' })
-    const bassEst = await processSingleStem('bass', inputTensor, onProgress)
-    
-    onProgress?.({ progress: 75, stage: 'Procesando other...' })
-    const otherEst = await processSingleStem('other', inputTensor, onProgress)
-    
-    // Apply masks and reconstruct
-    const estimates = {
-      vocals: vocalsEst,
-      drums: drumsEst,
-      bass: bassEst,
-      other: otherEst
+    if (!needsChunking) {
+      // Process entire audio at once
+      onProgress?.({ progress: 10, stage: 'Procesando audio...' })
+      
+      const { real, imag } = computeSTFT(mono, onProgress)
+      
+      onProgress?.({ progress: 20, stage: 'Extrayendo magnitudes...' })
+      
+      const stereoReal = [real[0], real[0]]
+      const stereoImag = [imag[0], imag[0]]
+      
+      const magnitude = extractMagnitude(stereoReal, stereoImag)
+      const inputTensor = createModelInput(magnitude)
+      
+      console.log('Input tensor shape:', inputTensor.dims)
+      
+      onProgress?.({ progress: 30, stage: 'Procesando vocals...' })
+      const vocalsEst = await processSingleStem('vocals', inputTensor, onProgress)
+      
+      onProgress?.({ progress: 45, stage: 'Procesando drums...' })
+      const drumsEst = await processSingleStem('drums', inputTensor, onProgress)
+      
+      onProgress?.({ progress: 60, stage: 'Procesando bass...' })
+      const bassEst = await processSingleStem('bass', inputTensor, onProgress)
+      
+      onProgress?.({ progress: 75, stage: 'Procesando other...' })
+      const otherEst = await processSingleStem('other', inputTensor, onProgress)
+      
+      const estimates = {
+        vocals: vocalsEst,
+        drums: drumsEst,
+        bass: bassEst,
+        other: otherEst
+      }
+      
+      const result = await applyMaskAndReconstruct(
+        stereoReal,
+        stereoImag,
+        estimates,
+        inputTensor.dims as number[],
+        sampleRate,
+        onProgress
+      )
+      
+      onProgress?.({ progress: 100, stage: 'Completado' })
+      return result
     }
     
-    const result = await applyMaskAndReconstruct(
-      stereoReal,
-      stereoImag,
-      estimates,
-      inputTensor.dims as number[],
-      audioBuffer.sampleRate,
-      onProgress
-    )
+    // Chunked processing for long audio
+    console.log(`Processing ${duration.toFixed(1)}s audio in chunks...`)
+    
+    const numChunks = Math.ceil((mono.length - overlapSamples) / stride)
+    const stemChunks: { vocals: AudioBuffer[], drums: AudioBuffer[], bass: AudioBuffer[], other: AudioBuffer[] } = {
+      vocals: [],
+      drums: [],
+      bass: [],
+      other: []
+    }
+    
+    for (let chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+      const startSample = chunkIdx * stride
+      const endSample = Math.min(startSample + chunkSamples, mono.length)
+      
+      // Extract chunk
+      const audioChunk = mono.slice(startSample, endSample)
+      
+      // Update progress
+      const chunkProgress = Math.floor(10 + (chunkIdx / numChunks) * 85)
+      onProgress?.({ progress: chunkProgress, stage: `Procesando parte ${chunkIdx + 1}/${numChunks}...` })
+      
+      // Process chunk
+      const chunkResult = await processChunk(audioChunk, sampleRate, chunkIdx, numChunks, onProgress)
+      
+      stemChunks.vocals.push(chunkResult.vocals)
+      stemChunks.drums.push(chunkResult.drums)
+      stemChunks.bass.push(chunkResult.bass)
+      stemChunks.other.push(chunkResult.other)
+    }
+    
+    // Stitch chunks together
+    onProgress?.({ progress: 95, stage: 'Uniendo partes...' })
+    
+    const vocals = stitchChunks(stemChunks.vocals, overlapSamples, mono.length, sampleRate)
+    const drums = stitchChunks(stemChunks.drums, overlapSamples, mono.length, sampleRate)
+    const bass = stitchChunks(stemChunks.bass, overlapSamples, mono.length, sampleRate)
+    const other = stitchChunks(stemChunks.other, overlapSamples, mono.length, sampleRate)
     
     onProgress?.({ progress: 100, stage: 'Completado' })
     
-    return result
+    return { vocals, drums, bass, other }
     
   } catch (error) {
     console.error('Stem separation failed:', error)

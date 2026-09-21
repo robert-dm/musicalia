@@ -32,24 +32,32 @@ const MAX_CHUNK_SIZE = 44100 * 60 // 60 seconds per chunk to manage memory
 let cachedSession: ort.InferenceSession | null = null
 
 /**
- * Initialize ONNX Runtime Web with WebGPU if available
+ * Initialize ONNX Runtime Web with appropriate backend
  */
 async function initializeRuntime(): Promise<void> {
-  // Configure ONNX Runtime to use WebGPU when available
-  ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4
+  // Configure WASM backend
+  // Start with single thread for maximum compatibility
+  // Threading may not work in all environments (requires COOP/COEP headers)
+  ort.env.wasm.numThreads = 1
   ort.env.wasm.simd = true
   
-  // Try WebGPU first, fall back to WASM
+  // Set WASM paths for Vite (files will be in public/onnx/)
+  ort.env.wasm.wasmPaths = '/onnx/'
+  
+  // Check for WebGPU availability (preferred but not required)
   if ('gpu' in navigator) {
     try {
       const adapter = await (navigator as any).gpu?.requestAdapter()
       if (adapter) {
         console.log('WebGPU available for Demucs acceleration')
+        return
       }
     } catch (e) {
-      console.log('WebGPU not available, using WebAssembly')
+      console.log('WebGPU not available, will use WebAssembly')
     }
   }
+  
+  console.log('Using WebAssembly backend for stem separation')
 }
 
 /**
@@ -68,14 +76,14 @@ async function loadDemucsModel(
     // Load model with progress tracking
     const response = await fetch(DEMUCS_MODEL_URL)
     if (!response.ok) {
-      throw new Error(`Failed to load model: ${response.statusText}`)
+      throw new Error(`Error al descargar modelo: ${response.status} ${response.statusText}`)
     }
 
     const totalBytes = parseInt(response.headers.get('content-length') || '0')
     const reader = response.body?.getReader()
     
     if (!reader) {
-      throw new Error('Failed to read model stream')
+      throw new Error('No se pudo leer el flujo del modelo')
     }
 
     const chunks: Uint8Array[] = []
@@ -108,19 +116,57 @@ async function loadDemucsModel(
 
     onProgress?.({ progress: 20, stage: 'Inicializando modelo...' })
 
-    // Create ONNX session with optimization
-    const session = await ort.InferenceSession.create(modelBuffer.buffer, {
-      executionProviders: ['webgpu', 'wasm'],
-      graphOptimizationLevel: 'all',
-      enableCpuMemArena: true,
-      enableMemPattern: true,
-    })
+    // Try to create session with WebGPU first, then fall back to WASM
+    let session: ort.InferenceSession | null = null
+    
+    // Attempt 1: Try WebGPU + WASM fallback
+    if ('gpu' in navigator) {
+      try {
+        console.log('Attempting to create session with WebGPU...')
+        session = await ort.InferenceSession.create(modelBuffer.buffer, {
+          executionProviders: ['webgpu', 'wasm'],
+          graphOptimizationLevel: 'all',
+          enableCpuMemArena: true,
+          enableMemPattern: true,
+        })
+        console.log('Session created with WebGPU backend')
+      } catch (error) {
+        console.log('WebGPU initialization failed, falling back to WASM:', error)
+      }
+    }
+    
+    // Attempt 2: Use WASM only if WebGPU failed or is not available
+    if (!session) {
+      try {
+        console.log('Creating session with WASM backend...')
+        session = await ort.InferenceSession.create(modelBuffer.buffer, {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'all',
+          enableCpuMemArena: true,
+          enableMemPattern: true,
+        })
+        console.log('Session created with WASM backend')
+      } catch (error) {
+        console.error('WASM initialization also failed:', error)
+        throw new Error(`No se pudo inicializar el modelo: ${error instanceof Error ? error.message : 'Error desconocido'}`)
+      }
+    }
+
+    if (!session) {
+      throw new Error('No se pudo crear la sesión de inferencia')
+    }
 
     cachedSession = session
     return session
   } catch (error) {
     console.error('Failed to load Demucs model:', error)
-    throw new Error('No se pudo cargar el modelo de separación. WebGPU requerido.')
+    if (error instanceof Error && error.message.includes('descargar')) {
+      throw new Error(`Error al descargar el modelo: ${error.message}. Verifica tu conexión a internet.`)
+    }
+    if (error instanceof Error) {
+      throw error
+    }
+    throw new Error('No se pudo cargar el modelo de separación. Intenta recargar la página.')
   }
 }
 
@@ -334,7 +380,7 @@ export async function separateStems(
  * Check if the browser supports the required features for stem separation
  */
 export function isStemSeparationSupported(): { supported: boolean, reason?: string } {
-  // Check WebAssembly
+  // Check WebAssembly (required)
   if (typeof WebAssembly === 'undefined') {
     return { supported: false, reason: 'WebAssembly no está disponible' }
   }
@@ -343,14 +389,14 @@ export function isStemSeparationSupported(): { supported: boolean, reason?: stri
   if ('deviceMemory' in navigator) {
     const memory = (navigator as any).deviceMemory
     if (memory && memory < 2) {
-      return { supported: false, reason: 'Memoria insuficiente (mínimo 2GB recomendado)' }
+      console.warn('Low memory detected - stem separation may be slow')
     }
   }
   
-  // WebGPU is recommended but not required
+  // WebGPU is recommended but not required - WASM works as fallback
   const hasWebGPU = 'gpu' in navigator
   if (!hasWebGPU) {
-    console.warn('WebGPU not available - stem separation will be slower')
+    console.log('WebGPU not available - using WASM backend (may be slower)')
   }
   
   return { supported: true }

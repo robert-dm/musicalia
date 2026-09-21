@@ -19,6 +19,7 @@ interface TrackState {
 
 function App() {
   const [isPlaying, setIsPlaying] = useState(false)
+  const [isPaused, setIsPaused] = useState(false)
   const [bpm, setBpm] = useState(120)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
@@ -27,9 +28,11 @@ function App() {
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([])
   const [sidebarWidth, setSidebarWidth] = useState(220)
   const [isResizing, setIsResizing] = useState(false)
-  const [playheadPositions, setPlayheadPositions] = useState<number[]>(Array(8).fill(0))
-  const animationFrameRef = useRef<number>()
-  const playbackStartTimeRef = useRef<number>(0)
+  const [playheadPosition, setPlayheadPosition] = useState(0)
+  const playheadAnimationRef = useRef<number | null>(null)
+  const [loopStart, setLoopStart] = useState<number | null>(null)
+  const [loopEnd, setLoopEnd] = useState<number | null>(null)
+  const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
     Array.from({ length: 8 }, () => ({
       mute: false,
@@ -53,6 +56,22 @@ function App() {
     }
   }
 
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
+
+  const getMaxDuration = (): number => {
+    let maxDuration = 0
+    trackStates.forEach(track => {
+      if (track.clip?.buffer.duration) {
+        maxDuration = Math.max(maxDuration, track.clip.buffer.duration)
+      }
+    })
+    return maxDuration || 0
+  }
+
   useEffect(() => {
     const anySolo = trackStates.some(ts => ts.solo)
     
@@ -71,72 +90,6 @@ function App() {
       gainNode.gain.value = gain
     })
   }, [trackStates])
-
-  useEffect(() => {
-    const updatePlayhead = () => {
-      if (!isPlaying) return
-      
-      const newPositions = trackStates.map((trackState) => {
-        if (!trackState.clip || !trackState.clip.isPlaying) return 0
-        
-        const buffer = trackState.clip.buffer
-        if (!buffer) return 0
-        
-        const duration = buffer.duration
-        const elapsed = Tone.now() - playbackStartTimeRef.current
-        const progress = duration > 0 ? (elapsed % duration) / duration : 0
-        
-        return Math.min(1, Math.max(0, progress))
-      })
-      
-      setPlayheadPositions(newPositions)
-      animationFrameRef.current = requestAnimationFrame(updatePlayhead)
-    }
-    
-    if (isPlaying) {
-      playbackStartTimeRef.current = Tone.now()
-      updatePlayhead()
-    } else {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current)
-      }
-      setPlayheadPositions(Array(8).fill(0))
-    }
-    
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current)
-      }
-    }
-  }, [isPlaying, trackStates])
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isResizing) return
-      e.preventDefault()
-      const newWidth = Math.min(420, Math.max(160, e.clientX))
-      setSidebarWidth(newWidth)
-    }
-    
-    const handleMouseUp = () => {
-      setIsResizing(false)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
-    
-    if (isResizing) {
-      document.body.style.cursor = 'col-resize'
-      document.body.style.userSelect = 'none'
-      document.addEventListener('mousemove', handleMouseMove)
-      document.addEventListener('mouseup', handleMouseUp)
-      return () => {
-        document.removeEventListener('mousemove', handleMouseMove)
-        document.removeEventListener('mouseup', handleMouseUp)
-        document.body.style.cursor = ''
-        document.body.style.userSelect = ''
-      }
-    }
-  }, [isResizing])
 
   const drawWaveform = (canvas: HTMLCanvasElement, buffer: AudioBuffer) => {
     const ctx = canvas.getContext('2d')
@@ -187,21 +140,68 @@ function App() {
   const handlePlay = async () => {
     await ensureAudio()
     Tone.getTransport().bpm.value = bpm
+    
+    const startTime = isPaused ? playheadPosition : (loopStart ?? 0)
+    Tone.getTransport().seconds = startTime
     Tone.getTransport().start()
+    
+    const maxDuration = getMaxDuration()
     
     setTrackStates(prev => prev.map(track => {
       if (track.clip && !track.clip.isPlaying) {
-        track.clip.player.start()
+        track.clip.player.loop = true
+        const offset = startTime % track.clip.buffer.duration
+        track.clip.player.start(0, offset)
         track.clip.isPlaying = true
       }
       return { ...track }
     }))
     
     setIsPlaying(true)
+    setIsPaused(false)
+    
+    const updatePlayhead = () => {
+      if (Tone.getTransport().state === 'started') {
+        let currentTime = Tone.getTransport().seconds
+        
+        if (loopStart !== null && loopEnd !== null) {
+          if (currentTime >= loopEnd) {
+            currentTime = loopStart
+            Tone.getTransport().seconds = loopStart
+            trackStates.forEach(track => {
+              if (track.clip?.isPlaying) {
+                track.clip.player.stop()
+                const offset = loopStart % track.clip.buffer.duration
+                track.clip.player.start(0, offset)
+              }
+            })
+          }
+        } else if (maxDuration > 0 && currentTime >= maxDuration) {
+          currentTime = 0
+          Tone.getTransport().seconds = 0
+          trackStates.forEach(track => {
+            if (track.clip?.isPlaying) {
+              track.clip.player.stop()
+              track.clip.player.start()
+            }
+          })
+        }
+        
+        setPlayheadPosition(currentTime)
+        playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
+      }
+    }
+    updatePlayhead()
   }
 
-  const handleStop = () => {
-    Tone.getTransport().stop()
+  const handlePause = () => {
+    Tone.getTransport().pause()
+    
+    if (playheadAnimationRef.current !== null) {
+      cancelAnimationFrame(playheadAnimationRef.current)
+      playheadAnimationRef.current = null
+    }
+    
     setTrackStates(prev => prev.map(track => {
       if (track.clip?.isPlaying) {
         track.clip.player.stop()
@@ -209,7 +209,32 @@ function App() {
       }
       return { ...track }
     }))
+    
     setIsPlaying(false)
+    setIsPaused(true)
+  }
+
+  const handleStop = () => {
+    Tone.getTransport().stop()
+    Tone.getTransport().seconds = 0
+    
+    if (playheadAnimationRef.current !== null) {
+      cancelAnimationFrame(playheadAnimationRef.current)
+      playheadAnimationRef.current = null
+    }
+    
+    setPlayheadPosition(0)
+    
+    setTrackStates(prev => prev.map(track => {
+      if (track.clip?.isPlaying) {
+        track.clip.player.stop()
+        track.clip.isPlaying = false
+      }
+      return { ...track }
+    }))
+    
+    setIsPlaying(false)
+    setIsPaused(false)
   }
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -318,6 +343,133 @@ function App() {
     })
   }
 
+  const handlePlayheadMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setIsDraggingPlayhead(true)
+  }
+
+  const seekToPosition = (seconds: number) => {
+    const clampedSeconds = Math.max(0, Math.min(seconds, getMaxDuration()))
+    setPlayheadPosition(clampedSeconds)
+    Tone.getTransport().seconds = clampedSeconds
+    
+    trackStates.forEach(track => {
+      if (track.clip) {
+        const wasPlaying = track.clip.isPlaying
+        if (wasPlaying) {
+          track.clip.player.stop()
+        }
+        if (isPlaying) {
+          const offset = clampedSeconds % track.clip.buffer.duration
+          track.clip.player.start(0, offset)
+          track.clip.isPlaying = true
+        }
+      }
+    })
+  }
+
+  const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>, trackIndex: number) => {
+    const track = trackStates[trackIndex]
+    if (!track.clip) {
+      handleLaneClick(trackIndex)
+      return
+    }
+
+    const rect = e.currentTarget.getBoundingClientRect()
+    const clickX = e.clientX - rect.left
+    const percentage = clickX / rect.width
+    const duration = track.clip.buffer.duration
+    const clickTime = percentage * duration
+
+    if (e.shiftKey) {
+      if (loopStart === null) {
+        setLoopStart(clickTime)
+      } else if (loopEnd === null) {
+        if (clickTime > loopStart) {
+          setLoopEnd(clickTime)
+        } else {
+          setLoopEnd(loopStart)
+          setLoopStart(clickTime)
+        }
+      } else {
+        setLoopStart(clickTime)
+        setLoopEnd(null)
+      }
+    } else {
+      seekToPosition(clickTime)
+      if (!isPlaying && !isPaused) {
+        handleLaneClick(trackIndex)
+      }
+    }
+  }
+
+  const clearLoop = () => {
+    setLoopStart(null)
+    setLoopEnd(null)
+  }
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return
+      e.preventDefault()
+      const newWidth = Math.min(420, Math.max(160, e.clientX))
+      setSidebarWidth(newWidth)
+    }
+    
+    const handleMouseUp = () => {
+      setIsResizing(false)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    
+    if (isResizing) {
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove)
+        document.removeEventListener('mouseup', handleMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+    }
+  }, [isResizing])
+
+  useEffect(() => {
+    if (!isDraggingPlayhead) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      
+      const firstLane = lanes[0] as HTMLElement
+      const rect = firstLane.getBoundingClientRect()
+      const clickX = e.clientX - rect.left
+      const percentage = Math.max(0, Math.min(1, clickX / rect.width))
+      const maxDuration = getMaxDuration()
+      const newTime = percentage * maxDuration
+      
+      seekToPosition(newTime)
+    }
+
+    const handleMouseUp = () => {
+      setIsDraggingPlayhead(false)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'ew-resize'
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+  }, [isDraggingPlayhead, trackStates, isPlaying])
+
   return (
     <div className="app">
       <input
@@ -339,12 +491,31 @@ function App() {
           </button>
           <button
             className="transport-button"
-            onClick={handleStop}
+            onClick={handlePause}
             disabled={!isPlaying}
+          >
+            Pause
+          </button>
+          <button
+            className="transport-button"
+            onClick={handleStop}
+            disabled={!isPlaying && !isPaused}
           >
             Stop
           </button>
         </div>
+        <div className="time-display">
+          <span className="time-label">Time</span>
+          <span className="time-value">
+            {formatTime(playheadPosition)} / {formatTime(getMaxDuration())}
+          </span>
+        </div>
+        {(loopStart !== null || loopEnd !== null) && (
+          <div className="loop-indicator">
+            <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
+            <button className="transport-button clear-loop" onClick={clearLoop}>Clear</button>
+          </div>
+        )}
         <div className="bpm-control">
           <span className="bpm-label">BPM</span>
           <input
@@ -402,12 +573,13 @@ function App() {
             <div 
               key={trackIndex}
               className={`track-content ${trackState.clip ? 'has-clip' : ''} ${trackState.clip?.isPlaying ? 'playing' : ''}`}
-              onClick={() => handleLaneClick(trackIndex)}
+              onClick={(e) => handleWaveformClick(e, trackIndex)}
             >
               {trackState.clip ? (
                 <div className="clip-region">
                   <div className="clip-info">
                     <span className="clip-filename">{trackState.clip.fileName}</span>
+                    <span className="clip-hint">Shift+Click to set loop region</span>
                   </div>
                   <canvas
                     ref={(el) => {
@@ -420,10 +592,38 @@ function App() {
                     }}
                     className="waveform-canvas"
                   />
-                  {isPlaying && trackState.clip.isPlaying && (
+                  {loopStart !== null && (
+                    <div 
+                      className="loop-marker loop-start"
+                      style={{ 
+                        left: `${(loopStart / trackState.clip.buffer.duration) * 100}%` 
+                      }}
+                    />
+                  )}
+                  {loopEnd !== null && (
+                    <div 
+                      className="loop-marker loop-end"
+                      style={{ 
+                        left: `${(loopEnd / trackState.clip.buffer.duration) * 100}%` 
+                      }}
+                    />
+                  )}
+                  {loopStart !== null && loopEnd !== null && (
+                    <div 
+                      className="loop-region"
+                      style={{ 
+                        left: `${(loopStart / trackState.clip.buffer.duration) * 100}%`,
+                        width: `${((loopEnd - loopStart) / trackState.clip.buffer.duration) * 100}%`
+                      }}
+                    />
+                  )}
+                  {(isPlaying || isPaused) && (
                     <div 
                       className="playhead"
-                      style={{ left: `${playheadPositions[trackIndex] * 100}%` }}
+                      style={{ 
+                        left: `${Math.min((playheadPosition / (trackState.clip.buffer.duration || 1)) * 100, 100)}%` 
+                      }}
+                      onMouseDown={handlePlayheadMouseDown}
                     />
                   )}
                 </div>

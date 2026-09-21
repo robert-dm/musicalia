@@ -25,6 +25,11 @@ function App() {
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([])
+  const [sidebarWidth, setSidebarWidth] = useState(220)
+  const [isResizing, setIsResizing] = useState(false)
+  const [playheadPositions, setPlayheadPositions] = useState<number[]>(Array(8).fill(0))
+  const animationFrameRef = useRef<number>()
+  const playbackStartTimeRef = useRef<number>(0)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
     Array.from({ length: 8 }, () => ({
       mute: false,
@@ -67,6 +72,72 @@ function App() {
     })
   }, [trackStates])
 
+  useEffect(() => {
+    const updatePlayhead = () => {
+      if (!isPlaying) return
+      
+      const newPositions = trackStates.map((trackState) => {
+        if (!trackState.clip || !trackState.clip.isPlaying) return 0
+        
+        const buffer = trackState.clip.buffer
+        if (!buffer) return 0
+        
+        const duration = buffer.duration
+        const elapsed = Tone.now() - playbackStartTimeRef.current
+        const progress = duration > 0 ? (elapsed % duration) / duration : 0
+        
+        return Math.min(1, Math.max(0, progress))
+      })
+      
+      setPlayheadPositions(newPositions)
+      animationFrameRef.current = requestAnimationFrame(updatePlayhead)
+    }
+    
+    if (isPlaying) {
+      playbackStartTimeRef.current = Tone.now()
+      updatePlayhead()
+    } else {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+      setPlayheadPositions(Array(8).fill(0))
+    }
+    
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+    }
+  }, [isPlaying, trackStates])
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return
+      e.preventDefault()
+      const newWidth = Math.min(420, Math.max(160, e.clientX))
+      setSidebarWidth(newWidth)
+    }
+    
+    const handleMouseUp = () => {
+      setIsResizing(false)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    
+    if (isResizing) {
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove)
+        document.removeEventListener('mouseup', handleMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+    }
+  }, [isResizing])
+
   const drawWaveform = (canvas: HTMLCanvasElement, buffer: AudioBuffer) => {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
@@ -75,13 +146,18 @@ function App() {
     const height = canvas.height
     const data = buffer.getChannelData(0)
     const step = Math.ceil(data.length / width)
-    const amp = height / 2
+    
+    const topPadding = 48
+    const bottomPadding = 16
+    const waveformHeight = height - topPadding - bottomPadding
+    const amp = waveformHeight / 2
+    const centerY = topPadding + waveformHeight / 2
 
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(0, 0, width, height)
 
     ctx.strokeStyle = '#0a5'
-    ctx.lineWidth = 1
+    ctx.lineWidth = 1.5
     ctx.beginPath()
 
     for (let i = 0; i < width; i++) {
@@ -94,8 +170,8 @@ function App() {
         if (datum > max) max = datum
       }
       
-      const yMin = (1 + min) * amp
-      const yMax = (1 + max) * amp
+      const yMin = centerY + (min * amp)
+      const yMax = centerY + (max * amp)
       
       if (i === 0) {
         ctx.moveTo(i, yMin)
@@ -112,6 +188,15 @@ function App() {
     await ensureAudio()
     Tone.getTransport().bpm.value = bpm
     Tone.getTransport().start()
+    
+    setTrackStates(prev => prev.map(track => {
+      if (track.clip && !track.clip.isPlaying) {
+        track.clip.player.start()
+        track.clip.isPlaying = true
+      }
+      return { ...track }
+    }))
+    
     setIsPlaying(true)
   }
 
@@ -274,9 +359,9 @@ function App() {
       </div>
 
       <div className="arrangement-view">
-        {trackStates.map((trackState, trackIndex) => (
-          <div key={trackIndex} className="track-lane">
-            <div className="track-header">
+        <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
+          {trackStates.map((trackState, trackIndex) => (
+            <div key={trackIndex} className="track-header">
               <div className="track-name">Track {trackIndex + 1}</div>
               <div className="track-controls">
                 <button
@@ -305,7 +390,17 @@ function App() {
                 />
               </div>
             </div>
+          ))}
+        </div>
+        <div 
+          className="resize-handle"
+          onMouseDown={() => setIsResizing(true)}
+          title="Drag to resize sidebar"
+        />
+        <div className="lanes-column">
+          {trackStates.map((trackState, trackIndex) => (
             <div 
+              key={trackIndex}
               className={`track-content ${trackState.clip ? 'has-clip' : ''} ${trackState.clip?.isPlaying ? 'playing' : ''}`}
               onClick={() => handleLaneClick(trackIndex)}
             >
@@ -325,6 +420,12 @@ function App() {
                     }}
                     className="waveform-canvas"
                   />
+                  {isPlaying && trackState.clip.isPlaying && (
+                    <div 
+                      className="playhead"
+                      style={{ left: `${playheadPositions[trackIndex] * 100}%` }}
+                    />
+                  )}
                 </div>
               ) : (
                 <div className="empty-lane">
@@ -332,8 +433,8 @@ function App() {
                 </div>
               )}
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   )

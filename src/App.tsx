@@ -378,8 +378,8 @@ function App() {
     const rect = e.currentTarget.getBoundingClientRect()
     const clickX = e.clientX - rect.left
     const percentage = clickX / rect.width
-    const duration = track.clip.buffer.duration
-    const clickTime = percentage * duration
+    const maxDuration = getMaxDuration()
+    const clickTime = percentage * maxDuration
 
     if (e.shiftKey) {
       if (loopStart === null) {
@@ -577,26 +577,33 @@ function App() {
             >
               {trackState.clip ? (
                 <div className="clip-region">
-                  <div className="clip-info">
-                    <span className="clip-filename">{trackState.clip.fileName}</span>
-                    <span className="clip-hint">Shift+Click to set loop region</span>
-                  </div>
-                  <canvas
-                    ref={(el) => {
-                      canvasRefs.current[trackIndex] = el
-                      if (el && trackState.clip) {
-                        el.width = el.offsetWidth * 2
-                        el.height = el.offsetHeight * 2
-                        drawWaveform(el, trackState.clip.buffer)
-                      }
+                  <div 
+                    className="clip-wrapper"
+                    style={{
+                      width: `${(trackState.clip.buffer.duration / getMaxDuration()) * 100}%`
                     }}
-                    className="waveform-canvas"
-                  />
+                  >
+                    <div className="clip-info">
+                      <span className="clip-filename">{trackState.clip.fileName}</span>
+                      <span className="clip-hint">Shift+Click to set loop region</span>
+                    </div>
+                    <canvas
+                      ref={(el) => {
+                        canvasRefs.current[trackIndex] = el
+                        if (el && trackState.clip) {
+                          el.width = el.offsetWidth * 2
+                          el.height = el.offsetHeight * 2
+                          drawWaveform(el, trackState.clip.buffer)
+                        }
+                      }}
+                      className="waveform-canvas"
+                    />
+                  </div>
                   {loopStart !== null && (
                     <div 
                       className="loop-marker loop-start"
                       style={{ 
-                        left: `${(loopStart / trackState.clip.buffer.duration) * 100}%` 
+                        left: `${(loopStart / getMaxDuration()) * 100}%` 
                       }}
                     />
                   )}
@@ -604,7 +611,7 @@ function App() {
                     <div 
                       className="loop-marker loop-end"
                       style={{ 
-                        left: `${(loopEnd / trackState.clip.buffer.duration) * 100}%` 
+                        left: `${(loopEnd / getMaxDuration()) * 100}%` 
                       }}
                     />
                   )}
@@ -612,8 +619,8 @@ function App() {
                     <div 
                       className="loop-region"
                       style={{ 
-                        left: `${(loopStart / trackState.clip.buffer.duration) * 100}%`,
-                        width: `${((loopEnd - loopStart) / trackState.clip.buffer.duration) * 100}%`
+                        left: `${(loopStart / getMaxDuration()) * 100}%`,
+                        width: `${((loopEnd - loopStart) / getMaxDuration()) * 100}%`
                       }}
                     />
                   )}
@@ -621,7 +628,7 @@ function App() {
                     <div 
                       className="playhead"
                       style={{ 
-                        left: `${Math.min((playheadPosition / (trackState.clip.buffer.duration || 1)) * 100, 100)}%` 
+                        left: `${Math.min((playheadPosition / getMaxDuration()) * 100, 100)}%` 
                       }}
                       onMouseDown={handlePlayheadMouseDown}
                     />

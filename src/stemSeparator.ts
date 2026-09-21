@@ -35,29 +35,16 @@ let cachedSession: ort.InferenceSession | null = null
  * Initialize ONNX Runtime Web with appropriate backend
  */
 async function initializeRuntime(): Promise<void> {
-  // Configure WASM backend
+  // Configure WASM backend using CDN (most reliable for production)
+  // The CDN is maintained by Microsoft and includes all necessary files (.wasm, .mjs, etc.)
+  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/'
+  
   // Start with single thread for maximum compatibility
   // Threading may not work in all environments (requires COOP/COEP headers)
   ort.env.wasm.numThreads = 1
   ort.env.wasm.simd = true
   
-  // Set WASM paths for Vite (files will be in public/onnx/)
-  ort.env.wasm.wasmPaths = '/onnx/'
-  
-  // Check for WebGPU availability (preferred but not required)
-  if ('gpu' in navigator) {
-    try {
-      const adapter = await (navigator as any).gpu?.requestAdapter()
-      if (adapter) {
-        console.log('WebGPU available for Demucs acceleration')
-        return
-      }
-    } catch (e) {
-      console.log('WebGPU not available, will use WebAssembly')
-    }
-  }
-  
-  console.log('Using WebAssembly backend for stem separation')
+  console.log('ONNX Runtime configured with CDN WASM backend')
 }
 
 /**
@@ -116,48 +103,25 @@ async function loadDemucsModel(
 
     onProgress?.({ progress: 20, stage: 'Inicializando modelo...' })
 
-    // Try to create session with WebGPU first, then fall back to WASM
-    let session: ort.InferenceSession | null = null
-    
-    // Attempt 1: Try WebGPU + WASM fallback
-    if ('gpu' in navigator) {
-      try {
-        console.log('Attempting to create session with WebGPU...')
-        session = await ort.InferenceSession.create(modelBuffer.buffer, {
-          executionProviders: ['webgpu', 'wasm'],
-          graphOptimizationLevel: 'all',
-          enableCpuMemArena: true,
-          enableMemPattern: true,
-        })
-        console.log('Session created with WebGPU backend')
-      } catch (error) {
-        console.log('WebGPU initialization failed, falling back to WASM:', error)
-      }
+    // Create session with WASM backend
+    // Using WASM-only to avoid any state poisoning from failed WebGPU attempts
+    // WebGPU can be added later if needed, but WASM is more reliable
+    try {
+      console.log('Creating ONNX session with WASM backend...')
+      const session = await ort.InferenceSession.create(modelBuffer.buffer, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+        enableCpuMemArena: true,
+        enableMemPattern: true,
+      })
+      console.log('Session created successfully with WASM backend')
+      
+      cachedSession = session
+      return session
+    } catch (error) {
+      console.error('Failed to create ONNX session:', error)
+      throw new Error(`No se pudo inicializar el modelo: ${error instanceof Error ? error.message : 'Error desconocido'}. Verifica que tu navegador soporte WebAssembly.`)
     }
-    
-    // Attempt 2: Use WASM only if WebGPU failed or is not available
-    if (!session) {
-      try {
-        console.log('Creating session with WASM backend...')
-        session = await ort.InferenceSession.create(modelBuffer.buffer, {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all',
-          enableCpuMemArena: true,
-          enableMemPattern: true,
-        })
-        console.log('Session created with WASM backend')
-      } catch (error) {
-        console.error('WASM initialization also failed:', error)
-        throw new Error(`No se pudo inicializar el modelo: ${error instanceof Error ? error.message : 'Error desconocido'}`)
-      }
-    }
-
-    if (!session) {
-      throw new Error('No se pudo crear la sesión de inferencia')
-    }
-
-    cachedSession = session
-    return session
   } catch (error) {
     console.error('Failed to load Demucs model:', error)
     if (error instanceof Error && error.message.includes('descargar')) {

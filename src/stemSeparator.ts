@@ -20,14 +20,14 @@ export interface StemSeparationProgress {
 }
 
 // Model configuration for HTDemucs
-// Note: This should point to a hosted Demucs ONNX model
-// Options for obtaining the model:
-// 1. Convert PyTorch Demucs to ONNX: https://github.com/facebookresearch/demucs
-// 2. Use pre-converted model from: https://github.com/TRvlvr/model_repo
-// 3. Host your own converted model on CDN/S3
-const DEMUCS_MODEL_URL = 'https://huggingface.co/TRvlvr/model_repo/resolve/main/demucs/htdemucs_6s.onnx'
+// Using StemSplitio public model (4-stem, fp16, ~80MB)
+// Source: https://huggingface.co/StemSplitio/htdemucs-onnx
+// Input: 'mix' tensor [1, 2, samples] float32
+// Output: 'stems' tensor [1, 4, 2, samples] - order: drums, bass, other, vocals
+const DEMUCS_MODEL_URL = 'https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx'
 
 const SAMPLE_RATE = 44100
+const MAX_CHUNK_SIZE = 44100 * 60 // 60 seconds per chunk to manage memory
 
 let cachedSession: ort.InferenceSession | null = null
 
@@ -158,58 +158,73 @@ async function runDemucsInference(
   onProgress?.({ progress: 30, stage: 'Ejecutando modelo de separación...' })
 
   try {
-    // Run inference
-    const feeds = { audio: audioTensor }
+    // Run inference with correct input name for StemSplitio model
+    const feeds = { mix: audioTensor }  // Input tensor name is 'mix'
     const results = await session.run(feeds)
     
     // Extract stems from output
-    // Demucs outputs format: [batch, stems, channels, samples]
-    // stems order: [drums, bass, other, vocals]
-    const output = results.output
+    // StemSplitio model output: 'stems' tensor [1, 4, 2, samples]
+    // Stem order: drums, bass, other, vocals
+    const output = results.stems
     
     if (!output) {
-      throw new Error('No output from model')
+      throw new Error('No stems output from model')
     }
     
     const outputData = output.data as Float32Array
-    const [, numStems, channels, samples] = output.dims as number[]
+    const dims = output.dims as number[]
     
-    if (numStems !== 4 && numStems !== 6) {
-      throw new Error(`Expected 4 or 6 stems, got ${numStems}`)
+    // Expected shape: [batch=1, stems=4, channels=2, samples]
+    if (dims.length !== 4) {
+      throw new Error(`Unexpected output dimensions: ${dims.length}`)
+    }
+    
+    const [, numStems, channels, samples] = dims
+    
+    if (numStems !== 4) {
+      throw new Error(`Expected 4 stems, got ${numStems}`)
+    }
+    
+    if (channels !== 2) {
+      throw new Error(`Expected stereo (2 channels), got ${channels}`)
     }
     
     onProgress?.({ progress: 60, stage: 'Extrayendo pistas...' })
     
     // Extract each stem (averaging stereo to mono)
-    const samplesPerStem = channels * samples
+    // Output layout: [batch, stem, channel, sample]
+    // Flatten index: batch*stems*channels*samples + stem*channels*samples + channel*samples + sample
     
     const drums = new Float32Array(samples)
     const bass = new Float32Array(samples)
-    const vocals = new Float32Array(samples)
     const other = new Float32Array(samples)
+    const vocals = new Float32Array(samples)
     
-    if (numStems === 4) {
-      // 4-stem model order: drums, bass, other, vocals
-      for (let i = 0; i < samples; i++) {
-        drums[i] = (outputData[0 * samplesPerStem + i] + outputData[0 * samplesPerStem + samples + i]) / 2
-        bass[i] = (outputData[1 * samplesPerStem + i] + outputData[1 * samplesPerStem + samples + i]) / 2
-        other[i] = (outputData[2 * samplesPerStem + i] + outputData[2 * samplesPerStem + samples + i]) / 2
-        vocals[i] = (outputData[3 * samplesPerStem + i] + outputData[3 * samplesPerStem + samples + i]) / 2
-      }
-    } else {
-      // 6-stem model order: drums, bass, other, vocals, guitar, piano
-      // Merge guitar and piano into "other" for consistency
-      for (let i = 0; i < samples; i++) {
-        drums[i] = (outputData[0 * samplesPerStem + i] + outputData[0 * samplesPerStem + samples + i]) / 2
-        bass[i] = (outputData[1 * samplesPerStem + i] + outputData[1 * samplesPerStem + samples + i]) / 2
-        vocals[i] = (outputData[3 * samplesPerStem + i] + outputData[3 * samplesPerStem + samples + i]) / 2
-        
-        // Combine other + guitar + piano
-        const otherStem = (outputData[2 * samplesPerStem + i] + outputData[2 * samplesPerStem + samples + i]) / 2
-        const guitarStem = (outputData[4 * samplesPerStem + i] + outputData[4 * samplesPerStem + samples + i]) / 2
-        const pianoStem = (outputData[5 * samplesPerStem + i] + outputData[5 * samplesPerStem + samples + i]) / 2
-        other[i] = (otherStem + guitarStem + pianoStem) / 3
-      }
+    // StemSplitio order: drums (0), bass (1), other (2), vocals (3)
+    for (let i = 0; i < samples; i++) {
+      // Average left and right channels for each stem
+      const channelStride = samples
+      const stemStride = channels * samples
+      
+      // Drums (stem 0)
+      const drumsL = outputData[0 * stemStride + 0 * channelStride + i]
+      const drumsR = outputData[0 * stemStride + 1 * channelStride + i]
+      drums[i] = (drumsL + drumsR) / 2
+      
+      // Bass (stem 1)
+      const bassL = outputData[1 * stemStride + 0 * channelStride + i]
+      const bassR = outputData[1 * stemStride + 1 * channelStride + i]
+      bass[i] = (bassL + bassR) / 2
+      
+      // Other (stem 2)
+      const otherL = outputData[2 * stemStride + 0 * channelStride + i]
+      const otherR = outputData[2 * stemStride + 1 * channelStride + i]
+      other[i] = (otherL + otherR) / 2
+      
+      // Vocals (stem 3)
+      const vocalsL = outputData[3 * stemStride + 0 * channelStride + i]
+      const vocalsR = outputData[3 * stemStride + 1 * channelStride + i]
+      vocals[i] = (vocalsL + vocalsR) / 2
     }
     
     return { vocals, drums, bass, other }
@@ -263,12 +278,32 @@ export async function separateStems(
     
     onProgress?.({ progress: 25, stage: 'Preparando audio...' })
     
+    // Check if audio is too long and needs chunking
+    const maxDuration = MAX_CHUNK_SIZE / SAMPLE_RATE // ~60 seconds
+    const audioDuration = audioBuffer.length / audioBuffer.sampleRate
+    
+    if (audioDuration > maxDuration * 2) {
+      throw new Error(`Audio demasiado largo (${Math.round(audioDuration)}s). Máximo recomendado: ${Math.round(maxDuration * 2)}s`)
+    }
+    
     // Resample if needed (Demucs expects 44.1kHz)
     let processBuffer = audioBuffer
     if (audioBuffer.sampleRate !== SAMPLE_RATE) {
-      console.warn(`Resampling from ${audioBuffer.sampleRate}Hz to ${SAMPLE_RATE}Hz`)
-      // For simplicity, we'll process at original rate
-      // In production, implement proper resampling
+      console.warn(`Processing at ${audioBuffer.sampleRate}Hz (model expects ${SAMPLE_RATE}Hz)`)
+      // Note: For best results, audio should be resampled to 44.1kHz
+      // Current implementation processes at original rate
+    }
+    
+    // Ensure stereo (duplicate mono if needed)
+    if (audioBuffer.numberOfChannels === 1) {
+      console.log('Converting mono to stereo')
+      const context = new AudioContext({ sampleRate: audioBuffer.sampleRate })
+      const stereoBuffer = context.createBuffer(2, audioBuffer.length, audioBuffer.sampleRate)
+      const monoData = audioBuffer.getChannelData(0)
+      stereoBuffer.getChannelData(0).set(monoData)
+      stereoBuffer.getChannelData(1).set(monoData)
+      context.close()
+      processBuffer = stereoBuffer
     }
     
     // Prepare input tensor

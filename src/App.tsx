@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
 import * as Tone from 'tone'
 import './App.css'
+import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
+import { separateStems, isStemSeparationSupported } from './stemSeparator'
 
-const APP_VERSION = '0.0011b'
+const APP_VERSION = '0.0012b'
 
 interface Clip {
   player: Tone.Player
@@ -17,6 +19,7 @@ interface TrackState {
   solo: boolean
   volume: number
   clip: Clip | null
+  name?: string
 }
 
 function App() {
@@ -35,12 +38,17 @@ function App() {
   const [loopStart, setLoopStart] = useState<number | null>(null)
   const [loopEnd, setLoopEnd] = useState<number | null>(null)
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
+  const [showStemDialog, setShowStemDialog] = useState(false)
+  const [stemProgress, setStemProgress] = useState<number>(0)
+  const [isProcessingStems, setIsProcessingStems] = useState(false)
+  const pendingFileRef = useRef<File | null>(null)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
-    Array.from({ length: 8 }, () => ({
+    Array.from({ length: 8 }, (_, i) => ({
       mute: false,
       solo: false,
       volume: 0.8,
-      clip: null
+      clip: null,
+      name: `Track ${i + 1}`
     }))
   )
 
@@ -268,15 +276,84 @@ function App() {
     const file = e.target.files?.[0]
     if (!file || selectedTrack === null) return
 
+    // Check if stem separation is supported
+    const { supported, reason } = isStemSeparationSupported()
+    
+    if (!supported) {
+      console.warn('Stem separation not supported:', reason)
+      alert(`Separación de stems no disponible: ${reason}\n\nCargando como pista única.`)
+      await loadSingleTrack(file, selectedTrack)
+      setSelectedTrack(null)
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+      return
+    }
+
+    // Store the file and show dialog
+    pendingFileRef.current = file
+    setShowStemDialog(true)
+  }
+
+  const handleStemDialogConfirm = async () => {
+    setShowStemDialog(false)
+    if (!pendingFileRef.current || selectedTrack === null) return
+
+    setIsProcessingStems(true)
+    setStemProgress(0)
+
+    const file = pendingFileRef.current
+    const track = selectedTrack
+
+    try {
+      await processStemSeparation(file, track)
+    } catch (error) {
+      console.error('Stem separation failed:', error)
+      const errorMessage = error instanceof Error ? error.message : 'Error desconocido'
+      alert(`Error al separar stems: ${errorMessage}\n\nCargando como una sola pista.`)
+      
+      // Fall back to single track import
+      try {
+        await loadSingleTrack(file, track)
+      } catch (loadError) {
+        console.error('Failed to load single track:', loadError)
+        alert('Error al cargar el archivo de audio.')
+      }
+    } finally {
+      setIsProcessingStems(false)
+      pendingFileRef.current = null
+      setSelectedTrack(null)
+      
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
+
+  const handleStemDialogCancel = async () => {
+    setShowStemDialog(false)
+    if (!pendingFileRef.current || selectedTrack === null) return
+
+    await loadSingleTrack(pendingFileRef.current, selectedTrack)
+    
+    pendingFileRef.current = null
+    setSelectedTrack(null)
+    
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+  }
+
+  const loadSingleTrack = async (file: File, trackIndex: number) => {
     await ensureAudio()
 
-    const existingClip = trackStates[selectedTrack].clip
+    const existingClip = trackStates[trackIndex].clip
     if (existingClip) {
       existingClip.player.dispose()
     }
 
     const url = URL.createObjectURL(file)
-    const trackGain = trackGainsRef.current[selectedTrack]
+    const trackGain = trackGainsRef.current[trackIndex]
     
     const player = new Tone.Player()
     player.loop = true
@@ -287,8 +364,8 @@ function App() {
     const buffer = player.buffer.get() as AudioBuffer
 
     const newTrackStates = [...trackStates]
-    newTrackStates[selectedTrack] = {
-      ...newTrackStates[selectedTrack],
+    newTrackStates[trackIndex] = {
+      ...newTrackStates[trackIndex],
       clip: {
         player,
         fileName: file.name,
@@ -298,18 +375,73 @@ function App() {
       }
     }
     setTrackStates(newTrackStates)
-    setSelectedTrack(null)
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
 
     setTimeout(() => {
-      const canvas = canvasRefs.current[selectedTrack!]
+      const canvas = canvasRefs.current[trackIndex]
       if (canvas && buffer) {
         drawWaveform(canvas, buffer)
       }
     }, 100)
+  }
+
+  const processStemSeparation = async (file: File, startTrackIndex: number) => {
+    await ensureAudio()
+
+    // Load the audio file
+    const url = URL.createObjectURL(file)
+    const tempPlayer = new Tone.Player()
+    await tempPlayer.load(url)
+    const originalBuffer = tempPlayer.buffer.get() as AudioBuffer
+    tempPlayer.dispose()
+
+    // Separate stems
+    const stems = await separateStems(originalBuffer, (progress) => {
+      setStemProgress(progress.progress)
+    })
+
+    // Create clips for each stem
+    const stemNames = ['Vocals', 'Drums', 'Bass', 'Other']
+    const stemBuffers = [stems.vocals, stems.drums, stems.bass, stems.other]
+    
+    const newTrackStates = [...trackStates]
+
+    for (let i = 0; i < stemBuffers.length; i++) {
+      const targetTrackIndex = startTrackIndex + i
+      if (targetTrackIndex >= trackStates.length) break
+
+      // Dispose existing clip if any
+      if (newTrackStates[targetTrackIndex].clip) {
+        newTrackStates[targetTrackIndex].clip!.player.dispose()
+      }
+
+      // Create new player for this stem
+      const player = new Tone.Player()
+      player.loop = true
+      player.buffer.set(stemBuffers[i])
+      player.connect(trackGainsRef.current[targetTrackIndex])
+
+      newTrackStates[targetTrackIndex] = {
+        ...newTrackStates[targetTrackIndex],
+        name: stemNames[i],
+        clip: {
+          player,
+          fileName: `${file.name} - ${stemNames[i]}`,
+          isPlaying: false,
+          buffer: stemBuffers[i],
+          startPosition: 0
+        }
+      }
+
+      // Draw waveform
+      setTimeout(() => {
+        const canvas = canvasRefs.current[targetTrackIndex]
+        if (canvas && stemBuffers[i]) {
+          drawWaveform(canvas, stemBuffers[i])
+        }
+      }, 100)
+    }
+
+    setTrackStates(newTrackStates)
   }
 
   const handleMuteToggle = (trackIndex: number) => {
@@ -534,11 +666,22 @@ function App() {
         </div>
       </div>
 
+      {showStemDialog && (
+        <StemSplitDialog
+          onConfirm={handleStemDialogConfirm}
+          onCancel={handleStemDialogCancel}
+        />
+      )}
+
+      {isProcessingStems && (
+        <StemSplitProgress progress={stemProgress} />
+      )}
+
       <div className="arrangement-view">
         <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
           {trackStates.map((trackState, trackIndex) => (
             <div key={trackIndex} className="track-header">
-              <div className="track-name">Track {trackIndex + 1}</div>
+              <div className="track-name">{trackState.name || `Track ${trackIndex + 1}`}</div>
               <div className="track-controls">
                 <button
                   className={`control-button mute-button ${trackState.mute ? 'active' : ''}`}

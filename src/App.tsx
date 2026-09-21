@@ -25,6 +25,10 @@ function App() {
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([])
+  const [sidebarWidth, setSidebarWidth] = useState(180)
+  const [isDraggingResize, setIsDraggingResize] = useState(false)
+  const [playheadPosition, setPlayheadPosition] = useState(0)
+  const playheadAnimationRef = useRef<number | null>(null)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
     Array.from({ length: 8 }, () => ({
       mute: false,
@@ -112,11 +116,36 @@ function App() {
     await ensureAudio()
     Tone.getTransport().bpm.value = bpm
     Tone.getTransport().start()
+    
+    setTrackStates(prev => prev.map(track => {
+      if (track.clip && !track.clip.isPlaying) {
+        track.clip.player.start()
+        track.clip.isPlaying = true
+      }
+      return { ...track }
+    }))
+    
     setIsPlaying(true)
+    
+    const updatePlayhead = () => {
+      if (Tone.getTransport().state === 'started') {
+        setPlayheadPosition(Tone.getTransport().seconds)
+        playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
+      }
+    }
+    updatePlayhead()
   }
 
   const handleStop = () => {
     Tone.getTransport().stop()
+    
+    if (playheadAnimationRef.current !== null) {
+      cancelAnimationFrame(playheadAnimationRef.current)
+      playheadAnimationRef.current = null
+    }
+    
+    setPlayheadPosition(0)
+    
     setTrackStates(prev => prev.map(track => {
       if (track.clip?.isPlaying) {
         track.clip.player.stop()
@@ -124,6 +153,7 @@ function App() {
       }
       return { ...track }
     }))
+    
     setIsPlaying(false)
   }
 
@@ -233,6 +263,36 @@ function App() {
     })
   }
 
+  const handleResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsDraggingResize(true)
+  }
+
+  useEffect(() => {
+    if (!isDraggingResize) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = Math.max(160, Math.min(420, e.clientX))
+      setSidebarWidth(newWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsDraggingResize(false)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+  }, [isDraggingResize])
+
   return (
     <div className="app">
       <input
@@ -276,7 +336,7 @@ function App() {
       <div className="arrangement-view">
         {trackStates.map((trackState, trackIndex) => (
           <div key={trackIndex} className="track-lane">
-            <div className="track-header">
+            <div className="track-header" style={{ width: `${sidebarWidth}px` }}>
               <div className="track-name">Track {trackIndex + 1}</div>
               <div className="track-controls">
                 <button
@@ -306,6 +366,10 @@ function App() {
               </div>
             </div>
             <div 
+              className="resize-handle"
+              onMouseDown={handleResizeMouseDown}
+            />
+            <div 
               className={`track-content ${trackState.clip ? 'has-clip' : ''} ${trackState.clip?.isPlaying ? 'playing' : ''}`}
               onClick={() => handleLaneClick(trackIndex)}
             >
@@ -325,6 +389,14 @@ function App() {
                     }}
                     className="waveform-canvas"
                   />
+                  {isPlaying && (
+                    <div 
+                      className="playhead"
+                      style={{ 
+                        left: `${Math.min((playheadPosition / (trackState.clip.buffer.duration || 1)) * 100, 100)}%` 
+                      }}
+                    />
+                  )}
                 </div>
               ) : (
                 <div className="empty-lane">

@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from 'react'
 import * as Tone from 'tone'
 import './App.css'
 
+const APP_VERSION = '0.0011b'
+
 interface Clip {
   player: Tone.Player
   fileName: string
@@ -151,7 +153,7 @@ function App() {
       if (track.clip && !track.clip.isPlaying) {
         track.clip.player.loop = true
         const offset = startTime % track.clip.buffer.duration
-        track.clip.player.start(0, offset)
+        track.clip.player.start(Tone.now(), offset)
         track.clip.isPlaying = true
       }
       return { ...track }
@@ -172,7 +174,7 @@ function App() {
               if (track.clip?.isPlaying) {
                 track.clip.player.stop()
                 const offset = loopStart % track.clip.buffer.duration
-                track.clip.player.start(0, offset)
+                track.clip.player.start(Tone.now(), offset)
               }
             })
           }
@@ -361,7 +363,7 @@ function App() {
         }
         if (isPlaying) {
           const offset = clampedSeconds % track.clip.buffer.duration
-          track.clip.player.start(0, offset)
+          track.clip.player.start(Tone.now(), offset)
           track.clip.isPlaying = true
         }
       }
@@ -526,6 +528,9 @@ function App() {
             min="20"
             max="300"
           />
+        </div>
+        <div className="version-badge">
+          <span className="version-label">v{APP_VERSION}</span>
         </div>
       </div>
 

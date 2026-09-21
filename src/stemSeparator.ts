@@ -82,15 +82,23 @@ async function processSingleStem(
       stage: `Procesando ${stemName}...` 
     })
     
+    // Log actual model I/O names for debugging
+    console.log(`${stemName} model input names:`, session.inputNames)
+    console.log(`${stemName} model output names:`, session.outputNames)
+    
     // Run inference
-    // Spleeter input: 'input' tensor [batch, samples, channels] float32
-    // Spleeter output: 'output' tensor [batch, samples, channels] float32
-    const feeds = { input: audioTensor }
+    // Spleeter ONNX models use 'x' as input name (verified from error)
+    // Input shape: [batch, samples, channels] float32
+    const feeds = { x: audioTensor }
     const results = await session.run(feeds)
     
-    const output = results.output
+    // Get the output - try common output names
+    // Spleeter typically uses 'y' or the first output name
+    const outputName = session.outputNames[0]
+    const output = results[outputName]
+    
     if (!output) {
-      throw new Error(`No output from ${stemName} model`)
+      throw new Error(`No output from ${stemName} model (tried output name: ${outputName})`)
     }
     
     const outputData = output.data as Float32Array

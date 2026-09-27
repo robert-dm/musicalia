@@ -344,9 +344,15 @@ async function applyMaskAndReconstruct(
         complexIn[(N_FFT - bin) * 2 + 1] = -maskedImag[bin]
       }
       
-      // Inverse FFT
+      // Inverse FFT - fft.js outputs complex interleaved data
+      const outComplex = fft.createComplexArray()
+      fft.inverseTransform(outComplex, complexIn)
+      
+      // Extract real part (fft.js already divides by N)
       const timeData = new Float32Array(N_FFT)
-      fft.inverseTransform(timeData, complexIn)
+      for (let i = 0; i < N_FFT; i++) {
+        timeData[i] = outComplex[i * 2] // Real part only
+      }
       
       // Overlap-add with windowing
       const start = frame * HOP_LENGTH - frontPad
@@ -359,10 +365,15 @@ async function applyMaskAndReconstruct(
       }
     }
     
-    // Normalize
+    // Normalize and check for NaN/Infinity
     for (let i = 0; i < output.length; i++) {
       if (normalization[i] > 1e-8) {
         output[i] /= normalization[i]
+      }
+      
+      // Guard against NaN/Infinity
+      if (!isFinite(output[i])) {
+        output[i] = 0
       }
     }
     
@@ -608,11 +619,51 @@ export async function separateStems(
     
     onProgress?.({ progress: 100, stage: 'Completado' })
     
+    // Validate stems before returning
+    validateStems({ vocals, drums, bass, other })
+    
     return { vocals, drums, bass, other }
     
   } catch (error) {
     console.error('Stem separation failed:', error)
     throw error
+  }
+}
+
+/**
+ * Validate that stems contain real audio data
+ */
+function validateStems(stems: StemSeparationResult): void {
+  const stemNames: (keyof StemSeparationResult)[] = ['vocals', 'drums', 'bass', 'other']
+  
+  for (const stemName of stemNames) {
+    const buffer = stems[stemName]
+    const data = buffer.getChannelData(0)
+    
+    // Check for NaN/Infinity
+    let hasNaN = false
+    let allZero = true
+    let maxAbs = 0
+    
+    for (let i = 0; i < data.length; i++) {
+      const val = data[i]
+      if (!isFinite(val)) {
+        hasNaN = true
+        break
+      }
+      if (val !== 0) {
+        allZero = false
+      }
+      maxAbs = Math.max(maxAbs, Math.abs(val))
+    }
+    
+    if (hasNaN) {
+      throw new Error(`Error en separación: ${stemName} contiene valores inválidos (NaN/Infinito). Intenta con un archivo diferente.`)
+    }
+    
+    if (allZero) {
+      throw new Error(`Error en separación: ${stemName} está completamente silenciosa. Esto puede indicar un problema con el modelo.`)
+    }
   }
 }
 

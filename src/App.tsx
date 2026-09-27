@@ -4,7 +4,7 @@ import './App.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 
-const APP_VERSION = '0.0022b'
+const APP_VERSION = '0.0023b'
 
 interface Clip {
   player: Tone.Player
@@ -403,6 +403,20 @@ function App() {
     const stemNames = ['Vocals', 'Drums', 'Bass', 'Other']
     const stemBuffers = [stems.vocals, stems.drums, stems.bass, stems.other]
     
+    // Log stem amplitudes for debugging
+    console.log('Stem amplitude check:')
+    stemBuffers.forEach((buffer, i) => {
+      const data = buffer.getChannelData(0)
+      let peak = 0
+      let rms = 0
+      for (let j = 0; j < data.length; j++) {
+        peak = Math.max(peak, Math.abs(data[j]))
+        rms += data[j] * data[j]
+      }
+      rms = Math.sqrt(rms / data.length)
+      console.log(`  ${stemNames[i]}: peak=${peak.toFixed(4)}, rms=${rms.toFixed(4)}, rms_dB=${(20 * Math.log10(rms)).toFixed(1)}`)
+    })
+    
     const newTrackStates = [...trackStates]
 
     for (let i = 0; i < stemBuffers.length; i++) {
@@ -417,7 +431,11 @@ function App() {
       // Create new player for this stem
       const player = new Tone.Player()
       player.loop = true
-      player.buffer.set(stemBuffers[i])
+      
+      // Convert native AudioBuffer to ToneAudioBuffer
+      const toneBuffer = new Tone.ToneAudioBuffer(stemBuffers[i])
+      player.buffer = toneBuffer
+      
       player.connect(trackGainsRef.current[targetTrackIndex])
 
       newTrackStates[targetTrackIndex] = {

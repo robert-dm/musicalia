@@ -4,7 +4,7 @@ import './App.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 
-const APP_VERSION = '0.0024b'
+const APP_VERSION = '0.0025b'
 
 interface Clip {
   player: Tone.Player
@@ -41,6 +41,7 @@ function App() {
   const [showStemDialog, setShowStemDialog] = useState(false)
   const [stemProgress, setStemProgress] = useState<number>(0)
   const [isProcessingStems, setIsProcessingStems] = useState(false)
+  const stemAbortControllerRef = useRef<AbortController | null>(null)
   const pendingFileRef = useRef<File | null>(null)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
     Array.from({ length: 8 }, (_, i) => ({
@@ -351,12 +352,33 @@ function App() {
       }
     } finally {
       setIsProcessingStems(false)
+      stemAbortControllerRef.current = null
       pendingFileRef.current = null
       setSelectedTrack(null)
       
       if (fileInputRef.current) {
         fileInputRef.current.value = ''
       }
+    }
+  }
+
+  const handleCancelStemSeparation = () => {
+    if (stemAbortControllerRef.current) {
+      stemAbortControllerRef.current.abort()
+    }
+    setShowStemDialog(false)
+    setIsProcessingStems(false)
+    setStemProgress(0)
+    
+    // Fall back to single track
+    if (pendingFileRef.current && selectedTrack !== null) {
+      loadSingleTrack(pendingFileRef.current, selectedTrack).catch(console.error)
+    }
+    
+    pendingFileRef.current = null
+    setSelectedTrack(null)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
     }
   }
 
@@ -420,6 +442,10 @@ function App() {
   const processStemSeparation = async (file: File, startTrackIndex: number) => {
     await ensureAudio()
 
+    // Create abort controller
+    const abortController = new AbortController()
+    stemAbortControllerRef.current = abortController
+
     // Load the audio file
     const url = URL.createObjectURL(file)
     const tempPlayer = new Tone.Player()
@@ -427,10 +453,10 @@ function App() {
     const originalBuffer = tempPlayer.buffer.get() as AudioBuffer
     tempPlayer.dispose()
 
-    // Separate stems
+    // Separate stems with cancel support
     const stems = await separateStems(originalBuffer, (progress) => {
       setStemProgress(progress.progress)
-    })
+    }, abortController.signal)
 
     // Create clips for each stem
     const stemNames = ['Vocals', 'Drums', 'Bass', 'Other']
@@ -725,7 +751,7 @@ function App() {
       )}
 
       {isProcessingStems && (
-        <StemSplitProgress progress={stemProgress} />
+        <StemSplitProgress progress={stemProgress} onCancel={handleCancelStemSeparation} />
       )}
 
       <div className="arrangement-view">

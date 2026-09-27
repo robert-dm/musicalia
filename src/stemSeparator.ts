@@ -469,23 +469,37 @@ async function applyMaskAndReconstruct(
 }
 
 /**
- * Process a single audio chunk through the full pipeline
+ * Process a single audio chunk through the full pipeline with proper progress
  */
 async function processChunk(
   audioChunk: Float32Array,
   sampleRate: number,
   chunkIndex: number,
   totalChunks: number,
-  onProgress?: (progress: StemSeparationProgress) => void
+  startTime: number,
+  onProgress?: (progress: StemSeparationProgress) => void,
+  signal?: AbortSignal
 ): Promise<StemSeparationResult> {
   
-  const chunkLabel = totalChunks > 1 ? ` (parte ${chunkIndex + 1}/${totalChunks})` : ''
+  if (signal?.aborted) throw new Error('Cancelado por el usuario')
   
-  // Compute STFT
-  onProgress?.({ progress: 0, stage: `Calculando STFT${chunkLabel}...` })
-  const { real, imag } = computeSTFT(audioChunk, onProgress)
+  const baseProgress = chunkIndex / totalChunks
+  const chunkWeight = 1 / totalChunks
+  const steps = 6 // STFT, 4 models, reconstruct
   
-  // Convert to stereo for model (duplicate mono)
+  const reportProgress = (step: number, stage: string) => {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0)
+    const progress = (baseProgress + (step / steps) * chunkWeight) * 100
+    onProgress?.({ progress, stage: `Parte ${chunkIndex + 1}/${totalChunks} · ${stage} · ${elapsed}s` })
+  }
+  
+  // Step 1: Compute STFT
+  reportProgress(0, 'STFT')
+  const chunkStart = Date.now()
+  const { real, imag } = computeSTFT(audioChunk)
+  await new Promise(r => setTimeout(r, 0)) // Yield to UI
+  
+  // Convert to stereo for model
   const stereoReal = [real[0], real[0]]
   const stereoImag = [imag[0], imag[0]]
   
@@ -493,35 +507,39 @@ async function processChunk(
   const magnitude = extractMagnitude(stereoReal, stereoImag)
   const inputTensor = createModelInput(magnitude)
   
-  // Process all 4 stems sequentially
-  onProgress?.({ progress: 0, stage: `Procesando vocals${chunkLabel}...` })
-  const vocalsEst = await processSingleStem('vocals', inputTensor, onProgress)
+  // Steps 2-5: Process all 4 stems
+  const stems = ['vocals', 'drums', 'bass', 'other'] as const
+  const estimates: { [key: string]: Float32Array } = {}
   
-  onProgress?.({ progress: 0, stage: `Procesando drums${chunkLabel}...` })
-  const drumsEst = await processSingleStem('drums', inputTensor, onProgress)
-  
-  onProgress?.({ progress: 0, stage: `Procesando bass${chunkLabel}...` })
-  const bassEst = await processSingleStem('bass', inputTensor, onProgress)
-  
-  onProgress?.({ progress: 0, stage: `Procesando other${chunkLabel}...` })
-  const otherEst = await processSingleStem('other', inputTensor, onProgress)
-  
-  // Apply masks and reconstruct
-  const estimates = {
-    vocals: vocalsEst,
-    drums: drumsEst,
-    bass: bassEst,
-    other: otherEst
+  for (let i = 0; i < stems.length; i++) {
+    if (signal?.aborted) throw new Error('Cancelado por el usuario')
+    
+    reportProgress(1 + i, stems[i])
+    const modelStart = Date.now()
+    estimates[stems[i]] = await processSingleStem(stems[i], inputTensor)
+    console.log(`[PERF] Model ${stems[i]}: ${Date.now() - modelStart}ms`)
+    await new Promise(r => setTimeout(r, 0)) // Yield to UI
   }
   
-  return await applyMaskAndReconstruct(
+  // Step 6: Reconstruct
+  if (signal?.aborted) throw new Error('Cancelado por el usuario')
+  
+  reportProgress(5, 'reconstrucción')
+  const result = await applyMaskAndReconstruct(
     stereoReal,
     stereoImag,
-    estimates,
+    {
+      vocals: estimates.vocals,
+      drums: estimates.drums,
+      bass: estimates.bass,
+      other: estimates.other
+    },
     inputTensor.dims as number[],
-    sampleRate,
-    onProgress
+    sampleRate
   )
+  
+  console.log(`[PERF] Chunk ${chunkIndex + 1}/${totalChunks}: ${Date.now() - chunkStart}ms`)
+  return result
 }
 
 /**
@@ -575,17 +593,36 @@ function stitchChunks(
 }
 
 /**
- * Main stem separation function with chunking support
+ * Main stem separation with cancel support and watchdog
  */
 export async function separateStems(
   audioBuffer: AudioBuffer,
-  onProgress?: (progress: StemSeparationProgress) => void
+  onProgress?: (progress: StemSeparationProgress) => void,
+  signal?: AbortSignal
 ): Promise<StemSeparationResult> {
+  
+  const startTime = Date.now()
+  let lastProgressTime = startTime
+  
+  // Watchdog: throw if no progress for 90s
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastProgressTime > 90000) {
+      clearInterval(watchdog)
+      throw new Error('La separación de stems se detuvo. Intenta con un archivo más corto o cárgalo como pista única.')
+    }
+  }, 5000)
+  
+  const wrappedProgress = (p: StemSeparationProgress) => {
+    lastProgressTime = Date.now()
+    onProgress?.(p)
+  }
   
   try {
     await initializeRuntime()
     
-    onProgress?.({ progress: 5, stage: 'Inicializando...' })
+    if (signal?.aborted) throw new Error('Cancelado por el usuario')
+    
+    wrappedProgress({ progress: 5, stage: 'Inicializando...' })
     
     const duration = audioBuffer.length / audioBuffer.sampleRate
     const sampleRate = audioBuffer.sampleRate
@@ -608,11 +645,11 @@ export async function separateStems(
     
     if (!needsChunking) {
       // Process entire audio at once
-      onProgress?.({ progress: 10, stage: 'Procesando audio...' })
+      wrappedProgress({ progress: 10, stage: 'Procesando audio...' })
       
-      const { real, imag } = computeSTFT(mono, onProgress)
+      const { real, imag } = computeSTFT(mono)
       
-      onProgress?.({ progress: 20, stage: 'Extrayendo magnitudes...' })
+      wrappedProgress({ progress: 20, stage: 'Extrayendo magnitudes...' })
       
       const stereoReal = [real[0], real[0]]
       const stereoImag = [imag[0], imag[0]]
@@ -622,17 +659,17 @@ export async function separateStems(
       
       console.log('Input tensor shape:', inputTensor.dims)
       
-      onProgress?.({ progress: 30, stage: 'Procesando vocals...' })
-      const vocalsEst = await processSingleStem('vocals', inputTensor, onProgress)
+      wrappedProgress({ progress: 30, stage: 'Procesando vocals...' })
+      const vocalsEst = await processSingleStem('vocals', inputTensor)
       
-      onProgress?.({ progress: 45, stage: 'Procesando drums...' })
-      const drumsEst = await processSingleStem('drums', inputTensor, onProgress)
+      wrappedProgress({ progress: 45, stage: 'Procesando drums...' })
+      const drumsEst = await processSingleStem('drums', inputTensor)
       
-      onProgress?.({ progress: 60, stage: 'Procesando bass...' })
-      const bassEst = await processSingleStem('bass', inputTensor, onProgress)
+      wrappedProgress({ progress: 60, stage: 'Procesando bass...' })
+      const bassEst = await processSingleStem('bass', inputTensor)
       
-      onProgress?.({ progress: 75, stage: 'Procesando other...' })
-      const otherEst = await processSingleStem('other', inputTensor, onProgress)
+      wrappedProgress({ progress: 75, stage: 'Procesando other...' })
+      const otherEst = await processSingleStem('other', inputTensor)
       
       const estimates = {
         vocals: vocalsEst,
@@ -646,11 +683,13 @@ export async function separateStems(
         stereoImag,
         estimates,
         inputTensor.dims as number[],
-        sampleRate,
-        onProgress
+        sampleRate
       )
       
-      onProgress?.({ progress: 100, stage: 'Completado' })
+      wrappedProgress({ progress: 100, stage: 'Completado' })
+      
+      validateStems(result)
+      clearInterval(watchdog)
       return result
     }
     
@@ -677,7 +716,7 @@ export async function separateStems(
       onProgress?.({ progress: chunkProgress, stage: `Procesando parte ${chunkIdx + 1}/${numChunks}...` })
       
       // Process chunk
-      const chunkResult = await processChunk(audioChunk, sampleRate, chunkIdx, numChunks, onProgress)
+      const chunkResult = await processChunk(audioChunk, sampleRate, chunkIdx, numChunks, startTime, wrappedProgress, signal)
       
       stemChunks.vocals.push(chunkResult.vocals)
       stemChunks.drums.push(chunkResult.drums)
@@ -686,21 +725,23 @@ export async function separateStems(
     }
     
     // Stitch chunks together
-    onProgress?.({ progress: 95, stage: 'Uniendo partes...' })
+    wrappedProgress({ progress: 95, stage: 'Uniendo partes...' })
     
     const vocals = stitchChunks(stemChunks.vocals, overlapSamples, mono.length, sampleRate)
     const drums = stitchChunks(stemChunks.drums, overlapSamples, mono.length, sampleRate)
     const bass = stitchChunks(stemChunks.bass, overlapSamples, mono.length, sampleRate)
     const other = stitchChunks(stemChunks.other, overlapSamples, mono.length, sampleRate)
     
-    onProgress?.({ progress: 100, stage: 'Completado' })
+    wrappedProgress({ progress: 100, stage: 'Completado' })
     
     // Validate stems before returning
     validateStems({ vocals, drums, bass, other })
     
+    clearInterval(watchdog)
     return { vocals, drums, bass, other }
     
   } catch (error) {
+    clearInterval(watchdog)
     console.error('Stem separation failed:', error)
     throw error
   }

@@ -5,20 +5,8 @@ import './AudioDiagnostics.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 import { autosaveProject, loadProject, clearProject } from './projectManager'
-import { 
-  initGoogleDrive, 
-  isGoogleDriveEnabled, 
-  connectGoogleDrive, 
-  isConnected,
-  saveProjectToDrive,
-  listDriveProjects,
-  openProjectFromDrive,
-  deleteProjectFromDrive,
-  getMusicaliStorageUsage,
-  type DriveProject
-} from './googleDrive'
 
-const APP_VERSION = '0.0027b'
+const APP_VERSION = '0.0026b'
 
 interface Clip {
   player: Tone.Player
@@ -69,18 +57,6 @@ function App() {
   const [audioLevel, setAudioLevel] = useState(0)
   const meterRef = useRef<Tone.Meter | null>(null)
   const [showToast, setShowToast] = useState(false)
-  const [driveConnected, setDriveConnected] = useState(false)
-  const [showDriveProjects, setShowDriveProjects] = useState(false)
-  const [driveProjects, setDriveProjects] = useState<DriveProject[]>([])
-  const [currentDriveFileId, setCurrentDriveFileId] = useState<string | null>(null)
-  const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
-  const [uploadProgress, setUploadProgress] = useState(0)
-  const [storageUsage, setStorageUsage] = useState(0)
-  
-  useEffect(() => {
-    initGoogleDrive()
-    setDriveConnected(isConnected())
-  }, [])
   
   // Autosave on state changes
   useEffect(() => {
@@ -164,158 +140,7 @@ function App() {
     if (!confirm('¿Crear un nuevo proyecto? Se perderá el trabajo no guardado.')) return
     
     await clearProject()
-    setCurrentDriveFileId(null)
-    setCurrentProjectName('Proyecto sin título')
     window.location.reload()
-  }
-  
-  const handleConnectDrive = async () => {
-    try {
-      await connectGoogleDrive()
-      setDriveConnected(true)
-      alert('Conectado a Google Drive')
-    } catch (err: any) {
-      alert(`Error al conectar: ${err.message}`)
-    }
-  }
-  
-  const handleSaveToDrive = async () => {
-    if (!driveConnected) {
-      alert('Primero conecta Google Drive')
-      return
-    }
-    
-    const name = prompt('Nombre del proyecto:', currentProjectName)
-    if (!name) return
-    
-    const state = {
-      bpm,
-      loopStart,
-      loopEnd,
-      playheadPosition,
-      tracks: trackStates.map(t => ({
-        name: t.name || '',
-        mute: t.mute,
-        solo: t.solo,
-        volume: t.volume,
-        clip: t.clip ? {
-          fileName: t.clip.fileName,
-          startPosition: t.clip.startPosition,
-          audioData: {
-            left: Array.from(t.clip.buffer.getChannelData(0)),
-            right: Array.from(t.clip.buffer.getChannelData(1)),
-            sampleRate: t.clip.buffer.sampleRate
-          }
-        } : null
-      }))
-    }
-    
-    try {
-      setUploadProgress(0)
-      const fileId = await saveProjectToDrive(state, name, currentDriveFileId || undefined, setUploadProgress)
-      setCurrentDriveFileId(fileId)
-      setCurrentProjectName(name)
-      alert('Proyecto guardado en Drive')
-    } catch (err: any) {
-      alert(`Error al guardar: ${err.message}`)
-    } finally {
-      setUploadProgress(0)
-    }
-  }
-  
-  const handleShowProjects = async () => {
-    if (!driveConnected) {
-      alert('Primero conecta Google Drive')
-      return
-    }
-    
-    try {
-      const projects = await listDriveProjects()
-      setDriveProjects(projects)
-      const usage = await getMusicaliStorageUsage()
-      setStorageUsage(usage)
-      setShowDriveProjects(true)
-    } catch (err: any) {
-      alert(`Error al listar proyectos: ${err.message}`)
-    }
-  }
-  
-  const handleOpenDriveProject = async (fileId: string, fileName: string) => {
-    try {
-      const state = await openProjectFromDrive(fileId)
-      
-      await ensureAudio()
-      
-      setBpm(state.bpm)
-      setLoopStart(state.loopStart)
-      setLoopEnd(state.loopEnd)
-      setPlayheadPosition(state.playheadPosition)
-      
-      const newTrackStates = state.tracks.map((t, i) => {
-        if (!t.clip) return { ...t, clip: null }
-        
-        const buffer = new AudioBuffer({
-          numberOfChannels: 2,
-          length: t.clip.audioData.left.length,
-          sampleRate: t.clip.audioData.sampleRate
-        })
-        buffer.getChannelData(0).set(new Float32Array(t.clip.audioData.left))
-        buffer.getChannelData(1).set(new Float32Array(t.clip.audioData.right))
-        
-        const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-        const player = new Tone.Player()
-        player.buffer = toneBuffer
-        player.loop = true
-        player.connect(trackGainsRef.current[i])
-        
-        setTimeout(() => {
-          const canvas = canvasRefs.current[i]
-          if (canvas) drawWaveform(canvas, buffer)
-        }, 100)
-        
-        return {
-          ...t,
-          clip: {
-            player,
-            fileName: t.clip.fileName,
-            isPlaying: false,
-            buffer,
-            startPosition: t.clip.startPosition
-          }
-        }
-      })
-      
-      setTrackStates(newTrackStates)
-      setCurrentDriveFileId(fileId)
-      setCurrentProjectName(fileName.replace('.musicalia', ''))
-      setShowDriveProjects(false)
-      alert('Proyecto abierto desde Drive')
-    } catch (err: any) {
-      alert(`Error al abrir proyecto: ${err.message}`)
-    }
-  }
-  
-  const handleDeleteDriveProject = async (fileId: string, fileName: string) => {
-    if (!confirm(`¿Eliminar permanentemente "${fileName}"?`)) return
-    
-    try {
-      await deleteProjectFromDrive(fileId)
-      
-      if (currentDriveFileId === fileId) {
-        await clearProject()
-        setCurrentDriveFileId(null)
-        setCurrentProjectName('Proyecto sin título')
-      }
-      
-      const projects = await listDriveProjects()
-      setDriveProjects(projects)
-      const usage = await getMusicaliStorageUsage()
-      setStorageUsage(usage)
-      
-      alert('Proyecto eliminado')
-    } catch (err: any) {
-      alert(`Error al eliminar: ${err.message}`)
-    }
   }
 
   const ensureAudio = async () => {
@@ -988,38 +813,6 @@ function App() {
       <div className="transport-bar">
         <div className="transport-controls">
           <button className="header-btn" onClick={handleNewProject} title="Nuevo proyecto">🆕</button>
-          {isGoogleDriveEnabled() ? (
-            <>
-              <button 
-                className="header-btn" 
-                onClick={handleConnectDrive} 
-                disabled={driveConnected}
-                title={driveConnected ? 'Conectado a Google Drive' : 'Conectar Google Drive'}
-              >
-                {driveConnected ? '✓' : '🔗'} Drive
-              </button>
-              <button 
-                className="header-btn" 
-                onClick={handleSaveToDrive} 
-                disabled={!driveConnected}
-                title={driveConnected ? 'Guardar en Drive' : 'Primero conecta Google Drive'}
-              >
-                💾 Drive
-              </button>
-              <button 
-                className="header-btn" 
-                onClick={handleShowProjects} 
-                disabled={!driveConnected}
-                title={driveConnected ? 'Mis proyectos' : 'Primero conecta Google Drive'}
-              >
-                📁 Proyectos
-              </button>
-            </>
-          ) : (
-            <button className="header-btn" disabled title="Google Drive no configurado (falta VITE_GOOGLE_CLIENT_ID)">
-              🔒 Drive
-            </button>
-          )}
           <button
             className={`transport-button ${isPlaying ? 'active' : ''}`}
             onClick={handlePlay}
@@ -1093,45 +886,6 @@ function App() {
       
       {showToast && (
         <div className="toast">Proyecto restaurado</div>
-      )}
-      
-      {uploadProgress > 0 && uploadProgress < 100 && (
-        <div className="upload-progress">
-          <div className="upload-bar" style={{ width: `${uploadProgress}%` }}></div>
-          <span>{uploadProgress}% subiendo...</span>
-        </div>
-      )}
-      
-      {showDriveProjects && (
-        <div className="drive-projects-modal">
-          <div className="modal-content">
-            <h2>Mis proyectos en Drive</h2>
-            <div className="storage-info">
-              Espacio usado: {(storageUsage / 1024 / 1024).toFixed(2)} MB
-            </div>
-            <div className="projects-list">
-              {driveProjects.length === 0 ? (
-                <p>No hay proyectos guardados</p>
-              ) : (
-                driveProjects.map(project => (
-                  <div key={project.id} className="project-item">
-                    <div className="project-info">
-                      <div className="project-name">{project.name}</div>
-                      <div className="project-meta">
-                        {new Date(project.modifiedTime).toLocaleDateString()} · {(project.size / 1024 / 1024).toFixed(2)} MB
-                      </div>
-                    </div>
-                    <div className="project-actions">
-                      <button onClick={() => handleOpenDriveProject(project.id, project.name)}>Abrir</button>
-                      <button onClick={() => handleDeleteDriveProject(project.id, project.name)} className="delete-btn">Eliminar</button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-            <button className="modal-close" onClick={() => setShowDriveProjects(false)}>Cerrar</button>
-          </div>
-        </div>
       )}
 
       <div className="arrangement-view">

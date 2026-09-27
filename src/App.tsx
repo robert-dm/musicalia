@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import * as Tone from 'tone'
 import './App.css'
+import './AudioDiagnostics.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 
@@ -52,6 +53,8 @@ function App() {
       name: `Track ${i + 1}`
     }))
   )
+  const [audioLevel, setAudioLevel] = useState(0)
+  const meterRef = useRef<Tone.Meter | null>(null)
 
   const ensureAudio = async () => {
     const contextState = Tone.getContext().state
@@ -66,6 +69,19 @@ function App() {
         )
       }
       
+      // Create meter for diagnostics
+      if (!meterRef.current) {
+        meterRef.current = new Tone.Meter()
+        Tone.getDestination().connect(meterRef.current)
+        
+        // Update level meter
+        setInterval(() => {
+          if (meterRef.current) {
+            setAudioLevel(meterRef.current.getValue() as number)
+          }
+        }, 100)
+      }
+      
       audioInitializedRef.current = true
     }
     
@@ -75,6 +91,19 @@ function App() {
       await Tone.start()
       await Tone.getContext().resume()
     }
+    
+    // Diagnostic checks
+    console.log('[DIAG] Destination mute:', Tone.getDestination().mute)
+    console.log('[DIAG] Destination volume:', Tone.getDestination().volume.value)
+    console.log('[DIAG] Gains:', trackGainsRef.current.map(g => g.gain.value))
+  }
+
+  const playTestTone = async () => {
+    await Tone.start()
+    const osc = new Tone.Oscillator(440, 'sine').toDestination()
+    osc.start()
+    osc.stop('+0.5')
+    setTimeout(() => osc.dispose(), 600)
   }
 
   const formatTime = (seconds: number): string => {
@@ -159,6 +188,9 @@ function App() {
   }
 
   const handlePlay = async () => {
+    // CRITICAL: Call Tone.start() synchronously FIRST (Safari autoplay)
+    await Tone.start()
+    
     await ensureAudio()
     
     // Ensure context is running (Safari may suspend it)
@@ -738,8 +770,18 @@ function App() {
             max="300"
           />
         </div>
-        <div className="version-badge">
-          <span className="version-label">v{APP_VERSION}</span>
+        <div className="header-info">
+          <div className="audio-diagnostics">
+            <span title="Context State">{Tone.getContext().state}</span>
+            <span title="Sample Rate">{Tone.getContext().sampleRate}Hz</span>
+            <span title="Output Level" className={audioLevel > -60 ? 'level-active' : 'level-inactive'}>
+              {audioLevel > -100 ? `${audioLevel.toFixed(0)}dB` : '-∞'}
+            </span>
+            <button className="test-tone-btn" onClick={playTestTone} title="Test Tone (440Hz)">🔊</button>
+          </div>
+          <div className="version-badge">
+            <span className="version-label">v{APP_VERSION}</span>
+          </div>
         </div>
       </div>
 

@@ -47,10 +47,19 @@ const CHUNK_OVERLAP = 2   // 2-second overlap between chunks for continuity
  * Initialize ONNX Runtime Web
  */
 async function initializeRuntime(): Promise<void> {
-  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/'
-  ort.env.wasm.numThreads = 1
+  console.log('Initializing ONNX Runtime...')
+  
+  // Enable SIMD and threads
+  ort.env.wasm.numThreads = Math.min(navigator.hardwareConcurrency || 4, 4)
   ort.env.wasm.simd = true
-  console.log('ONNX Runtime configured for Spleeter STFT models')
+  ort.env.wasm.proxy = typeof SharedArrayBuffer !== 'undefined'
+  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/'
+  
+  console.log('ONNX config:', {
+    threads: ort.env.wasm.numThreads,
+    simd: ort.env.wasm.simd,
+    proxy: ort.env.wasm.proxy
+  })
 }
 
 /**

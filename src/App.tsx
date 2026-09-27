@@ -4,8 +4,9 @@ import './App.css'
 import './AudioDiagnostics.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
+import { autosaveProject, loadProject, clearProject, saveProjectToFile, openProjectFromFile } from './projectManager'
 
-const APP_VERSION = '0.0025b'
+const APP_VERSION = '0.0026b'
 
 interface Clip {
   player: Tone.Player
@@ -55,6 +56,183 @@ function App() {
   )
   const [audioLevel, setAudioLevel] = useState(0)
   const meterRef = useRef<Tone.Meter | null>(null)
+  const [showToast, setShowToast] = useState(false)
+  const projectFileInputRef = useRef<HTMLInputElement>(null)
+  
+  // Autosave on state changes
+  useEffect(() => {
+    const state = {
+      bpm,
+      loopStart,
+      loopEnd,
+      playheadPosition,
+      tracks: trackStates.map(t => ({
+        name: t.name || '',
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        clip: t.clip ? {
+          fileName: t.clip.fileName,
+          startPosition: t.clip.startPosition,
+          audioData: {
+            left: Array.from(t.clip.buffer.getChannelData(0)),
+            right: Array.from(t.clip.buffer.getChannelData(1)),
+            sampleRate: t.clip.buffer.sampleRate
+          }
+        } : null
+      }))
+    }
+    autosaveProject(state)
+  }, [bpm, loopStart, loopEnd, playheadPosition, trackStates])
+  
+  // Load project on mount
+  useEffect(() => {
+    loadProject().then(async (state) => {
+      if (!state) return
+      
+      await ensureAudio()
+      
+      setBpm(state.bpm)
+      setLoopStart(state.loopStart)
+      setLoopEnd(state.loopEnd)
+      setPlayheadPosition(state.playheadPosition)
+      
+      const newTrackStates = state.tracks.map((t, i) => {
+        if (!t.clip) return { ...t, clip: null }
+        
+        const buffer = new AudioBuffer({
+          numberOfChannels: 2,
+          length: t.clip.audioData.left.length,
+          sampleRate: t.clip.audioData.sampleRate
+        })
+        buffer.getChannelData(0).set(new Float32Array(t.clip.audioData.left))
+        buffer.getChannelData(1).set(new Float32Array(t.clip.audioData.right))
+        
+        const toneBuffer = new Tone.ToneAudioBuffer(buffer)
+        const player = new Tone.Player()
+        player.buffer = toneBuffer
+        player.loop = true
+        player.connect(trackGainsRef.current[i])
+        
+        setTimeout(() => {
+          const canvas = canvasRefs.current[i]
+          if (canvas) drawWaveform(canvas, buffer)
+        }, 100)
+        
+        return {
+          ...t,
+          clip: {
+            player,
+            fileName: t.clip.fileName,
+            isPlaying: false,
+            buffer,
+            startPosition: t.clip.startPosition
+          }
+        }
+      })
+      
+      setTrackStates(newTrackStates)
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+    })
+  }, [])
+  
+  const handleNewProject = async () => {
+    if (!confirm('¿Crear un nuevo proyecto? Se perderá el trabajo no guardado.')) return
+    
+    await clearProject()
+    window.location.reload()
+  }
+  
+  const handleSaveProject = async () => {
+    const state = {
+      bpm,
+      loopStart,
+      loopEnd,
+      playheadPosition,
+      tracks: trackStates.map(t => ({
+        name: t.name || '',
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        clip: t.clip ? {
+          fileName: t.clip.fileName,
+          startPosition: t.clip.startPosition,
+          audioData: {
+            left: Array.from(t.clip.buffer.getChannelData(0)),
+            right: Array.from(t.clip.buffer.getChannelData(1)),
+            sampleRate: t.clip.buffer.sampleRate
+          }
+        } : null
+      }))
+    }
+    
+    try {
+      await saveProjectToFile(state)
+    } catch (err) {
+      alert('Error al guardar el proyecto.')
+      console.error(err)
+    }
+  }
+  
+  const handleOpenProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    
+    try {
+      const state = await openProjectFromFile(file)
+      
+      await ensureAudio()
+      
+      setBpm(state.bpm)
+      setLoopStart(state.loopStart)
+      setLoopEnd(state.loopEnd)
+      setPlayheadPosition(state.playheadPosition)
+      
+      const newTrackStates = state.tracks.map((t, i) => {
+        if (!t.clip) return { ...t, clip: null }
+        
+        const buffer = new AudioBuffer({
+          numberOfChannels: 2,
+          length: t.clip.audioData.left.length,
+          sampleRate: t.clip.audioData.sampleRate
+        })
+        buffer.getChannelData(0).set(new Float32Array(t.clip.audioData.left))
+        buffer.getChannelData(1).set(new Float32Array(t.clip.audioData.right))
+        
+        const toneBuffer = new Tone.ToneAudioBuffer(buffer)
+        const player = new Tone.Player()
+        player.buffer = toneBuffer
+        player.loop = true
+        player.connect(trackGainsRef.current[i])
+        
+        setTimeout(() => {
+          const canvas = canvasRefs.current[i]
+          if (canvas) drawWaveform(canvas, buffer)
+        }, 100)
+        
+        return {
+          ...t,
+          clip: {
+            player,
+            fileName: t.clip.fileName,
+            isPlaying: false,
+            buffer,
+            startPosition: t.clip.startPosition
+          }
+        }
+      })
+      
+      setTrackStates(newTrackStates)
+    } catch (err) {
+      alert('Error al abrir el proyecto.')
+      console.error(err)
+    }
+    
+    if (projectFileInputRef.current) {
+      projectFileInputRef.current.value = ''
+    }
+  }
 
   const ensureAudio = async () => {
     const contextState = Tone.getContext().state
@@ -725,6 +903,16 @@ function App() {
       
       <div className="transport-bar">
         <div className="transport-controls">
+          <button className="header-btn" onClick={handleNewProject} title="Nuevo proyecto">🆕</button>
+          <button className="header-btn" onClick={handleSaveProject} title="Guardar proyecto">💾</button>
+          <button className="header-btn" onClick={() => projectFileInputRef.current?.click()} title="Abrir proyecto">📂</button>
+          <input
+            ref={projectFileInputRef}
+            type="file"
+            accept=".musicalia"
+            onChange={handleOpenProject}
+            style={{ display: 'none' }}
+          />
           <button
             className={`transport-button ${isPlaying ? 'active' : ''}`}
             onClick={handlePlay}
@@ -794,6 +982,10 @@ function App() {
 
       {isProcessingStems && (
         <StemSplitProgress progress={stemProgress} onCancel={handleCancelStemSeparation} />
+      )}
+      
+      {showToast && (
+        <div className="toast">Proyecto restaurado</div>
       )}
 
       <div className="arrangement-view">

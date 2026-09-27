@@ -5,8 +5,18 @@ import './AudioDiagnostics.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 import { autosaveProject, loadProject, clearProject } from './projectManager'
+import {
+  hasMusicaliKey,
+  setMusicaliKey,
+  saveProjectToCloud,
+  listCloudProjects,
+  openProjectFromCloud,
+  deleteProjectFromCloud,
+  getStorageUsage,
+  type ProjectMetadata
+} from './cloudStorage'
 
-const APP_VERSION = '0.0026b'
+const APP_VERSION = '0.0027b'
 
 interface Clip {
   player: Tone.Player
@@ -57,6 +67,12 @@ function App() {
   const [audioLevel, setAudioLevel] = useState(0)
   const meterRef = useRef<Tone.Meter | null>(null)
   const [showToast, setShowToast] = useState(false)
+  const [hasCloudKey, setHasCloudKey] = useState(hasMusicaliKey())
+  const [showCloudProjects, setShowCloudProjects] = useState(false)
+  const [cloudProjects, setCloudProjects] = useState<ProjectMetadata[]>([])
+  const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [storageUsage, setStorageUsage] = useState(0)
   
   // Autosave on state changes
   useEffect(() => {
@@ -140,7 +156,155 @@ function App() {
     if (!confirm('¿Crear un nuevo proyecto? Se perderá el trabajo no guardado.')) return
     
     await clearProject()
+    setCurrentProjectName('Proyecto sin título')
     window.location.reload()
+  }
+  
+  const handleSetCloudKey = () => {
+    const key = prompt('Introduce la clave de Musicalia:')
+    if (!key) return
+    
+    setMusicaliKey(key)
+    setHasCloudKey(true)
+    alert('Clave configurada correctamente')
+  }
+  
+  const handleSaveToCloud = async () => {
+    if (!hasCloudKey) {
+      alert('Primero configura la clave de Musicalia')
+      return
+    }
+    
+    const name = prompt('Nombre del proyecto:', currentProjectName)
+    if (!name) return
+    
+    const projectData = {
+      name,
+      bpm,
+      loopStart,
+      loopEnd,
+      playheadPosition,
+      tracks: trackStates.map((t, i) => ({
+        name: t.name,
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        clip: t.clip ? {
+          fileName: t.clip.fileName,
+          startPosition: t.clip.startPosition,
+          audioFile: `audio_${i}.wav`,
+          audioData: {
+            left: Array.from(t.clip.buffer.getChannelData(0)),
+            right: Array.from(t.clip.buffer.getChannelData(1)),
+            sampleRate: t.clip.buffer.sampleRate
+          }
+        } : null
+      }))
+    }
+    
+    try {
+      setUploadProgress(0)
+      await saveProjectToCloud(projectData, name, setUploadProgress)
+      setCurrentProjectName(name)
+      alert('Proyecto guardado en la nube')
+    } catch (err: any) {
+      alert(`Error: ${err.message}`)
+    } finally {
+      setUploadProgress(0)
+    }
+  }
+  
+  const handleShowCloudProjects = async () => {
+    if (!hasCloudKey) {
+      alert('Primero configura la clave de Musicalia')
+      return
+    }
+    
+    try {
+      const projects = await listCloudProjects()
+      setCloudProjects(projects)
+      const usage = await getStorageUsage()
+      setStorageUsage(usage)
+      setShowCloudProjects(true)
+    } catch (err: any) {
+      alert(`Error: ${err.message}`)
+    }
+  }
+  
+  const handleOpenCloudProject = async (pathname: string, name: string) => {
+    try {
+      const state = await openProjectFromCloud(pathname)
+      
+      await ensureAudio()
+      
+      setBpm(state.bpm)
+      setLoopStart(state.loopStart)
+      setLoopEnd(state.loopEnd)
+      setPlayheadPosition(state.playheadPosition)
+      
+      const newTrackStates = state.tracks.map((t: any, i: number) => {
+        if (!t.clip) return { ...t, clip: null }
+        
+        const buffer = new AudioBuffer({
+          numberOfChannels: 2,
+          length: t.clip.audioData.left.length,
+          sampleRate: t.clip.audioData.sampleRate
+        })
+        buffer.getChannelData(0).set(new Float32Array(t.clip.audioData.left))
+        buffer.getChannelData(1).set(new Float32Array(t.clip.audioData.right))
+        
+        const toneBuffer = new Tone.ToneAudioBuffer(buffer)
+        const player = new Tone.Player()
+        player.buffer = toneBuffer
+        player.loop = true
+        player.connect(trackGainsRef.current[i])
+        
+        setTimeout(() => {
+          const canvas = canvasRefs.current[i]
+          if (canvas) drawWaveform(canvas, buffer)
+        }, 100)
+        
+        return {
+          ...t,
+          clip: {
+            player,
+            fileName: t.clip.fileName,
+            isPlaying: false,
+            buffer,
+            startPosition: t.clip.startPosition
+          }
+        }
+      })
+      
+      setTrackStates(newTrackStates)
+      setCurrentProjectName(name)
+      setShowCloudProjects(false)
+      alert('Proyecto abierto desde la nube')
+    } catch (err: any) {
+      alert(`Error: ${err.message}`)
+    }
+  }
+  
+  const handleDeleteCloudProject = async (pathname: string, name: string) => {
+    if (!confirm(`¿Eliminar permanentemente "${name}"?`)) return
+    
+    try {
+      await deleteProjectFromCloud(pathname)
+      
+      if (currentProjectName === name) {
+        await clearProject()
+        setCurrentProjectName('Proyecto sin título')
+      }
+      
+      const projects = await listCloudProjects()
+      setCloudProjects(projects)
+      const usage = await getStorageUsage()
+      setStorageUsage(usage)
+      
+      alert('Proyecto eliminado')
+    } catch (err: any) {
+      alert(`Error: ${err.message}`)
+    }
   }
 
   const ensureAudio = async () => {
@@ -813,6 +977,29 @@ function App() {
       <div className="transport-bar">
         <div className="transport-controls">
           <button className="header-btn" onClick={handleNewProject} title="Nuevo proyecto">🆕</button>
+          <button 
+            className="header-btn" 
+            onClick={handleSetCloudKey}
+            title={hasCloudKey ? 'Clave configurada' : 'Configurar clave'}
+          >
+            {hasCloudKey ? '✓' : '🔑'} Clave
+          </button>
+          <button 
+            className="header-btn" 
+            onClick={handleSaveToCloud}
+            disabled={!hasCloudKey}
+            title={hasCloudKey ? 'Guardar en la nube' : 'Primero configura la clave'}
+          >
+            ☁️ Guardar
+          </button>
+          <button 
+            className="header-btn" 
+            onClick={handleShowCloudProjects}
+            disabled={!hasCloudKey}
+            title={hasCloudKey ? 'Mis proyectos' : 'Primero configura la clave'}
+          >
+            📁 Proyectos
+          </button>
           <button
             className={`transport-button ${isPlaying ? 'active' : ''}`}
             onClick={handlePlay}
@@ -886,6 +1073,45 @@ function App() {
       
       {showToast && (
         <div className="toast">Proyecto restaurado</div>
+      )}
+      
+      {uploadProgress > 0 && uploadProgress < 100 && (
+        <div className="upload-progress">
+          <div className="upload-bar" style={{ width: `${uploadProgress}%` }}></div>
+          <span>{uploadProgress}% subiendo...</span>
+        </div>
+      )}
+      
+      {showCloudProjects && (
+        <div className="drive-projects-modal">
+          <div className="modal-content">
+            <h2>Mis proyectos en la nube</h2>
+            <div className="storage-info">
+              Espacio usado: {(storageUsage / 1024 / 1024).toFixed(2)} MB
+            </div>
+            <div className="projects-list">
+              {cloudProjects.length === 0 ? (
+                <p>No hay proyectos guardados</p>
+              ) : (
+                cloudProjects.map(project => (
+                  <div key={project.pathname} className="project-item">
+                    <div className="project-info">
+                      <div className="project-name">{project.name}</div>
+                      <div className="project-meta">
+                        {new Date(project.uploadedAt).toLocaleDateString()} · {(project.size / 1024 / 1024).toFixed(2)} MB
+                      </div>
+                    </div>
+                    <div className="project-actions">
+                      <button onClick={() => handleOpenCloudProject(project.pathname, project.name)}>Abrir</button>
+                      <button onClick={() => handleDeleteCloudProject(project.pathname, project.name)} className="delete-btn">Eliminar</button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            <button className="modal-close" onClick={() => setShowCloudProjects(false)}>Cerrar</button>
+          </div>
+        </div>
       )}
 
       <div className="arrangement-view">

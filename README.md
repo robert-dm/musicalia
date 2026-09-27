@@ -1,54 +1,32 @@
 # Musicalia
 
-A web-based music production application built with React, Tone.js, and ONNX Runtime for AI-powered stem separation with Google Drive cloud storage.
+A free web DAW inspired by Ableton.
 
-## Google Drive Setup
+## Slice 1: Transport & Session View
 
-To enable Google Drive cloud project storage:
+This is the minimal first slice featuring:
+- Transport bar with Play/Stop controls and BPM input
+- Empty Session View grid (8 tracks × 4 scenes)
+- Dark DAW-inspired UI
+- Tone.js integration for transport control
 
-### 1. Google Cloud Console
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project or select an existing one
-3. Enable the **Google Drive API**:
-   - Go to **APIs & Services** > **Library**
-   - Search for "Google Drive API"
-   - Click **Enable**
-4. Create OAuth 2.0 credentials:
-   - Go to **APIs & Services** > **Credentials**
-   - Click **Create Credentials** > **OAuth client ID**
-   - Choose **Web application**
-   - Under **Authorized JavaScript origins**, add:
-     - `https://musicalia-pi.vercel.app`
-   - Click **Create**
-   - Copy the **Client ID**
-
-### 2. Vercel Environment Variable
-
-1. Go to your Vercel project dashboard
-2. Navigate to **Settings** > **Environment Variables**
-3. Add a new variable:
-   - **Name**: `VITE_GOOGLE_CLIENT_ID`
-   - **Value**: (paste the Client ID from step 1)
-   - **Environment**: Production, Preview, Development
-4. Click **Save**
-5. Redeploy the application
-
-Once configured, users can:
-- Connect their Google Drive account
-- Save projects to a "Musicalia" folder in Drive
-- List, open, and permanently delete cloud projects
-- View storage usage
-
-## Development
+## Getting Started
 
 ```bash
 npm install
 npm run dev
 ```
 
+The app will be available at http://localhost:5173
+
 ## Build for Production
 
 ```bash
 npm run build
 ```
+
+## Tech Stack
+
+- React + TypeScript
+- Vite
+- Tone.js (for audio transport)

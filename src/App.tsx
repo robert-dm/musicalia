@@ -4,7 +4,7 @@ import './App.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 
-const APP_VERSION = '0.0023b'
+const APP_VERSION = '0.0024b'
 
 interface Clip {
   player: Tone.Player
@@ -53,6 +53,9 @@ function App() {
   )
 
   const ensureAudio = async () => {
+    const contextState = Tone.getContext().state
+    console.log('[DEBUG] ensureAudio: Tone context state=', contextState)
+    
     if (!audioInitializedRef.current) {
       await Tone.start()
       
@@ -63,6 +66,13 @@ function App() {
       }
       
       audioInitializedRef.current = true
+    }
+    
+    // Resume if suspended (Safari can interrupt context)
+    if (Tone.getContext().state !== 'running') {
+      console.log('[DEBUG] Context not running, resuming...')
+      await Tone.start()
+      await Tone.getContext().resume()
     }
   }
 
@@ -149,6 +159,14 @@ function App() {
 
   const handlePlay = async () => {
     await ensureAudio()
+    
+    // Ensure context is running (Safari may suspend it)
+    if (Tone.getContext().state !== 'running') {
+      console.log('[DEBUG] handlePlay: Context not running, resuming...')
+      await Tone.start()
+      await Tone.getContext().resume()
+    }
+    
     console.log('[DEBUG] handlePlay: audio initialized, gains:', trackGainsRef.current.length)
     console.log('[DEBUG] trackStates with clips:', trackStates.filter(t => t.clip).length)
     
@@ -160,7 +178,8 @@ function App() {
     
     const maxDuration = getMaxDuration()
     
-    setTrackStates(prev => prev.map(track => {
+    // Start players (outside setState to avoid StrictMode double-run)
+    const updatedStates = trackStates.map(track => {
       if (track.clip && !track.clip.isPlaying) {
         track.clip.player.loop = true
         const offset = startTime % track.clip.buffer.duration
@@ -171,10 +190,12 @@ function App() {
           offset
         })
         track.clip.player.start(Tone.now(), offset)
-        track.clip.isPlaying = true
+        return { ...track, clip: { ...track.clip, isPlaying: true } }
       }
-      return { ...track }
-    }))
+      return track
+    })
+    
+    setTrackStates(updatedStates)
     
     setIsPlaying(true)
     setIsPaused(false)

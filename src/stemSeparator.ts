@@ -448,12 +448,14 @@ async function applyMaskAndReconstruct(
       }
     }
     
-    // Create stereo AudioBuffer
-    const context = new AudioContext({ sampleRate })
-    const buffer = context.createBuffer(2, output.length, sampleRate)
+    // Create stereo AudioBuffer (no AudioContext to avoid suspending Tone)
+    const buffer = new AudioBuffer({
+      numberOfChannels: 2,
+      length: output.length,
+      sampleRate
+    })
     buffer.getChannelData(0).set(output)
     buffer.getChannelData(1).set(output)
-    context.close()
     
     return buffer
   }
@@ -532,8 +534,12 @@ function stitchChunks(
   sampleRate: number
 ): AudioBuffer {
   
-  const context = new AudioContext({ sampleRate })
-  const output = context.createBuffer(2, totalSamples, sampleRate)
+  // Create output buffer (no AudioContext to avoid suspending Tone)
+  const output = new AudioBuffer({
+    numberOfChannels: 2,
+    length: totalSamples,
+    sampleRate
+  })
   
   let position = 0
   
@@ -565,7 +571,6 @@ function stitchChunks(
     position += copyLength
   }
   
-  context.close()
   return output
 }
 

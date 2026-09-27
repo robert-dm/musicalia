@@ -18,9 +18,12 @@ export async function GET(request: NextRequest) {
       return Response.json({ error: 'Clave incorrecta' }, { status: 401 })
     }
     
+    // Use explicit token if available, otherwise SDK uses OIDC with MUSICALIA_STORE_ID
+    const token = process.env.MUSICALIA_READ_WRITE_TOKEN ?? process.env.BLOB_READ_WRITE_TOKEN
+    
     const { blobs } = await list({ 
       prefix: 'musicalia/',
-      token: process.env.MUSICALIA_READ_WRITE_TOKEN ?? process.env.BLOB_READ_WRITE_TOKEN
+      ...(token && { token })
     })
     
     const projects = blobs.map(blob => ({

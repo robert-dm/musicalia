@@ -56,7 +56,7 @@ async function initializeRuntime(): Promise<void> {
 /**
  * Create periodic Hann window (N_FFT+1)[:-1]
  */
-function createPeriodicHannWindow(size: number): Float32Array {
+export function createPeriodicHannWindow(size: number): Float32Array {
   const window = new Float32Array(size)
   for (let i = 0; i < size; i++) {
     window[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / size))
@@ -68,7 +68,7 @@ function createPeriodicHannWindow(size: number): Float32Array {
  * Compute STFT with front padding
  * Returns complex STFT: { real: Float32Array, imag: Float32Array, frames: number }
  */
-function computeSTFT(
+export function computeSTFT(
   audio: Float32Array,
   onProgress?: (progress: StemSeparationProgress) => void
 ): { real: Float32Array[][], imag: Float32Array[][], frames: number } {
@@ -227,6 +227,77 @@ async function processSingleStem(
 }
 
 /**
+ * Reconstruct audio from complex STFT using inverse STFT with identity mask (for testing)
+ */
+export function reconstructFromSTFT(
+  real: Float32Array[][],
+  imag: Float32Array[][],
+  totalFrames: number,
+  originalLength: number,
+  _sampleRate: number
+): Float32Array {
+  const fft = new FFT(N_FFT)
+  const window = createPeriodicHannWindow(N_FFT)
+  const frontPad = N_FFT - HOP_LENGTH
+  const outputLength = (totalFrames - 1) * HOP_LENGTH + N_FFT - frontPad
+  const output = new Float32Array(outputLength)
+  const normalization = new Float32Array(outputLength)
+  
+  // Process channel 0 only
+  for (let frame = 0; frame < totalFrames; frame++) {
+    // Prepare complex array for inverse FFT (symmetry)
+    const complexIn = new Float32Array(N_FFT * 2)
+    const numBins = N_FFT / 2 + 1
+    
+    for (let bin = 0; bin < numBins; bin++) {
+      complexIn[bin * 2] = real[0][frame][bin]
+      complexIn[bin * 2 + 1] = imag[0][frame][bin]
+    }
+    
+    // Mirror for negative frequencies (conjugate symmetry)
+    for (let bin = 1; bin < N_FFT / 2; bin++) {
+      complexIn[(N_FFT - bin) * 2] = real[0][frame][bin]
+      complexIn[(N_FFT - bin) * 2 + 1] = -imag[0][frame][bin]
+    }
+    
+    // Inverse FFT - fft.js outputs complex interleaved data
+    const outComplex = fft.createComplexArray()
+    fft.inverseTransform(outComplex, complexIn)
+    
+    // Extract real part (fft.js already divides by N)
+    const timeData = new Float32Array(N_FFT)
+    for (let i = 0; i < N_FFT; i++) {
+      timeData[i] = outComplex[i * 2] // Real part only
+    }
+    
+    // Overlap-add with windowing
+    const start = frame * HOP_LENGTH - frontPad
+    for (let i = 0; i < N_FFT; i++) {
+      const idx = start + i
+      if (idx >= 0 && idx < outputLength) {
+        output[idx] += timeData[i] * window[i]
+        normalization[idx] += window[i] * window[i]
+      }
+    }
+  }
+  
+  // Normalize and check for NaN/Infinity
+  for (let i = 0; i < output.length; i++) {
+    if (normalization[i] > 1e-8) {
+      output[i] /= normalization[i]
+    }
+    
+    // Guard against NaN/Infinity
+    if (!isFinite(output[i])) {
+      output[i] = 0
+    }
+  }
+  
+  // Trim to original length if needed
+  return output.length === originalLength ? output : output.slice(0, originalLength)
+}
+
+/**
  * Apply soft mask and reconstruct stems via inverse STFT
  */
 async function applyMaskAndReconstruct(
@@ -344,9 +415,15 @@ async function applyMaskAndReconstruct(
         complexIn[(N_FFT - bin) * 2 + 1] = -maskedImag[bin]
       }
       
-      // Inverse FFT
+      // Inverse FFT - fft.js outputs complex interleaved data
+      const outComplex = fft.createComplexArray()
+      fft.inverseTransform(outComplex, complexIn)
+      
+      // Extract real part (fft.js already divides by N)
       const timeData = new Float32Array(N_FFT)
-      fft.inverseTransform(timeData, complexIn)
+      for (let i = 0; i < N_FFT; i++) {
+        timeData[i] = outComplex[i * 2] // Real part only
+      }
       
       // Overlap-add with windowing
       const start = frame * HOP_LENGTH - frontPad
@@ -359,10 +436,15 @@ async function applyMaskAndReconstruct(
       }
     }
     
-    // Normalize
+    // Normalize and check for NaN/Infinity
     for (let i = 0; i < output.length; i++) {
       if (normalization[i] > 1e-8) {
         output[i] /= normalization[i]
+      }
+      
+      // Guard against NaN/Infinity
+      if (!isFinite(output[i])) {
+        output[i] = 0
       }
     }
     
@@ -608,11 +690,51 @@ export async function separateStems(
     
     onProgress?.({ progress: 100, stage: 'Completado' })
     
+    // Validate stems before returning
+    validateStems({ vocals, drums, bass, other })
+    
     return { vocals, drums, bass, other }
     
   } catch (error) {
     console.error('Stem separation failed:', error)
     throw error
+  }
+}
+
+/**
+ * Validate that stems contain real audio data
+ */
+function validateStems(stems: StemSeparationResult): void {
+  const stemNames: (keyof StemSeparationResult)[] = ['vocals', 'drums', 'bass', 'other']
+  
+  for (const stemName of stemNames) {
+    const buffer = stems[stemName]
+    const data = buffer.getChannelData(0)
+    
+    // Check for NaN/Infinity
+    let hasNaN = false
+    let allZero = true
+    let maxAbs = 0
+    
+    for (let i = 0; i < data.length; i++) {
+      const val = data[i]
+      if (!isFinite(val)) {
+        hasNaN = true
+        break
+      }
+      if (val !== 0) {
+        allZero = false
+      }
+      maxAbs = Math.max(maxAbs, Math.abs(val))
+    }
+    
+    if (hasNaN) {
+      throw new Error(`Error en separación: ${stemName} contiene valores inválidos (NaN/Infinito). Intenta con un archivo diferente.`)
+    }
+    
+    if (allZero) {
+      throw new Error(`Error en separación: ${stemName} está completamente silenciosa. Esto puede indicar un problema con el modelo.`)
+    }
   }
 }
 

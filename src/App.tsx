@@ -4,7 +4,7 @@ import './App.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 
-const APP_VERSION = '0.0021b'
+const APP_VERSION = '0.0022b'
 
 interface Clip {
   player: Tone.Player

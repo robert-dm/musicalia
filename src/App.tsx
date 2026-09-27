@@ -149,6 +149,9 @@ function App() {
 
   const handlePlay = async () => {
     await ensureAudio()
+    console.log('[DEBUG] handlePlay: audio initialized, gains:', trackGainsRef.current.length)
+    console.log('[DEBUG] trackStates with clips:', trackStates.filter(t => t.clip).length)
+    
     Tone.getTransport().bpm.value = bpm
     
     const startTime = isPaused ? playheadPosition : (loopStart ?? 0)
@@ -161,6 +164,12 @@ function App() {
       if (track.clip && !track.clip.isPlaying) {
         track.clip.player.loop = true
         const offset = startTime % track.clip.buffer.duration
+        console.log('[DEBUG] Starting player:', {
+          trackName: track.name,
+          bufferLoaded: track.clip.player.loaded,
+          bufferDuration: track.clip.player.buffer.duration,
+          offset
+        })
         track.clip.player.start(Tone.now(), offset)
         track.clip.isPlaying = true
       }
@@ -346,6 +355,7 @@ function App() {
 
   const loadSingleTrack = async (file: File, trackIndex: number) => {
     await ensureAudio()
+    console.log('[DEBUG] loadSingleTrack: trackIndex=', trackIndex, 'gain exists=', !!trackGainsRef.current[trackIndex])
 
     const existingClip = trackStates[trackIndex].clip
     if (existingClip) {
@@ -359,7 +369,9 @@ function App() {
     player.loop = true
     player.connect(trackGain)
     
+    console.log('[DEBUG] Before load')
     await player.load(url)
+    console.log('[DEBUG] After load: player.loaded=', player.loaded, 'duration=', player.buffer.duration)
 
     const buffer = player.buffer.get() as AudioBuffer
 

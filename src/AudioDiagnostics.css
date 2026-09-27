@@ -97,3 +97,138 @@
   }
 }
 
+.upload-progress {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 300px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 12px;
+  z-index: 10000;
+}
+
+.upload-bar {
+  height: 8px;
+  background: #4ade80;
+  border-radius: 4px;
+  transition: width 0.3s;
+  margin-bottom: 8px;
+}
+
+.upload-progress span {
+  font-size: 12px;
+  color: #ccc;
+}
+
+.drive-projects-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.modal-content {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 24px;
+  max-width: 600px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.modal-content h2 {
+  margin: 0 0 16px 0;
+  color: #4ade80;
+}
+
+.storage-info {
+  color: #999;
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+.projects-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.project-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+}
+
+.project-info {
+  flex: 1;
+}
+
+.project-name {
+  font-weight: bold;
+  color: #fff;
+  margin-bottom: 4px;
+}
+
+.project-meta {
+  font-size: 12px;
+  color: #999;
+}
+
+.project-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.project-actions button {
+  padding: 6px 12px;
+  border: 1px solid #444;
+  background: #333;
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.project-actions button:hover {
+  background: #444;
+}
+
+.project-actions .delete-btn {
+  color: #ff4444;
+  border-color: #ff4444;
+}
+
+.project-actions .delete-btn:hover {
+  background: #ff4444;
+  color: #fff;
+}
+
+.modal-close {
+  margin-top: 16px;
+  padding: 8px 24px;
+  background: #444;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  width: 100%;
+}
+
+.modal-close:hover {
+  background: #555;
+}
+

@@ -121,7 +121,6 @@ function decodeWAV(data: Uint8Array): { channelData: Float32Array[], sampleRate:
   return { channelData, sampleRate }
 }
 
-// Serialization utilities exported for future cloud save integration
-// These will be used when implementing cloud storage in a later PR
+// Serialization utilities exported for cloud save integration
 export { encodeWAV, decodeWAV }
 export type { ProjectState }

@@ -16,7 +16,7 @@ import {
   type ProjectMetadata
 } from './cloudStorage'
 
-const APP_VERSION = '0.0029b'
+const APP_VERSION = '0.0034b'
 
 interface Clip {
   player: Tone.Player

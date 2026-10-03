@@ -1,4 +1,4 @@
-import { head } from '@vercel/blob'
+import { list, del } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
 
@@ -13,17 +13,16 @@ function verifyAuth(request: NextRequest): boolean {
   return key === expectedKey
 }
 
-export async function GET(request: NextRequest) {
+export async function DELETE(request: NextRequest) {
   try {
     if (!verifyAuth(request)) {
       return Response.json({ error: 'Clave incorrecta' }, { status: 401 })
     }
     
-    const { searchParams } = new URL(request.url)
-    const pathname = searchParams.get('path')
+    const { pathname } = await request.json()
     
     if (!pathname) {
-      return Response.json({ error: 'Path requerido' }, { status: 400 })
+      return Response.json({ error: 'Pathname requerido' }, { status: 400 })
     }
     
     const storeId = process.env.MUSICALIA_STORE_ID
@@ -38,27 +37,28 @@ export async function GET(request: NextRequest) {
       }, { status: 500 })
     }
     
-    const blob = await head(pathname, { storeId, oidcToken })
-    
-    if (!blob) {
-      return Response.json({ error: 'Archivo no encontrado' }, { status: 404 })
-    }
-    
-    const response = await fetch(blob.url)
-    
-    if (!response.ok) {
-      return Response.json({ error: 'Error al descargar archivo' }, { status: 500 })
-    }
-    
-    return new Response(response.body, {
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': blob.size.toString()
-      }
+    const { blobs } = await list({ 
+      prefix: `${pathname}/`,
+      storeId,
+      oidcToken
     })
+    
+    const pathsToDelete = blobs.map(b => b.pathname)
+    
+    if (pathsToDelete.length === 0) {
+      try {
+        await del(`${pathname}.musicalia`, { storeId, oidcToken })
+      } catch (err) {
+        console.log('Old format file not found, already deleted')
+      }
+    } else {
+      await del(pathsToDelete, { storeId, oidcToken })
+    }
+    
+    return Response.json({ success: true })
   } catch (error: any) {
-    console.error('Download error:', error)
-    let message = error.message || 'Error al descargar'
+    console.error('Delete folder error:', error)
+    let message = error.message || 'Error al eliminar'
     
     if (message.includes('OIDC') || message.includes('credentials') || message.includes('authentication') || message.includes('No blob credentials')) {
       message = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'

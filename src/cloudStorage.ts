@@ -1,4 +1,5 @@
 import { unzip } from 'fflate'
+import { upload } from '@vercel/blob/client'
 
 export interface ProjectMetadata {
   name: string
@@ -114,45 +115,29 @@ export async function saveProjectToCloud(
     const { index, wavData } = audioFiles[i]
     const fileName = `audio_${index}.wav`
     
-    const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
-    
-    const response = await fetch('/api/upload-audio', {
-      method: 'POST',
-      headers: {
-        'x-musicalia-key': musicaliaKey,
-        'x-project-name': encodeURIComponent(projectName),
-        'x-file-name': fileName
-      },
-      body: blob
-    })
-    
-    if (!response.ok) {
+    try {
+      const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
+      const file = new File([blob], fileName, { type: 'audio/wav' })
+      
+      await upload(fileName, file, {
+        access: 'public',
+        handleUploadUrl: '/api/handle-upload',
+        clientPayload: JSON.stringify({ 
+          musicaliaKey,
+          projectName 
+        })
+      })
+      
+      uploadedAudioFiles[index] = fileName
+      onProgress?.(45 + ((i + 1) / audioFiles.length) * 40)
+    } catch (err: any) {
+      console.error('Upload error:', err)
       let errorMessage = 'Error al subir audio'
-      
-      const contentType = response.headers.get('content-type')
-      if (contentType?.includes('application/json')) {
-        try {
-          const error = await response.json()
-          errorMessage = error.error || errorMessage
-        } catch {
-          errorMessage = 'Error al subir audio'
-        }
-      } else {
-        if (response.status === 413) {
-          errorMessage = 'Archivo de audio demasiado grande'
-        } else {
-          const text = await response.text().catch(() => '')
-          errorMessage = text || `Error ${response.status}`
-        }
+      if (err.message) {
+        errorMessage = err.message
       }
-      
       throw new Error(errorMessage)
     }
-    
-    await response.json()
-    uploadedAudioFiles[index] = fileName
-    
-    onProgress?.(45 + ((i + 1) / audioFiles.length) * 40)
   }
   
   onProgress?.(85)
@@ -172,43 +157,25 @@ export async function saveProjectToCloud(
     }))
   }
   
-  const metadataBlob = new Blob(
-    [JSON.stringify(metadataOnly, null, 2)], 
-    { type: 'application/json' }
-  )
-  
-  const metadataResponse = await fetch('/api/upload-audio', {
-    method: 'POST',
-    headers: {
-      'x-musicalia-key': musicaliaKey,
-      'x-project-name': encodeURIComponent(projectName),
-      'x-file-name': 'project.json'
-    },
-    body: metadataBlob
-  })
-  
-  onProgress?.(95)
-  
-  if (!metadataResponse.ok) {
-    let errorMessage = 'Error al guardar proyecto'
+  try {
+    const metadataJson = JSON.stringify(metadataOnly, null, 2)
+    const metadataBlob = new Blob([metadataJson], { type: 'application/json' })
+    const metadataFile = new File([metadataBlob], 'project.json', { type: 'application/json' })
     
-    const contentType = metadataResponse.headers.get('content-type')
-    if (contentType?.includes('application/json')) {
-      try {
-        const error = await metadataResponse.json()
-        errorMessage = error.error || errorMessage
-      } catch {
-        errorMessage = 'Error al guardar proyecto'
-      }
-    } else {
-      const text = await metadataResponse.text().catch(() => '')
-      errorMessage = text || `Error ${metadataResponse.status}`
-    }
+    await upload('project.json', metadataFile, {
+      access: 'public',
+      handleUploadUrl: '/api/handle-upload',
+      clientPayload: JSON.stringify({ 
+        musicaliaKey,
+        projectName 
+      })
+    })
     
-    throw new Error(errorMessage)
+    onProgress?.(100)
+  } catch (err: any) {
+    console.error('Metadata upload error:', err)
+    throw new Error(err.message || 'Error al guardar proyecto')
   }
-  
-  onProgress?.(100)
 }
 
 export async function listCloudProjects(): Promise<ProjectMetadata[]> {

@@ -29,33 +29,32 @@ export async function DELETE(request: NextRequest) {
       return Response.json({ error: 'MUSICALIA_STORE_ID no configurado' }, { status: 500 })
     }
     
-    const oidcToken = process.env.VERCEL_OIDC_TOKEN
-    if (!oidcToken) {
-      return Response.json({ error: 'VERCEL_OIDC_TOKEN no disponible' }, { status: 500 })
-    }
-    
     const { blobs } = await list({ 
       prefix: `${pathname}/`,
-      storeId,
-      oidcToken
+      storeId
     })
     
     const pathsToDelete = blobs.map(b => b.pathname)
     
     if (pathsToDelete.length === 0) {
       try {
-        await del(`${pathname}.musicalia`, { storeId, oidcToken })
+        await del(`${pathname}.musicalia`, { storeId })
       } catch (err) {
         console.log('Old format file not found, already deleted')
       }
     } else {
-      await del(pathsToDelete, { storeId, oidcToken })
+      await del(pathsToDelete, { storeId })
     }
     
     return Response.json({ success: true })
   } catch (error: any) {
     console.error('Delete folder error:', error)
-    const message = error.message || 'Error al eliminar'
+    let message = error.message || 'Error al eliminar'
+    
+    if (message.includes('OIDC') || message.includes('credentials') || message.includes('authentication') || message.includes('No blob credentials')) {
+      message = 'Activa "Store Scoped Access Tokens" en la configuración del proyecto en Vercel'
+    }
+    
     return Response.json({ error: message }, { status: 500 })
   }
 }

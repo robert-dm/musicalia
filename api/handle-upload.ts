@@ -10,11 +10,6 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'MUSICALIA_STORE_ID no configurado' }, { status: 500 })
     }
     
-    const oidcToken = process.env.VERCEL_OIDC_TOKEN
-    if (!oidcToken) {
-      return Response.json({ error: 'VERCEL_OIDC_TOKEN no disponible' }, { status: 500 })
-    }
-    
     const expectedKey = process.env.MUSICALIA_KEY
     if (!expectedKey) {
       return Response.json({ error: 'MUSICALIA_KEY no configurada en servidor' }, { status: 500 })
@@ -57,15 +52,19 @@ export async function POST(request: NextRequest) {
         console.log('Upload completed:', blob.pathname)
       },
       options: {
-        storeId,
-        oidcToken
+        storeId
       }
     })
 
     return Response.json(jsonResponse)
   } catch (error: any) {
     console.error('Handle upload error:', error)
-    const message = error.message || 'Error al procesar upload'
+    let message = error.message || 'Error al procesar upload'
+    
+    if (message.includes('OIDC') || message.includes('credentials') || message.includes('authentication')) {
+      message = 'Activa "Store Scoped Access Tokens" en la configuración del proyecto en Vercel'
+    }
+    
     return Response.json({ error: message }, { status: 500 })
   }
 }

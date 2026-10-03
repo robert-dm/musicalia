@@ -34,11 +34,49 @@ export async function GET(request: NextRequest) {
       oidcToken
     })
     
-    const projects = blobs.map(blob => ({
-      name: blob.pathname.replace('musicalia/', '').replace('.musicalia', ''),
-      pathname: blob.pathname,
-      size: blob.size,
-      uploadedAt: blob.uploadedAt
+    const projectMap = new Map<string, { name: string, totalSize: number, uploadedAt: Date }>()
+    
+    for (const blob of blobs) {
+      const pathParts = blob.pathname.split('/')
+      if (pathParts.length >= 2 && pathParts[0] === 'musicalia') {
+        const projectName = pathParts[1]
+        
+        if (pathParts.length === 3 && pathParts[2] === 'project.json') {
+          const existing = projectMap.get(projectName)
+          if (!existing || blob.uploadedAt > existing.uploadedAt) {
+            projectMap.set(projectName, {
+              name: projectName,
+              totalSize: existing?.totalSize || 0,
+              uploadedAt: blob.uploadedAt
+            })
+          }
+        }
+        
+        const existing = projectMap.get(projectName)
+        if (existing) {
+          existing.totalSize += blob.size
+        } else {
+          projectMap.set(projectName, {
+            name: projectName,
+            totalSize: blob.size,
+            uploadedAt: blob.uploadedAt
+          })
+        }
+      } else if (blob.pathname.endsWith('.musicalia')) {
+        const projectName = blob.pathname.replace('musicalia/', '').replace('.musicalia', '')
+        projectMap.set(projectName, {
+          name: projectName,
+          totalSize: blob.size,
+          uploadedAt: blob.uploadedAt
+        })
+      }
+    }
+    
+    const projects = Array.from(projectMap.values()).map(project => ({
+      name: project.name,
+      pathname: `musicalia/${project.name}`,
+      size: project.totalSize,
+      uploadedAt: project.uploadedAt
     }))
     
     return Response.json(projects)

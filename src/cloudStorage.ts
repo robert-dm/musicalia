@@ -1,4 +1,4 @@
-import { zip, unzip } from 'fflate'
+import { unzip } from 'fflate'
 
 export interface ProjectMetadata {
   name: string
@@ -92,11 +92,74 @@ export async function saveProjectToCloud(
 ): Promise<void> {
   if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
   
-  onProgress?.(10)
+  onProgress?.(5)
+  
+  const audioFiles: Array<{ index: number, wavData: Uint8Array }> = []
+  
+  for (let i = 0; i < projectData.tracks.length; i++) {
+    const track = projectData.tracks[i]
+    if (track.clip?.audioData) {
+      const left = new Float32Array(track.clip.audioData.left)
+      const right = new Float32Array(track.clip.audioData.right)
+      const wavData = await compressAudio(left, right, track.clip.audioData.sampleRate)
+      audioFiles.push({ index: i, wavData })
+      onProgress?.(5 + (i / projectData.tracks.length) * 40)
+    }
+  }
+  
+  onProgress?.(45)
+  
+  const uploadedAudioFiles: Record<number, string> = {}
+  for (let i = 0; i < audioFiles.length; i++) {
+    const { index, wavData } = audioFiles[i]
+    const fileName = `audio_${index}.wav`
+    
+    const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
+    
+    const response = await fetch('/api/upload-audio', {
+      method: 'POST',
+      headers: {
+        'x-musicalia-key': musicaliaKey,
+        'x-project-name': encodeURIComponent(projectName),
+        'x-file-name': fileName
+      },
+      body: blob
+    })
+    
+    if (!response.ok) {
+      let errorMessage = 'Error al subir audio'
+      
+      const contentType = response.headers.get('content-type')
+      if (contentType?.includes('application/json')) {
+        try {
+          const error = await response.json()
+          errorMessage = error.error || errorMessage
+        } catch {
+          errorMessage = 'Error al subir audio'
+        }
+      } else {
+        if (response.status === 413) {
+          errorMessage = 'Archivo de audio demasiado grande'
+        } else {
+          const text = await response.text().catch(() => '')
+          errorMessage = text || `Error ${response.status}`
+        }
+      }
+      
+      throw new Error(errorMessage)
+    }
+    
+    await response.json()
+    uploadedAudioFiles[index] = fileName
+    
+    onProgress?.(45 + ((i + 1) / audioFiles.length) * 40)
+  }
+  
+  onProgress?.(85)
   
   const metadataOnly = {
     ...projectData,
-    tracks: projectData.tracks.map((t: any) => ({
+    tracks: projectData.tracks.map((t: any, i: number) => ({
       name: t.name,
       mute: t.mute,
       solo: t.solo,
@@ -104,52 +167,45 @@ export async function saveProjectToCloud(
       clip: t.clip ? {
         fileName: t.clip.fileName,
         startPosition: t.clip.startPosition,
-        audioFile: t.clip.audioFile
+        audioFile: uploadedAudioFiles[i] || null
       } : null
     }))
   }
   
-  const files: Record<string, Uint8Array> = {
-    'project.json': new TextEncoder().encode(JSON.stringify(metadataOnly, null, 2))
-  }
+  const metadataBlob = new Blob(
+    [JSON.stringify(metadataOnly, null, 2)], 
+    { type: 'application/json' }
+  )
   
-  for (let i = 0; i < projectData.tracks.length; i++) {
-    const track = projectData.tracks[i]
-    if (track.clip?.audioData) {
-      const left = new Float32Array(track.clip.audioData.left)
-      const right = new Float32Array(track.clip.audioData.right)
-      files[`audio_${i}.wav`] = await compressAudio(left, right, track.clip.audioData.sampleRate)
-      onProgress?.(10 + (i / projectData.tracks.length) * 40)
-    }
-  }
-  
-  onProgress?.(50)
-  
-  const zipped = await new Promise<Uint8Array>((resolve, reject) => {
-    zip(files, { level: 6 }, (err: Error | null, data: Uint8Array) => {
-      if (err) reject(err)
-      else resolve(data)
-    })
-  })
-  
-  onProgress?.(70)
-  
-  const blob = new Blob([zipped as any], { type: 'application/octet-stream' })
-  
-  const response = await fetch('/api/upload', {
+  const metadataResponse = await fetch('/api/upload-audio', {
     method: 'POST',
     headers: {
       'x-musicalia-key': musicaliaKey,
-      'x-project-name': encodeURIComponent(projectName)
+      'x-project-name': encodeURIComponent(projectName),
+      'x-file-name': 'project.json'
     },
-    body: blob
+    body: metadataBlob
   })
   
-  onProgress?.(90)
+  onProgress?.(95)
   
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Error al guardar proyecto')
+  if (!metadataResponse.ok) {
+    let errorMessage = 'Error al guardar proyecto'
+    
+    const contentType = metadataResponse.headers.get('content-type')
+    if (contentType?.includes('application/json')) {
+      try {
+        const error = await metadataResponse.json()
+        errorMessage = error.error || errorMessage
+      } catch {
+        errorMessage = 'Error al guardar proyecto'
+      }
+    } else {
+      const text = await metadataResponse.text().catch(() => '')
+      errorMessage = text || `Error ${metadataResponse.status}`
+    }
+    
+    throw new Error(errorMessage)
   }
   
   onProgress?.(100)
@@ -163,8 +219,17 @@ export async function listCloudProjects(): Promise<ProjectMetadata[]> {
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Error al listar proyectos')
+    let errorMessage = 'Error al listar proyectos'
+    const contentType = response.headers.get('content-type')
+    if (contentType?.includes('application/json')) {
+      try {
+        const error = await response.json()
+        errorMessage = error.error || errorMessage
+      } catch {
+        errorMessage = 'Error al listar proyectos'
+      }
+    }
+    throw new Error(errorMessage)
   }
   
   return response.json()
@@ -173,62 +238,109 @@ export async function listCloudProjects(): Promise<ProjectMetadata[]> {
 export async function openProjectFromCloud(pathname: string): Promise<any> {
   if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
   
-  const response = await fetch(`/api/download?path=${encodeURIComponent(pathname)}`, {
+  const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(`${pathname}/project.json`)}`, {
     headers: { 'x-musicalia-key': musicaliaKey }
   })
   
-  if (!response.ok) {
-    throw new Error('Error al abrir proyecto')
-  }
-  
-  const buffer = await response.arrayBuffer()
-  
-  return new Promise((resolve, reject) => {
-    unzip(new Uint8Array(buffer), async (err: Error | null, unzipped: any) => {
-      if (err) return reject(err)
-      
-      const projectJson = JSON.parse(new TextDecoder().decode(unzipped['project.json']))
-      
-      const tracks = await Promise.all(projectJson.tracks.map(async (t: any) => {
-        if (!t.clip) return { ...t, clip: null }
+  if (!metadataResponse.ok) {
+    const oldFormatResponse = await fetch(`/api/download?path=${encodeURIComponent(`${pathname}.musicalia`)}`, {
+      headers: { 'x-musicalia-key': musicaliaKey }
+    })
+    
+    if (!oldFormatResponse.ok) {
+      throw new Error('Error al abrir proyecto')
+    }
+    
+    const buffer = await oldFormatResponse.arrayBuffer()
+    
+    return new Promise((resolve, reject) => {
+      unzip(new Uint8Array(buffer), async (err: Error | null, unzipped: any) => {
+        if (err) return reject(err)
         
-        const audioData = unzipped[t.clip.audioFile]
-        const audioBuffer = await new AudioContext().decodeAudioData(
-          audioData.buffer.slice(audioData.byteOffset, audioData.byteOffset + audioData.byteLength)
-        )
+        const projectJson = JSON.parse(new TextDecoder().decode(unzipped['project.json']))
         
-        return {
-          name: t.name,
-          mute: t.mute,
-          solo: t.solo,
-          volume: t.volume,
-          clip: {
-            fileName: t.clip.fileName,
-            startPosition: t.clip.startPosition,
-            audioData: {
-              left: Array.from(audioBuffer.getChannelData(0)),
-              right: Array.from(audioBuffer.getChannelData(1)),
-              sampleRate: audioBuffer.sampleRate
+        const tracks = await Promise.all(projectJson.tracks.map(async (t: any) => {
+          if (!t.clip) return { ...t, clip: null }
+          
+          const audioData = unzipped[t.clip.audioFile]
+          const audioBuffer = await new AudioContext().decodeAudioData(
+            audioData.buffer.slice(audioData.byteOffset, audioData.byteOffset + audioData.byteLength)
+          )
+          
+          return {
+            name: t.name,
+            mute: t.mute,
+            solo: t.solo,
+            volume: t.volume,
+            clip: {
+              fileName: t.clip.fileName,
+              startPosition: t.clip.startPosition,
+              audioData: {
+                left: Array.from(audioBuffer.getChannelData(0)),
+                right: Array.from(audioBuffer.getChannelData(1)),
+                sampleRate: audioBuffer.sampleRate
+              }
             }
           }
-        }
-      }))
-      
-      resolve({
-        bpm: projectJson.bpm,
-        loopStart: projectJson.loopStart,
-        loopEnd: projectJson.loopEnd,
-        playheadPosition: projectJson.playheadPosition,
-        tracks
+        }))
+        
+        resolve({
+          bpm: projectJson.bpm,
+          loopStart: projectJson.loopStart,
+          loopEnd: projectJson.loopEnd,
+          playheadPosition: projectJson.playheadPosition,
+          tracks
+        })
       })
     })
-  })
+  }
+  
+  const projectJson = await metadataResponse.json()
+  
+  const tracks = await Promise.all(projectJson.tracks.map(async (t: any) => {
+    if (!t.clip || !t.clip.audioFile) return { ...t, clip: null }
+    
+    const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(`${pathname}/${t.clip.audioFile}`)}`, {
+      headers: { 'x-musicalia-key': musicaliaKey! }
+    })
+    
+    if (!audioResponse.ok) {
+      console.error('Failed to load audio for track:', t.name)
+      return { ...t, clip: null }
+    }
+    
+    const audioBuffer = await new AudioContext().decodeAudioData(await audioResponse.arrayBuffer())
+    
+    return {
+      name: t.name,
+      mute: t.mute,
+      solo: t.solo,
+      volume: t.volume,
+      clip: {
+        fileName: t.clip.fileName,
+        startPosition: t.clip.startPosition,
+        audioData: {
+          left: Array.from(audioBuffer.getChannelData(0)),
+          right: Array.from(audioBuffer.getChannelData(1)),
+          sampleRate: audioBuffer.sampleRate
+        }
+      }
+    }
+  }))
+  
+  return {
+    bpm: projectJson.bpm,
+    loopStart: projectJson.loopStart,
+    loopEnd: projectJson.loopEnd,
+    playheadPosition: projectJson.playheadPosition,
+    tracks
+  }
 }
 
 export async function deleteProjectFromCloud(pathname: string): Promise<void> {
   if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
   
-  const response = await fetch('/api/delete', {
+  const response = await fetch('/api/delete-folder', {
     method: 'DELETE',
     headers: {
       'x-musicalia-key': musicaliaKey,
@@ -238,8 +350,17 @@ export async function deleteProjectFromCloud(pathname: string): Promise<void> {
   })
   
   if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.error || 'Error al eliminar proyecto')
+    let errorMessage = 'Error al eliminar proyecto'
+    const contentType = response.headers.get('content-type')
+    if (contentType?.includes('application/json')) {
+      try {
+        const error = await response.json()
+        errorMessage = error.error || errorMessage
+      } catch {
+        errorMessage = 'Error al eliminar proyecto'
+      }
+    }
+    throw new Error(errorMessage)
   }
 }
 

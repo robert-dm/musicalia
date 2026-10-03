@@ -1,9 +1,10 @@
-import { handleUpload, type HandleUploadBody } from '@vercel/blob/client'
+import { handleUploadPresigned, type HandleUploadPresignedBody } from '@vercel/blob/client'
+import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as HandleUploadBody
+    const body = (await request.json()) as HandleUploadPresignedBody
     
     const storeId = process.env.MUSICALIA_STORE_ID
     if (!storeId) {
@@ -15,7 +16,16 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'MUSICALIA_KEY no configurada en servidor' }, { status: 500 })
     }
     
-    const jsonResponse = await handleUpload({
+    const oidcToken = await getVercelOidcToken()
+    if (!oidcToken) {
+      return Response.json({ 
+        error: 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC' 
+      }, { status: 500 })
+    }
+    
+    const webhookPublicKey = process.env.MUSICALIA_WEBHOOK_PUBLIC_KEY || process.env.BLOB_WEBHOOK_PUBLIC_KEY
+    
+    const jsonResponse = await handleUploadPresigned({
       body,
       request,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
@@ -52,7 +62,9 @@ export async function POST(request: NextRequest) {
         console.log('Upload completed:', blob.pathname)
       },
       options: {
-        storeId
+        storeId,
+        oidcToken,
+        ...(webhookPublicKey && { webhookPublicKey })
       }
     })
 
@@ -61,8 +73,8 @@ export async function POST(request: NextRequest) {
     console.error('Handle upload error:', error)
     let message = error.message || 'Error al procesar upload'
     
-    if (message.includes('OIDC') || message.includes('credentials') || message.includes('authentication')) {
-      message = 'Activa "Store Scoped Access Tokens" en la configuración del proyecto en Vercel'
+    if (message.includes('OIDC') || message.includes('credentials') || message.includes('authentication') || message.includes('No blob credentials')) {
+      message = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'
     }
     
     return Response.json({ error: message }, { status: 500 })

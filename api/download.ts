@@ -1,4 +1,5 @@
 import { head } from '@vercel/blob'
+import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
 
 function verifyAuth(request: NextRequest): boolean {
@@ -30,7 +31,14 @@ export async function GET(request: NextRequest) {
       return Response.json({ error: 'MUSICALIA_STORE_ID no configurado' }, { status: 500 })
     }
     
-    const blob = await head(pathname, { storeId })
+    const oidcToken = await getVercelOidcToken()
+    if (!oidcToken) {
+      return Response.json({ 
+        error: 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC' 
+      }, { status: 500 })
+    }
+    
+    const blob = await head(pathname, { storeId, oidcToken })
     
     if (!blob) {
       return Response.json({ error: 'Archivo no encontrado' }, { status: 404 })
@@ -53,7 +61,7 @@ export async function GET(request: NextRequest) {
     let message = error.message || 'Error al descargar'
     
     if (message.includes('OIDC') || message.includes('credentials') || message.includes('authentication') || message.includes('No blob credentials')) {
-      message = 'Activa "Store Scoped Access Tokens" en la configuración del proyecto en Vercel'
+      message = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'
     }
     
     return Response.json({ error: message }, { status: 500 })

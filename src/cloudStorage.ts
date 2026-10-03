@@ -1,5 +1,5 @@
 import { unzip } from 'fflate'
-import { upload } from '@vercel/blob/client'
+import { uploadPresigned } from '@vercel/blob/client'
 
 export interface ProjectMetadata {
   name: string
@@ -119,7 +119,7 @@ export async function saveProjectToCloud(
       const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
       const file = new File([blob], fileName, { type: 'audio/wav' })
       
-      await upload(fileName, file, {
+      await uploadPresigned(fileName, file, {
         access: 'public',
         handleUploadUrl: '/api/handle-upload',
         clientPayload: JSON.stringify({ 
@@ -162,7 +162,7 @@ export async function saveProjectToCloud(
     const metadataBlob = new Blob([metadataJson], { type: 'application/json' })
     const metadataFile = new File([metadataBlob], 'project.json', { type: 'application/json' })
     
-    await upload('project.json', metadataFile, {
+    await uploadPresigned('project.json', metadataFile, {
       access: 'public',
       handleUploadUrl: '/api/handle-upload',
       clientPayload: JSON.stringify({ 

@@ -26,14 +26,20 @@ export async function DELETE(request: NextRequest) {
     
     const storeId = process.env.MUSICALIA_STORE_ID
     if (!storeId) {
-      return Response.json({ error: 'Almacenamiento no configurado' }, { status: 500 })
+      return Response.json({ error: 'MUSICALIA_STORE_ID no configurado' }, { status: 500 })
     }
     
-    await del(pathname, { storeId })
+    const oidcToken = process.env.VERCEL_OIDC_TOKEN
+    if (!oidcToken) {
+      return Response.json({ error: 'VERCEL_OIDC_TOKEN no disponible' }, { status: 500 })
+    }
+    
+    await del(pathname, { storeId, oidcToken })
     
     return Response.json({ success: true })
   } catch (error: any) {
     console.error('Delete error:', error)
-    return Response.json({ error: error.message }, { status: 500 })
+    const message = error.message || 'Error al eliminar'
+    return Response.json({ error: message }, { status: 500 })
   }
 }

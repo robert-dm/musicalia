@@ -4,7 +4,7 @@ import './App.css'
 import './AudioDiagnostics.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
-import { autosaveProject, loadProject, clearProject } from './projectManager'
+import { autosaveProject, loadProject, clearProject, saveAudioBuffer, loadAudioBuffer } from './projectManager'
 import {
   hasMusicaliKey,
   setMusicaliKey,
@@ -74,32 +74,51 @@ function App() {
   const [uploadProgress, setUploadProgress] = useState(0)
   const [storageUsage, setStorageUsage] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [showExportDialog, setShowExportDialog] = useState(false)
+  const [exportTracks, setExportTracks] = useState<boolean[]>([])
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportProgress, setExportProgress] = useState('')
   
-  // Autosave on state changes
+  // Autosave on state changes (excluding playheadPosition to avoid copying audio on every tick)
   useEffect(() => {
-    const state = {
-      bpm,
-      loopStart,
-      loopEnd,
-      playheadPosition,
-      tracks: trackStates.map(t => ({
-        name: t.name || '',
-        mute: t.mute,
-        solo: t.solo,
-        volume: t.volume,
-        clip: t.clip ? {
-          fileName: t.clip.fileName,
-          startPosition: t.clip.startPosition,
-          audioData: {
-            left: Array.from(t.clip.buffer.getChannelData(0)),
-            right: Array.from(t.clip.buffer.getChannelData(1)),
-            sampleRate: t.clip.buffer.sampleRate
+    const saveState = async () => {
+      const tracks = await Promise.all(trackStates.map(async (t, i) => {
+        if (t.clip) {
+          const bufferKey = `audio-buffer-${i}`
+          await saveAudioBuffer(bufferKey, t.clip.buffer)
+          return {
+            name: t.name || '',
+            mute: t.mute,
+            solo: t.solo,
+            volume: t.volume,
+            clip: {
+              fileName: t.clip.fileName,
+              startPosition: t.clip.startPosition,
+              audioBufferKey: bufferKey
+            }
           }
-        } : null
+        }
+        return {
+          name: t.name || '',
+          mute: t.mute,
+          solo: t.solo,
+          volume: t.volume,
+          clip: null
+        }
       }))
+      
+      const state = {
+        bpm,
+        loopStart,
+        loopEnd,
+        playheadPosition,
+        tracks
+      }
+      autosaveProject(state)
     }
-    autosaveProject(state)
-  }, [bpm, loopStart, loopEnd, playheadPosition, trackStates])
+    
+    saveState()
+  }, [bpm, loopStart, loopEnd, trackStates])
   
   // Load project on mount
   useEffect(() => {
@@ -113,16 +132,11 @@ function App() {
       setLoopEnd(state.loopEnd)
       setPlayheadPosition(state.playheadPosition)
       
-      const newTrackStates = state.tracks.map((t, i) => {
+      const newTrackStates = await Promise.all(state.tracks.map(async (t, i) => {
         if (!t.clip) return { ...t, clip: null }
         
-        const buffer = new AudioBuffer({
-          numberOfChannels: 2,
-          length: t.clip.audioData.left.length,
-          sampleRate: t.clip.audioData.sampleRate
-        })
-        buffer.getChannelData(0).set(new Float32Array(t.clip.audioData.left))
-        buffer.getChannelData(1).set(new Float32Array(t.clip.audioData.right))
+        const buffer = await loadAudioBuffer(t.clip.audioBufferKey)
+        if (!buffer) return { ...t, clip: null }
         
         const toneBuffer = new Tone.ToneAudioBuffer(buffer)
         const player = new Tone.Player()
@@ -145,7 +159,7 @@ function App() {
             startPosition: t.clip.startPosition
           }
         }
-      })
+      }))
       
       setTrackStates(newTrackStates)
       setShowToast(true)
@@ -313,6 +327,128 @@ function App() {
     } catch (err: any) {
       setErrorMessage(err.message || 'Error al eliminar proyecto')
     }
+  }
+
+  const handleOpenExportDialog = () => {
+    const tracksWithAudio = trackStates.map(t => t.clip !== null && !t.mute)
+    setExportTracks(tracksWithAudio)
+    setShowExportDialog(true)
+  }
+
+  const handleExport = async () => {
+    try {
+      setShowExportDialog(false)
+      setIsExporting(true)
+      setExportProgress('Preparando...')
+      setErrorMessage(null)
+      
+      const selectedIndices = exportTracks
+        .map((selected, i) => selected ? i : -1)
+        .filter(i => i >= 0 && trackStates[i].clip)
+      
+      if (selectedIndices.length === 0) {
+        setErrorMessage('Selecciona al menos una pista para exportar')
+        setIsExporting(false)
+        return
+      }
+      
+      const anySolo = selectedIndices.some(i => trackStates[i].solo)
+      const effectiveIndices = anySolo 
+        ? selectedIndices.filter(i => trackStates[i].solo)
+        : selectedIndices
+      
+      if (effectiveIndices.length === 0) {
+        setErrorMessage('No hay pistas soloed seleccionadas')
+        setIsExporting(false)
+        return
+      }
+      
+      const maxDuration = Math.max(...effectiveIndices.map(i => trackStates[i].clip!.buffer.duration))
+      const sampleRate = trackStates[effectiveIndices[0]].clip!.buffer.sampleRate
+      
+      setExportProgress('Renderizando...')
+      
+      const offlineContext = new OfflineAudioContext(2, maxDuration * sampleRate, sampleRate)
+      
+      for (const i of effectiveIndices) {
+        const track = trackStates[i]
+        const source = offlineContext.createBufferSource()
+        source.buffer = track.clip!.buffer
+        
+        const gainNode = offlineContext.createGain()
+        gainNode.gain.value = track.volume
+        
+        source.connect(gainNode)
+        gainNode.connect(offlineContext.destination)
+        source.start(0)
+      }
+      
+      const renderedBuffer = await offlineContext.startRendering()
+      
+      setExportProgress('Codificando...')
+      
+      const wavData = encodeWAV(
+        [renderedBuffer.getChannelData(0), renderedBuffer.getChannelData(1)],
+        sampleRate
+      )
+      
+      const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
+      const url = URL.createObjectURL(blob)
+      
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${currentProjectName}.wav`
+      a.click()
+      
+      URL.revokeObjectURL(url)
+      
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+    } catch (err: any) {
+      console.error('Export error:', err)
+      setErrorMessage(err.message || 'Error al exportar')
+    } finally {
+      setIsExporting(false)
+      setExportProgress('')
+    }
+  }
+
+  function encodeWAV(channelData: Float32Array[], sampleRate: number): Uint8Array {
+    const numChannels = channelData.length
+    const length = channelData[0].length
+    const buffer = new ArrayBuffer(44 + length * numChannels * 2)
+    const view = new DataView(buffer)
+    
+    const writeString = (offset: number, string: string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i))
+      }
+    }
+    
+    writeString(0, 'RIFF')
+    view.setUint32(4, 36 + length * numChannels * 2, true)
+    writeString(8, 'WAVE')
+    writeString(12, 'fmt ')
+    view.setUint32(16, 16, true)
+    view.setUint16(20, 1, true)
+    view.setUint16(22, numChannels, true)
+    view.setUint32(24, sampleRate, true)
+    view.setUint32(28, sampleRate * numChannels * 2, true)
+    view.setUint16(32, numChannels * 2, true)
+    view.setUint16(34, 16, true)
+    writeString(36, 'data')
+    view.setUint32(40, length * numChannels * 2, true)
+    
+    let offset = 44
+    for (let i = 0; i < length; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        const sample = Math.max(-1, Math.min(1, channelData[ch][i]))
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true)
+        offset += 2
+      }
+    }
+    
+    return new Uint8Array(buffer)
   }
 
   const ensureAudio = async () => {
@@ -1002,18 +1138,23 @@ function App() {
           <button 
             className="header-btn" 
             onClick={handleSaveToCloud}
-            disabled={!hasCloudKey}
-            title={hasCloudKey ? 'Guardar en la nube' : 'Primero configura la clave'}
+            title="Guardar en la nube"
           >
             ☁️ Guardar
           </button>
           <button 
             className="header-btn" 
             onClick={handleShowCloudProjects}
-            disabled={!hasCloudKey}
-            title={hasCloudKey ? 'Mis proyectos' : 'Primero configura la clave'}
+            title="Mis proyectos en la nube"
           >
             📁 Proyectos
+          </button>
+          <button 
+            className="header-btn" 
+            onClick={handleOpenExportDialog}
+            title="Exportar pistas seleccionadas"
+          >
+            💾 Exportar
           </button>
           <button
             className={`transport-button ${isPlaying ? 'active' : ''}`}
@@ -1104,6 +1245,41 @@ function App() {
         </div>
       )}
       
+      {showExportDialog && (
+        <div className="drive-projects-modal">
+          <div className="modal-content">
+            <h2>Exportar proyecto</h2>
+            <p style={{ fontSize: '13px', color: '#999', marginBottom: '16px' }}>
+              Selecciona las pistas a incluir en el archivo exportado
+            </p>
+            <div className="export-tracks-list">
+              {trackStates.map((track, i) => (
+                track.clip && (
+                  <label key={i} className="export-track-item">
+                    <input
+                      type="checkbox"
+                      checked={exportTracks[i] || false}
+                      onChange={(e) => {
+                        const newTracks = [...exportTracks]
+                        newTracks[i] = e.target.checked
+                        setExportTracks(newTracks)
+                      }}
+                    />
+                    <span className="track-name">{track.name}</span>
+                    {track.solo && <span className="track-badge solo">S</span>}
+                    {track.mute && <span className="track-badge mute">M</span>}
+                  </label>
+                )
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '20px' }}>
+              <button className="modal-close" onClick={handleExport}>Exportar</button>
+              <button className="modal-close" onClick={() => setShowExportDialog(false)}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showCloudProjects && (
         <div className="drive-projects-modal">
           <div className="modal-content">
@@ -1133,6 +1309,12 @@ function App() {
             </div>
             <button className="modal-close" onClick={() => setShowCloudProjects(false)}>Cerrar</button>
           </div>
+        </div>
+      )}
+      
+      {isExporting && exportProgress && (
+        <div className="export-progress-toast">
+          {exportProgress}
         </div>
       )}
 

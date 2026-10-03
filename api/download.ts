@@ -27,10 +27,15 @@ export async function GET(request: NextRequest) {
     
     const storeId = process.env.MUSICALIA_STORE_ID
     if (!storeId) {
-      return Response.json({ error: 'Almacenamiento no configurado' }, { status: 500 })
+      return Response.json({ error: 'MUSICALIA_STORE_ID no configurado' }, { status: 500 })
     }
     
-    const blob = await head(pathname, { storeId })
+    const oidcToken = process.env.VERCEL_OIDC_TOKEN
+    if (!oidcToken) {
+      return Response.json({ error: 'VERCEL_OIDC_TOKEN no disponible' }, { status: 500 })
+    }
+    
+    const blob = await head(pathname, { storeId, oidcToken })
     
     if (!blob) {
       return Response.json({ error: 'Archivo no encontrado' }, { status: 404 })
@@ -50,6 +55,7 @@ export async function GET(request: NextRequest) {
     })
   } catch (error: any) {
     console.error('Download error:', error)
-    return Response.json({ error: error.message }, { status: 500 })
+    const message = error.message || 'Error al descargar'
+    return Response.json({ error: message }, { status: 500 })
   }
 }

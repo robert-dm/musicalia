@@ -94,23 +94,28 @@ export async function saveProjectToCloud(
   
   onProgress?.(10)
   
-  let projectJson: string
-  try {
-    projectJson = JSON.stringify(projectData, null, 2)
-  } catch (err: any) {
-    if (err instanceof RangeError && err.message.includes('string length')) {
-      throw new Error('El proyecto es demasiado grande para guardar. Intenta con pistas más cortas.')
-    }
-    throw err
+  const metadataOnly = {
+    ...projectData,
+    tracks: projectData.tracks.map((t: any) => ({
+      name: t.name,
+      mute: t.mute,
+      solo: t.solo,
+      volume: t.volume,
+      clip: t.clip ? {
+        fileName: t.clip.fileName,
+        startPosition: t.clip.startPosition,
+        audioFile: t.clip.audioFile
+      } : null
+    }))
   }
   
   const files: Record<string, Uint8Array> = {
-    'project.json': new TextEncoder().encode(projectJson)
+    'project.json': new TextEncoder().encode(JSON.stringify(metadataOnly, null, 2))
   }
   
   for (let i = 0; i < projectData.tracks.length; i++) {
     const track = projectData.tracks[i]
-    if (track.clip) {
+    if (track.clip?.audioData) {
       const left = new Float32Array(track.clip.audioData.left)
       const right = new Float32Array(track.clip.audioData.right)
       files[`audio_${i}.wav`] = await compressAudio(left, right, track.clip.audioData.sampleRate)

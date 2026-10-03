@@ -86,6 +86,39 @@ function encodeWAV(channelData: Float32Array[], sampleRate: number): Uint8Array 
   return new Uint8Array(buffer)
 }
 
+async function probeUploadEndpoint(fileName: string, projectName: string): Promise<void> {
+  const probePayload = {
+    type: 'blob.generate-presigned-url',
+    payload: {
+      pathname: fileName,
+      clientPayload: JSON.stringify({ 
+        musicaliaKey,
+        projectName 
+      }),
+      multipart: false
+    }
+  }
+  
+  const probeResponse = await fetch('/api/handle-upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(probePayload)
+  })
+  
+  if (!probeResponse.ok) {
+    let errorMessage = 'Error al preparar subida'
+    try {
+      const errorData = await probeResponse.json()
+      if (errorData.error) {
+        errorMessage = errorData.error
+      }
+    } catch (e) {
+      console.error('Failed to parse error response:', e)
+    }
+    throw new Error(errorMessage)
+  }
+}
+
 export async function saveProjectToCloud(
   projectData: any,
   projectName: string,
@@ -116,6 +149,8 @@ export async function saveProjectToCloud(
     const fileName = `audio_${index}.wav`
     
     try {
+      await probeUploadEndpoint(fileName, projectName)
+      
       const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
       const file = new File([blob], fileName, { type: 'audio/wav' })
       
@@ -132,19 +167,7 @@ export async function saveProjectToCloud(
       onProgress?.(45 + ((i + 1) / audioFiles.length) * 40)
     } catch (err: any) {
       console.error('Upload error:', err)
-      let errorMessage = 'Error al subir audio'
-      
-      if (err.message) {
-        if (err.message.includes('Failed to retrieve the presigned URL') || err.message.includes('presigned')) {
-          errorMessage = 'Error al generar URL de subida. Verifica la configuración del Blob store.'
-        } else if (err.message.includes('OIDC') || err.message.includes('credentials')) {
-          errorMessage = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'
-        } else {
-          errorMessage = err.message
-        }
-      }
-      
-      throw new Error(errorMessage)
+      throw new Error(err.message || 'Error al subir audio')
     }
   }
   
@@ -166,6 +189,8 @@ export async function saveProjectToCloud(
   }
   
   try {
+    await probeUploadEndpoint('project.json', projectName)
+    
     const metadataJson = JSON.stringify(metadataOnly, null, 2)
     const metadataBlob = new Blob([metadataJson], { type: 'application/json' })
     const metadataFile = new File([metadataBlob], 'project.json', { type: 'application/json' })
@@ -182,19 +207,7 @@ export async function saveProjectToCloud(
     onProgress?.(100)
   } catch (err: any) {
     console.error('Metadata upload error:', err)
-    let errorMessage = 'Error al guardar proyecto'
-    
-    if (err.message) {
-      if (err.message.includes('Failed to retrieve the presigned URL') || err.message.includes('presigned')) {
-        errorMessage = 'Error al generar URL de subida. Verifica la configuración del Blob store.'
-      } else if (err.message.includes('OIDC') || err.message.includes('credentials')) {
-        errorMessage = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'
-      } else {
-        errorMessage = err.message
-      }
-    }
-    
-    throw new Error(errorMessage)
+    throw new Error(err.message || 'Error al guardar proyecto')
   }
 }
 

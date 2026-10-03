@@ -1,4 +1,5 @@
-import { handleUploadPresigned, issueSignedToken, type HandleUploadPresignedBody } from '@vercel/blob'
+import { handleUploadPresigned, type HandleUploadPresignedBody } from '@vercel/blob/client'
+import { issueSignedToken } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
 

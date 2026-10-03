@@ -59,10 +59,11 @@ export async function POST(request: NextRequest) {
           oidcToken,
           storeId,
           pathname: finalPathname,
-          operations: ['put']
+          operations: ['put'],
+          allowedContentTypes: ['audio/wav', 'audio/mpeg', 'audio/mp3', 'application/json', 'application/octet-stream']
         })
         
-        return signedToken
+        return { token: signedToken }
       },
       onUploadCompleted: async ({ blob, tokenPayload }) => {
         console.log('Upload completed:', blob.pathname)

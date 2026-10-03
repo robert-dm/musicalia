@@ -1,4 +1,5 @@
 import { handleUploadPresigned, type HandleUploadPresignedBody } from '@vercel/blob/client'
+import { issueSignedToken } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
 
@@ -24,11 +25,15 @@ export async function POST(request: NextRequest) {
     }
     
     const webhookPublicKey = process.env.MUSICALIA_WEBHOOK_PUBLIC_KEY || process.env.BLOB_WEBHOOK_PUBLIC_KEY
+    if (!webhookPublicKey) {
+      return Response.json({ error: 'MUSICALIA_WEBHOOK_PUBLIC_KEY no configurado' }, { status: 500 })
+    }
     
     const jsonResponse = await handleUploadPresigned({
       body,
       request,
-      onBeforeGenerateToken: async (pathname, clientPayload) => {
+      webhookPublicKey,
+      getSignedToken: async (pathname, clientPayload, multipart) => {
         let payload: any = {}
         if (clientPayload) {
           try {
@@ -50,21 +55,17 @@ export async function POST(request: NextRequest) {
         const fileName = pathname.split('/').pop() || 'file'
         const finalPathname = `musicalia/${projectName}/${fileName}`
         
-        return {
-          allowedContentTypes: ['audio/wav', 'audio/mpeg', 'audio/mp3', 'application/json', 'application/octet-stream'],
-          tokenPayload: JSON.stringify({
-            projectName,
-          }),
-          pathname: finalPathname
-        }
+        const signedToken = await issueSignedToken({
+          oidcToken,
+          storeId,
+          pathname: finalPathname,
+          operations: ['put']
+        })
+        
+        return signedToken
       },
       onUploadCompleted: async ({ blob, tokenPayload }) => {
         console.log('Upload completed:', blob.pathname)
-      },
-      options: {
-        storeId,
-        oidcToken,
-        ...(webhookPublicKey && { webhookPublicKey })
       }
     })
 

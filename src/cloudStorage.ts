@@ -94,8 +94,18 @@ export async function saveProjectToCloud(
   
   onProgress?.(10)
   
+  let projectJson: string
+  try {
+    projectJson = JSON.stringify(projectData, null, 2)
+  } catch (err: any) {
+    if (err instanceof RangeError && err.message.includes('string length')) {
+      throw new Error('El proyecto es demasiado grande para guardar. Intenta con pistas más cortas.')
+    }
+    throw err
+  }
+  
   const files: Record<string, Uint8Array> = {
-    'project.json': new TextEncoder().encode(JSON.stringify(projectData, null, 2))
+    'project.json': new TextEncoder().encode(projectJson)
   }
   
   for (let i = 0; i < projectData.tracks.length; i++) {

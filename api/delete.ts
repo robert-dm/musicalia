@@ -24,13 +24,16 @@ export async function DELETE(request: NextRequest) {
       return Response.json({ error: 'Pathname requerido' }, { status: 400 })
     }
     
-    // Use explicit token if available, otherwise SDK uses OIDC with MUSICALIA_STORE_ID
-    const token = process.env.MUSICALIA_READ_WRITE_TOKEN ?? process.env.BLOB_READ_WRITE_TOKEN
+    const storeId = process.env.MUSICALIA_STORE_ID
+    if (!storeId) {
+      return Response.json({ error: 'Almacenamiento no configurado' }, { status: 500 })
+    }
     
-    await del(pathname, token ? { token } : undefined)
+    await del(pathname, { storeId })
     
     return Response.json({ success: true })
   } catch (error: any) {
+    console.error('Delete error:', error)
     return Response.json({ error: error.message }, { status: 500 })
   }
 }

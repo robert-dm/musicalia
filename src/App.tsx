@@ -73,6 +73,7 @@ function App() {
   const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
   const [uploadProgress, setUploadProgress] = useState(0)
   const [storageUsage, setStorageUsage] = useState(0)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
   
   // Autosave on state changes
   useEffect(() => {
@@ -171,7 +172,7 @@ function App() {
   
   const handleSaveToCloud = async () => {
     if (!hasCloudKey) {
-      alert('Primero configura la clave de Musicalia')
+      setErrorMessage('Primero configura la clave de Musicalia')
       return
     }
     
@@ -204,11 +205,13 @@ function App() {
     
     try {
       setUploadProgress(0)
+      setErrorMessage(null)
       await saveProjectToCloud(projectData, name, setUploadProgress)
       setCurrentProjectName(name)
-      alert('Proyecto guardado en la nube')
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
-      alert(`Error: ${err.message}`)
+      setErrorMessage(err.message || 'Error al guardar proyecto')
     } finally {
       setUploadProgress(0)
     }
@@ -216,23 +219,25 @@ function App() {
   
   const handleShowCloudProjects = async () => {
     if (!hasCloudKey) {
-      alert('Primero configura la clave de Musicalia')
+      setErrorMessage('Primero configura la clave de Musicalia')
       return
     }
     
     try {
+      setErrorMessage(null)
       const projects = await listCloudProjects()
       setCloudProjects(projects)
       const usage = await getStorageUsage()
       setStorageUsage(usage)
       setShowCloudProjects(true)
     } catch (err: any) {
-      alert(`Error: ${err.message}`)
+      setErrorMessage(err.message || 'Error al listar proyectos')
     }
   }
   
   const handleOpenCloudProject = async (pathname: string, name: string) => {
     try {
+      setErrorMessage(null)
       const state = await openProjectFromCloud(pathname)
       
       await ensureAudio()
@@ -279,9 +284,10 @@ function App() {
       setTrackStates(newTrackStates)
       setCurrentProjectName(name)
       setShowCloudProjects(false)
-      alert('Proyecto abierto desde la nube')
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
-      alert(`Error: ${err.message}`)
+      setErrorMessage(err.message || 'Error al abrir proyecto')
     }
   }
   
@@ -289,6 +295,7 @@ function App() {
     if (!confirm(`¿Eliminar permanentemente "${name}"?`)) return
     
     try {
+      setErrorMessage(null)
       await deleteProjectFromCloud(pathname)
       
       if (currentProjectName === name) {
@@ -301,9 +308,10 @@ function App() {
       const usage = await getStorageUsage()
       setStorageUsage(usage)
       
-      alert('Proyecto eliminado')
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
-      alert(`Error: ${err.message}`)
+      setErrorMessage(err.message || 'Error al eliminar proyecto')
     }
   }
 
@@ -484,8 +492,15 @@ function App() {
     setIsPlaying(true)
     setIsPaused(false)
     
-    const updatePlayhead = () => {
+    let lastUpdateTime = 0
+    const updatePlayhead = (timestamp: number) => {
       if (Tone.getTransport().state === 'started') {
+        if (timestamp - lastUpdateTime < 50) {
+          playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
+          return
+        }
+        lastUpdateTime = timestamp
+        
         let currentTime = Tone.getTransport().seconds
         
         if (loopStart !== null && loopEnd !== null) {
@@ -515,7 +530,7 @@ function App() {
         playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
       }
     }
-    updatePlayhead()
+    playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
   }
 
   const handlePause = () => {
@@ -1072,7 +1087,14 @@ function App() {
       )}
       
       {showToast && (
-        <div className="toast">Proyecto restaurado</div>
+        <div className="toast">✓ Operación exitosa</div>
+      )}
+      
+      {errorMessage && (
+        <div className="error-toast">
+          {errorMessage}
+          <button onClick={() => setErrorMessage(null)}>×</button>
+        </div>
       )}
       
       {uploadProgress > 0 && uploadProgress < 100 && (

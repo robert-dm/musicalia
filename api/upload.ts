@@ -26,13 +26,20 @@ export async function POST(request: NextRequest) {
     const blob = await request.blob()
     const pathname = `musicalia/${decodeURIComponent(projectName)}.musicalia`
     
+    const storeId = process.env.MUSICALIA_STORE_ID
+    if (!storeId) {
+      return Response.json({ error: 'Almacenamiento no configurado' }, { status: 500 })
+    }
+    
     const result = await put(pathname, blob, {
       access: 'public',
-      addRandomSuffix: false
+      addRandomSuffix: false,
+      storeId
     })
     
     return Response.json({ url: result.url })
   } catch (error: any) {
+    console.error('Upload error:', error)
     return Response.json({ error: error.message }, { status: 500 })
   }
 }

@@ -33,9 +33,12 @@ export async function autosaveProject(state: ProjectState) {
       console.log('[AUTOSAVE] Saved')
     } catch (err: any) {
       if (err.name === 'QuotaExceededError') {
-        alert('Espacio de almacenamiento insuficiente. Guarda el proyecto a un archivo para liberar espacio.')
+        console.warn('[AUTOSAVE] QuotaExceeded - proyecto muy grande')
+      } else if (err instanceof RangeError) {
+        console.warn('[AUTOSAVE] Proyecto demasiado grande')
+      } else {
+        console.error('[AUTOSAVE] Failed:', err)
       }
-      console.error('[AUTOSAVE] Failed:', err)
     }
   }, 1000)
 }

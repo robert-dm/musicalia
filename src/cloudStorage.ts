@@ -133,9 +133,17 @@ export async function saveProjectToCloud(
     } catch (err: any) {
       console.error('Upload error:', err)
       let errorMessage = 'Error al subir audio'
+      
       if (err.message) {
-        errorMessage = err.message
+        if (err.message.includes('Failed to retrieve the presigned URL') || err.message.includes('presigned')) {
+          errorMessage = 'Error al generar URL de subida. Verifica la configuración del Blob store.'
+        } else if (err.message.includes('OIDC') || err.message.includes('credentials')) {
+          errorMessage = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'
+        } else {
+          errorMessage = err.message
+        }
       }
+      
       throw new Error(errorMessage)
     }
   }
@@ -174,7 +182,19 @@ export async function saveProjectToCloud(
     onProgress?.(100)
   } catch (err: any) {
     console.error('Metadata upload error:', err)
-    throw new Error(err.message || 'Error al guardar proyecto')
+    let errorMessage = 'Error al guardar proyecto'
+    
+    if (err.message) {
+      if (err.message.includes('Failed to retrieve the presigned URL') || err.message.includes('presigned')) {
+        errorMessage = 'Error al generar URL de subida. Verifica la configuración del Blob store.'
+      } else if (err.message.includes('OIDC') || err.message.includes('credentials')) {
+        errorMessage = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'
+      } else {
+        errorMessage = err.message
+      }
+    }
+    
+    throw new Error(errorMessage)
   }
 }
 

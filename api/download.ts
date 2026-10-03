@@ -25,16 +25,22 @@ export async function GET(request: NextRequest) {
       return Response.json({ error: 'Path requerido' }, { status: 400 })
     }
     
-    // Use explicit token if available, otherwise SDK uses OIDC with MUSICALIA_STORE_ID
-    const token = process.env.MUSICALIA_READ_WRITE_TOKEN ?? process.env.BLOB_READ_WRITE_TOKEN
+    const storeId = process.env.MUSICALIA_STORE_ID
+    if (!storeId) {
+      return Response.json({ error: 'MUSICALIA_STORE_ID no configurado' }, { status: 500 })
+    }
     
-    const blob = await head(pathname, token ? { token } : undefined)
+    const oidcToken = process.env.VERCEL_OIDC_TOKEN
+    if (!oidcToken) {
+      return Response.json({ error: 'VERCEL_OIDC_TOKEN no disponible' }, { status: 500 })
+    }
+    
+    const blob = await head(pathname, { storeId, oidcToken })
     
     if (!blob) {
       return Response.json({ error: 'Archivo no encontrado' }, { status: 404 })
     }
     
-    // Fetch the actual blob content
     const response = await fetch(blob.url)
     
     if (!response.ok) {
@@ -48,6 +54,8 @@ export async function GET(request: NextRequest) {
       }
     })
   } catch (error: any) {
-    return Response.json({ error: error.message }, { status: 500 })
+    console.error('Download error:', error)
+    const message = error.message || 'Error al descargar'
+    return Response.json({ error: message }, { status: 500 })
   }
 }

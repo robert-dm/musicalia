@@ -13,11 +13,7 @@ interface ProjectState {
     clip: {
       fileName: string
       startPosition: number
-      audioData: {
-        left: number[]
-        right: number[]
-        sampleRate: number
-      }
+      audioBufferKey: string
     } | null
   }[]
 }
@@ -33,11 +29,54 @@ export async function autosaveProject(state: ProjectState) {
       console.log('[AUTOSAVE] Saved')
     } catch (err: any) {
       if (err.name === 'QuotaExceededError') {
-        alert('Espacio de almacenamiento insuficiente. Guarda el proyecto a un archivo para liberar espacio.')
+        console.warn('[AUTOSAVE] QuotaExceeded - proyecto muy grande')
+      } else {
+        console.error('[AUTOSAVE] Failed:', err)
       }
-      console.error('[AUTOSAVE] Failed:', err)
     }
   }, 1000)
+}
+
+export async function saveAudioBuffer(key: string, buffer: AudioBuffer): Promise<void> {
+  const numberOfChannels = buffer.numberOfChannels
+  const length = buffer.length
+  const sampleRate = buffer.sampleRate
+  
+  const channelData: Float32Array[] = []
+  for (let i = 0; i < numberOfChannels; i++) {
+    channelData.push(buffer.getChannelData(i))
+  }
+  
+  const audioData = {
+    numberOfChannels,
+    length,
+    sampleRate,
+    channelData
+  }
+  
+  await set(key, audioData)
+}
+
+export async function loadAudioBuffer(key: string): Promise<AudioBuffer | null> {
+  try {
+    const data = await get(key)
+    if (!data) return null
+    
+    const buffer = new AudioBuffer({
+      numberOfChannels: data.numberOfChannels,
+      length: data.length,
+      sampleRate: data.sampleRate
+    })
+    
+    for (let i = 0; i < data.numberOfChannels; i++) {
+      buffer.getChannelData(i).set(data.channelData[i])
+    }
+    
+    return buffer
+  } catch (err) {
+    console.error('[LOAD] Failed to load audio buffer:', err)
+    return null
+  }
 }
 
 export async function loadProject(): Promise<ProjectState | null | undefined> {

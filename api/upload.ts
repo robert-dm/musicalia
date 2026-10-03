@@ -26,13 +26,27 @@ export async function POST(request: NextRequest) {
     const blob = await request.blob()
     const pathname = `musicalia/${decodeURIComponent(projectName)}.musicalia`
     
+    const storeId = process.env.MUSICALIA_STORE_ID
+    if (!storeId) {
+      return Response.json({ error: 'MUSICALIA_STORE_ID no configurado en variables de entorno' }, { status: 500 })
+    }
+    
+    const oidcToken = process.env.VERCEL_OIDC_TOKEN
+    if (!oidcToken) {
+      return Response.json({ error: 'VERCEL_OIDC_TOKEN no disponible' }, { status: 500 })
+    }
+    
     const result = await put(pathname, blob, {
       access: 'public',
-      addRandomSuffix: false
+      addRandomSuffix: false,
+      storeId,
+      oidcToken
     })
     
     return Response.json({ url: result.url })
   } catch (error: any) {
-    return Response.json({ error: error.message }, { status: 500 })
+    console.error('Upload error:', error)
+    const message = error.message || 'Error desconocido'
+    return Response.json({ error: message }, { status: 500 })
   }
 }

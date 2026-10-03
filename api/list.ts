@@ -18,12 +18,20 @@ export async function GET(request: NextRequest) {
       return Response.json({ error: 'Clave incorrecta' }, { status: 401 })
     }
     
-    // Use explicit token if available, otherwise SDK uses OIDC with MUSICALIA_STORE_ID
-    const token = process.env.MUSICALIA_READ_WRITE_TOKEN ?? process.env.BLOB_READ_WRITE_TOKEN
+    const storeId = process.env.MUSICALIA_STORE_ID
+    if (!storeId) {
+      return Response.json({ error: 'MUSICALIA_STORE_ID no configurado' }, { status: 500 })
+    }
+    
+    const oidcToken = process.env.VERCEL_OIDC_TOKEN
+    if (!oidcToken) {
+      return Response.json({ error: 'VERCEL_OIDC_TOKEN no disponible' }, { status: 500 })
+    }
     
     const { blobs } = await list({ 
       prefix: 'musicalia/',
-      ...(token && { token })
+      storeId,
+      oidcToken
     })
     
     const projects = blobs.map(blob => ({
@@ -35,6 +43,8 @@ export async function GET(request: NextRequest) {
     
     return Response.json(projects)
   } catch (error: any) {
-    return Response.json({ error: error.message }, { status: 500 })
+    console.error('List error:', error)
+    const message = error.message || 'Error al listar proyectos'
+    return Response.json({ error: message }, { status: 500 })
   }
 }

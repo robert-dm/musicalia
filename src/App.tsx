@@ -335,6 +335,10 @@ function App() {
     setShowExportDialog(true)
   }
 
+  const sanitizeFilename = (name: string): string => {
+    return name.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim()
+  }
+
   const handleExport = async () => {
     try {
       setShowExportDialog(false)
@@ -366,12 +370,14 @@ function App() {
       const maxDuration = Math.max(...effectiveIndices.map(i => trackStates[i].clip!.buffer.duration))
       const sampleRate = trackStates[effectiveIndices[0]].clip!.buffer.sampleRate
       
-      setExportProgress('Renderizando...')
-      
-      const offlineContext = new OfflineAudioContext(2, maxDuration * sampleRate, sampleRate)
-      
-      for (const i of effectiveIndices) {
+      for (let idx = 0; idx < effectiveIndices.length; idx++) {
+        const i = effectiveIndices[idx]
         const track = trackStates[i]
+        
+        setExportProgress(`Renderizando ${idx + 1}/${effectiveIndices.length}...`)
+        
+        const offlineContext = new OfflineAudioContext(2, maxDuration * sampleRate, sampleRate)
+        
         const source = offlineContext.createBufferSource()
         source.buffer = track.clip!.buffer
         
@@ -381,26 +387,31 @@ function App() {
         source.connect(gainNode)
         gainNode.connect(offlineContext.destination)
         source.start(0)
+        
+        const renderedBuffer = await offlineContext.startRendering()
+        
+        setExportProgress(`Codificando ${idx + 1}/${effectiveIndices.length}...`)
+        
+        const wavData = encodeWAV(
+          [renderedBuffer.getChannelData(0), renderedBuffer.getChannelData(1)],
+          sampleRate
+        )
+        
+        const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
+        const url = URL.createObjectURL(blob)
+        
+        const trackName = track.name || `Pista ${i + 1}`
+        const fileName = sanitizeFilename(`${currentProjectName} - ${trackName}.wav`)
+        
+        const a = document.createElement('a')
+        a.href = url
+        a.download = fileName
+        a.click()
+        
+        URL.revokeObjectURL(url)
+        
+        await new Promise(resolve => setTimeout(resolve, 100))
       }
-      
-      const renderedBuffer = await offlineContext.startRendering()
-      
-      setExportProgress('Codificando...')
-      
-      const wavData = encodeWAV(
-        [renderedBuffer.getChannelData(0), renderedBuffer.getChannelData(1)],
-        sampleRate
-      )
-      
-      const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
-      const url = URL.createObjectURL(blob)
-      
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${currentProjectName}.wav`
-      a.click()
-      
-      URL.revokeObjectURL(url)
       
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)

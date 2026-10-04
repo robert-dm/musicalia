@@ -241,38 +241,17 @@ export async function listCloudProjects(): Promise<ProjectMetadata[]> {
 export async function openProjectFromCloud(pathname: string): Promise<any> {
   if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
   
-  const projectJsonPath = pathname.endsWith('/project.json') || pathname.endsWith('.musicalia')
-    ? pathname
-    : `${pathname}/project.json`
-  
-  const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(projectJsonPath)}`, {
-    headers: { 'x-musicalia-key': musicaliaKey }
-  })
-  
-  if (!metadataResponse.ok) {
-    const legacyPath = pathname.endsWith('.musicalia') ? pathname : `${pathname}.musicalia`
-    const oldFormatResponse = await fetch(`/api/download?path=${encodeURIComponent(legacyPath)}`, {
+  // First check for legacy .musicalia format
+  if (pathname.endsWith('.musicalia')) {
+    const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(pathname)}`, {
       headers: { 'x-musicalia-key': musicaliaKey }
     })
     
-    if (!oldFormatResponse.ok) {
-      let errorMessage = 'Error al abrir proyecto'
-      
-      const contentType = oldFormatResponse.headers.get('content-type')
-      if (contentType?.includes('application/json')) {
-        try {
-          const errorData = await oldFormatResponse.json()
-          if (errorData.error) {
-            errorMessage = errorData.error
-          }
-        } catch {
-        }
-      }
-      
-      throw new Error(errorMessage)
+    if (!metadataResponse.ok) {
+      throw new Error('El proyecto no existe en la nube')
     }
     
-    const buffer = await oldFormatResponse.arrayBuffer()
+    const buffer = await metadataResponse.arrayBuffer()
     
     return new Promise((resolve, reject) => {
       unzip(new Uint8Array(buffer), async (err: Error | null, unzipped: any) => {
@@ -316,36 +295,58 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     })
   }
   
-  const projectJson = await metadataResponse.json()
+  // For folder-based projects, list blobs with the project prefix
+  const listResponse = await fetch(`/api/list-project-blobs?prefix=${encodeURIComponent(pathname)}`, {
+    headers: { 'x-musicalia-key': musicaliaKey }
+  })
   
-  const basePathname = pathname.endsWith('/project.json') 
-    ? pathname.replace('/project.json', '')
-    : pathname
+  if (!listResponse.ok) {
+    throw new Error('Error al buscar archivos del proyecto')
+  }
+  
+  const blobs = await listResponse.json()
+  
+  // Find the project.json blob (may have suffix like project-abc.json)
+  const projectJsonBlob = blobs.find((b: any) => 
+    b.pathname.endsWith('/project.json') || b.pathname.match(/\/project[^/]*\.json$/)
+  )
+  
+  if (!projectJsonBlob) {
+    throw new Error('El proyecto no existe en la nube')
+  }
+  
+  // Download project.json using its exact pathname from list()
+  const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(projectJsonBlob.pathname)}`, {
+    headers: { 'x-musicalia-key': musicaliaKey }
+  })
+  
+  if (!metadataResponse.ok) {
+    throw new Error('El proyecto no existe en la nube')
+  }
+  
+  const projectJson = await metadataResponse.json()
   
   const tracks = await Promise.all(projectJson.tracks.map(async (t: any) => {
     if (!t.clip || !t.clip.audioFile) return { ...t, clip: null }
     
-    const audioPath = `${basePathname}/${t.clip.audioFile}`
-    const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioPath)}`, {
+    // Find the audio blob by matching the filename
+    const audioBlob = blobs.find((b: any) => 
+      b.pathname.endsWith(`/${t.clip.audioFile}`) || b.pathname.endsWith(t.clip.audioFile)
+    )
+    
+    if (!audioBlob) {
+      console.error(`Audio no encontrado para ${t.name}: ${t.clip.audioFile}`)
+      throw new Error(`Audio no encontrado para ${t.name}`)
+    }
+    
+    // Download audio using its exact pathname from list()
+    const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioBlob.pathname)}`, {
       headers: { 'x-musicalia-key': musicaliaKey! }
     })
     
     if (!audioResponse.ok) {
-      let errorMessage = `Error al cargar audio: ${t.name}`
-      
-      const contentType = audioResponse.headers.get('content-type')
-      if (contentType?.includes('application/json')) {
-        try {
-          const errorData = await audioResponse.json()
-          if (errorData.error) {
-            errorMessage = `Error al cargar ${t.name}: ${errorData.error}`
-          }
-        } catch {
-        }
-      }
-      
-      console.error(errorMessage)
-      return { ...t, clip: null }
+      console.error(`Audio no encontrado para ${t.name} en ${audioBlob.pathname}`)
+      throw new Error(`Audio no encontrado para ${t.name}`)
     }
     
     const audioBuffer = await new AudioContext().decodeAudioData(await audioResponse.arrayBuffer())

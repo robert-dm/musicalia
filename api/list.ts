@@ -37,21 +37,30 @@ export async function GET(request: NextRequest) {
       oidcToken
     })
     
-    const projectMap = new Map<string, { name: string, totalSize: number, uploadedAt: Date }>()
+    const projectMap = new Map<string, { name: string, totalSize: number, uploadedAt: Date, hasProjectJson: boolean, folderPath: string | null }>()
     
     for (const blob of blobs) {
       const pathParts = blob.pathname.split('/')
       if (pathParts.length >= 2 && pathParts[0] === 'musicalia') {
         const projectName = pathParts[1]
         
-        if (pathParts.length === 3 && pathParts[2] === 'project.json') {
+        // Match project.json or project-*.json or similar patterns
+        if (pathParts.length === 3 && (pathParts[2] === 'project.json' || pathParts[2].match(/^project[^/]*\.json$/))) {
+          const folderPath = `${pathParts[0]}/${pathParts[1]}`
           const existing = projectMap.get(projectName)
           if (!existing || blob.uploadedAt > existing.uploadedAt) {
             projectMap.set(projectName, {
               name: projectName,
               totalSize: existing?.totalSize || 0,
-              uploadedAt: blob.uploadedAt
+              uploadedAt: blob.uploadedAt,
+              hasProjectJson: true,
+              folderPath
             })
+          } else {
+            existing.hasProjectJson = true
+            if (!existing.folderPath) {
+              existing.folderPath = folderPath
+            }
           }
         }
         
@@ -59,10 +68,13 @@ export async function GET(request: NextRequest) {
         if (existing) {
           existing.totalSize += blob.size
         } else {
+          const folderPath = pathParts.length >= 2 ? `${pathParts[0]}/${pathParts[1]}` : null
           projectMap.set(projectName, {
             name: projectName,
             totalSize: blob.size,
-            uploadedAt: blob.uploadedAt
+            uploadedAt: blob.uploadedAt,
+            hasProjectJson: false,
+            folderPath
           })
         }
       } else if (blob.pathname.endsWith('.musicalia')) {
@@ -70,17 +82,21 @@ export async function GET(request: NextRequest) {
         projectMap.set(projectName, {
           name: projectName,
           totalSize: blob.size,
-          uploadedAt: blob.uploadedAt
+          uploadedAt: blob.uploadedAt,
+          hasProjectJson: true,
+          folderPath: blob.pathname.replace('.musicalia', '')
         })
       }
     }
     
-    const projects = Array.from(projectMap.values()).map(project => ({
-      name: project.name,
-      pathname: `musicalia/${project.name}`,
-      size: project.totalSize,
-      uploadedAt: project.uploadedAt
-    }))
+    const projects = Array.from(projectMap.values())
+      .filter(project => project.hasProjectJson && project.folderPath)
+      .map(project => ({
+        name: project.name,
+        pathname: project.folderPath!,
+        size: project.totalSize,
+        uploadedAt: project.uploadedAt
+      }))
     
     return Response.json(projects)
   } catch (error: any) {

@@ -173,6 +173,19 @@ function App() {
       return () => lanesColumn.removeEventListener('wheel', handleWheel)
     }
   }, [])
+
+  // Update Transport loop when loop settings change during playback
+  useEffect(() => {
+    if (isPlaying) {
+      if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
+        Tone.getTransport().loop = true
+        Tone.getTransport().loopStart = loopStart
+        Tone.getTransport().loopEnd = loopEnd
+      } else {
+        Tone.getTransport().loop = false
+      }
+    }
+  }, [isPlaying, isLoopEnabled, loopStart, loopEnd])
   
   // Load project on mount
   useEffect(() => {
@@ -1190,6 +1203,13 @@ function App() {
     setIsDraggingLoop(false)
     setIsDraggingLoopEdge(null)
     setLoopDragStart(null)
+    setTempLoopStart(null)
+    setTempLoopEnd(null)
+    
+    // If currently playing, disable Transport loop immediately
+    if (isPlaying) {
+      Tone.getTransport().loop = false
+    }
   }
 
   const handleLoopMouseDown = (e: React.MouseEvent<HTMLDivElement>, edge?: 'start' | 'end') => {

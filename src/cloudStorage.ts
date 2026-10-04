@@ -87,10 +87,11 @@ function encodeWAV(channelData: Float32Array[], sampleRate: number): Uint8Array 
 }
 
 async function probeUploadEndpoint(fileName: string, projectName: string): Promise<void> {
+  const fullPathname = `musicalia/${projectName}/${fileName}`
   const probePayload = {
     type: 'blob.generate-presigned-url',
     payload: {
-      pathname: fileName,
+      pathname: fullPathname,
       clientPayload: JSON.stringify({ 
         musicaliaKey,
         projectName 
@@ -154,7 +155,8 @@ export async function saveProjectToCloud(
       const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
       const file = new File([blob], fileName, { type: 'audio/wav' })
       
-      await uploadPresigned(fileName, file, {
+      const fullPathname = `musicalia/${projectName}/${fileName}`
+      await uploadPresigned(fullPathname, file, {
         access: 'public',
         handleUploadUrl: '/api/handle-upload',
         clientPayload: JSON.stringify({ 
@@ -195,7 +197,8 @@ export async function saveProjectToCloud(
     const metadataBlob = new Blob([metadataJson], { type: 'application/json' })
     const metadataFile = new File([metadataBlob], 'project.json', { type: 'application/json' })
     
-    await uploadPresigned('project.json', metadataFile, {
+    const fullPathname = `musicalia/${projectName}/project.json`
+    await uploadPresigned(fullPathname, metadataFile, {
       access: 'public',
       handleUploadUrl: '/api/handle-upload',
       clientPayload: JSON.stringify({ 

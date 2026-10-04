@@ -2,7 +2,7 @@ import { handleUploadPresigned, type HandleUploadPresignedBody } from '@vercel/b
 import { issueSignedToken } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
-import { verifyJWT, type Session } from './auth-utils'
+import { verifyJWT, type Session } from '../lib/auth-utils'
 
 export async function POST(request: NextRequest) {
   try {

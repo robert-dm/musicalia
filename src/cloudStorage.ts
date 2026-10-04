@@ -129,25 +129,37 @@ export async function saveProjectToCloud(
   
   onProgress?.(5)
   
-  const audioFiles: Array<{ index: number, wavData: Uint8Array }> = []
+  const audioFiles: Array<{ trackIndex: number, clipIndex: number, wavData: Uint8Array }> = []
   
   for (let i = 0; i < projectData.tracks.length; i++) {
     const track = projectData.tracks[i]
-    if (track.clip?.audioData) {
+    
+    if (track.clips && Array.isArray(track.clips)) {
+      for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
+        const clip = track.clips[clipIdx]
+        if (clip.audioData) {
+          const left = new Float32Array(clip.audioData.left)
+          const right = new Float32Array(clip.audioData.right)
+          const wavData = await compressAudio(left, right, clip.audioData.sampleRate)
+          audioFiles.push({ trackIndex: i, clipIndex: clipIdx, wavData })
+        }
+      }
+    } else if (track.clip?.audioData) {
       const left = new Float32Array(track.clip.audioData.left)
       const right = new Float32Array(track.clip.audioData.right)
       const wavData = await compressAudio(left, right, track.clip.audioData.sampleRate)
-      audioFiles.push({ index: i, wavData })
-      onProgress?.(5 + (i / projectData.tracks.length) * 40)
+      audioFiles.push({ trackIndex: i, clipIndex: 0, wavData })
     }
+    
+    onProgress?.(5 + ((i + 1) / projectData.tracks.length) * 40)
   }
   
   onProgress?.(45)
   
-  const uploadedAudioFiles: Record<number, string> = {}
+  const uploadedAudioFiles: Record<string, string> = {}
   for (let i = 0; i < audioFiles.length; i++) {
-    const { index, wavData } = audioFiles[i]
-    const fileName = `audio_${index}.wav`
+    const { trackIndex, clipIndex, wavData } = audioFiles[i]
+    const fileName = `audio_${trackIndex}_${clipIndex}.wav`
     
     try {
       await probeUploadEndpoint(fileName, projectName)
@@ -165,7 +177,7 @@ export async function saveProjectToCloud(
         })
       })
       
-      uploadedAudioFiles[index] = fileName
+      uploadedAudioFiles[`${trackIndex}_${clipIndex}`] = fileName
       onProgress?.(45 + ((i + 1) / audioFiles.length) * 40)
     } catch (err: any) {
       console.error('Upload error:', err)
@@ -177,17 +189,35 @@ export async function saveProjectToCloud(
   
   const metadataOnly = {
     ...projectData,
-    tracks: projectData.tracks.map((t: any, i: number) => ({
-      name: t.name,
-      mute: t.mute,
-      solo: t.solo,
-      volume: t.volume,
-      clip: t.clip ? {
-        fileName: t.clip.fileName,
-        startPosition: t.clip.startPosition,
-        audioFile: uploadedAudioFiles[i] || null
-      } : null
-    }))
+    tracks: projectData.tracks.map((t: any, i: number) => {
+      if (t.clips && Array.isArray(t.clips)) {
+        return {
+          name: t.name,
+          mute: t.mute,
+          solo: t.solo,
+          volume: t.volume,
+          clips: t.clips.map((clip: any, clipIdx: number) => ({
+            fileName: clip.fileName,
+            startPosition: clip.startPosition,
+            offsetSeconds: clip.offsetSeconds,
+            id: clip.id,
+            audioFile: uploadedAudioFiles[`${i}_${clipIdx}`] || null
+          }))
+        }
+      } else {
+        return {
+          name: t.name,
+          mute: t.mute,
+          solo: t.solo,
+          volume: t.volume,
+          clip: t.clip ? {
+            fileName: t.clip.fileName,
+            startPosition: t.clip.startPosition,
+            audioFile: uploadedAudioFiles[`${i}_0`] || null
+          } : null
+        }
+      }
+    })
   }
   
   try {
@@ -321,49 +351,117 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
   })
   
   if (!metadataResponse.ok) {
+    const text = await metadataResponse.text()
+    if (text.includes('does not exist') || text.includes('not found')) {
+      throw new Error('Archivo no encontrado')
+    }
     throw new Error('El proyecto no existe en la nube')
   }
   
   const projectJson = await metadataResponse.json()
   
   const tracks = await Promise.all(projectJson.tracks.map(async (t: any) => {
-    if (!t.clip || !t.clip.audioFile) return { ...t, clip: null }
-    
-    // Find the audio blob by matching the filename
-    const audioBlob = blobs.find((b: any) => 
-      b.pathname.endsWith(`/${t.clip.audioFile}`) || b.pathname.endsWith(t.clip.audioFile)
-    )
-    
-    if (!audioBlob) {
-      console.error(`Audio no encontrado para ${t.name}: ${t.clip.audioFile}`)
-      throw new Error(`Audio no encontrado para ${t.name}`)
-    }
-    
-    // Download audio using its exact pathname from list()
-    const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioBlob.pathname)}`, {
-      headers: { 'x-musicalia-key': musicaliaKey! }
-    })
-    
-    if (!audioResponse.ok) {
-      console.error(`Audio no encontrado para ${t.name} en ${audioBlob.pathname}`)
-      throw new Error(`Audio no encontrado para ${t.name}`)
-    }
-    
-    const audioBuffer = await new AudioContext().decodeAudioData(await audioResponse.arrayBuffer())
-    
-    return {
-      name: t.name,
-      mute: t.mute,
-      solo: t.solo,
-      volume: t.volume,
-      clip: {
-        fileName: t.clip.fileName,
-        startPosition: t.clip.startPosition,
-        audioData: {
-          left: Array.from(audioBuffer.getChannelData(0)),
-          right: Array.from(audioBuffer.getChannelData(1)),
-          sampleRate: audioBuffer.sampleRate
+    if (t.clips && Array.isArray(t.clips)) {
+      const loadedClips = await Promise.all(t.clips.map(async (clip: any) => {
+        if (!clip.audioFile) return null
+        
+        const audioBlob = blobs.find((b: any) => 
+          b.pathname.endsWith(`/${clip.audioFile}`) || b.pathname.endsWith(clip.audioFile)
+        )
+        
+        if (!audioBlob) {
+          console.error(`Audio no encontrado para ${t.name}: ${clip.audioFile}`)
+          throw new Error(`Audio no encontrado para ${t.name}`)
         }
+        
+        const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioBlob.pathname)}`, {
+          headers: { 'x-musicalia-key': musicaliaKey! }
+        })
+        
+        if (!audioResponse.ok) {
+          const text = await audioResponse.text()
+          if (text.includes('does not exist') || text.includes('not found')) {
+            throw new Error(`Audio no encontrado para ${t.name}`)
+          }
+          console.error(`Audio no encontrado para ${t.name} en ${audioBlob.pathname}`)
+          throw new Error(`Audio no encontrado para ${t.name}`)
+        }
+        
+        const audioBuffer = await new AudioContext().decodeAudioData(await audioResponse.arrayBuffer())
+        
+        return {
+          fileName: clip.fileName,
+          startPosition: clip.startPosition,
+          offsetSeconds: clip.offsetSeconds,
+          id: clip.id,
+          audioData: {
+            left: Array.from(audioBuffer.getChannelData(0)),
+            right: Array.from(audioBuffer.getChannelData(1)),
+            sampleRate: audioBuffer.sampleRate
+          }
+        }
+      }))
+      
+      return {
+        name: t.name,
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        clips: loadedClips.filter(c => c !== null)
+      }
+    } else if (t.clip) {
+      if (!t.clip.audioFile) {
+        return { ...t, clips: [] }
+      }
+      
+      const audioBlob = blobs.find((b: any) => 
+        b.pathname.endsWith(`/${t.clip.audioFile}`) || b.pathname.endsWith(t.clip.audioFile)
+      )
+      
+      if (!audioBlob) {
+        console.error(`Audio no encontrado para ${t.name}: ${t.clip.audioFile}`)
+        throw new Error(`Audio no encontrado para ${t.name}`)
+      }
+      
+      const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioBlob.pathname)}`, {
+        headers: { 'x-musicalia-key': musicaliaKey! }
+      })
+      
+      if (!audioResponse.ok) {
+        const text = await audioResponse.text()
+        if (text.includes('does not exist') || text.includes('not found')) {
+          throw new Error(`Audio no encontrado para ${t.name}`)
+        }
+        console.error(`Audio no encontrado para ${t.name} en ${audioBlob.pathname}`)
+        throw new Error(`Audio no encontrado para ${t.name}`)
+      }
+      
+      const audioBuffer = await new AudioContext().decodeAudioData(await audioResponse.arrayBuffer())
+      
+      return {
+        name: t.name,
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        clips: [{
+          fileName: t.clip.fileName,
+          startPosition: t.clip.startPosition,
+          offsetSeconds: t.clip.offsetSeconds || 0,
+          id: t.clip.id || `clip-${Date.now()}`,
+          audioData: {
+            left: Array.from(audioBuffer.getChannelData(0)),
+            right: Array.from(audioBuffer.getChannelData(1)),
+            sampleRate: audioBuffer.sampleRate
+          }
+        }]
+      }
+    } else {
+      return {
+        name: t.name,
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        clips: []
       }
     }
   }))

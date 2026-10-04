@@ -1,22 +1,13 @@
 import { list } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
-
-function verifyAuth(request: NextRequest): boolean {
-  const key = request.headers.get('x-musicalia-key')
-  const expectedKey = process.env.MUSICALIA_KEY
-  
-  if (!expectedKey) {
-    throw new Error('MUSICALIA_KEY no configurada')
-  }
-  
-  return key === expectedKey
-}
+import { getSessionFromRequest } from './auth-utils'
 
 export async function GET(request: NextRequest) {
   try {
-    if (!verifyAuth(request)) {
-      return Response.json({ error: 'Clave incorrecta' }, { status: 401 })
+    const session = await getSessionFromRequest(request)
+    if (!session) {
+      return Response.json({ error: 'No autenticado' }, { status: 401 })
     }
     
     const { searchParams } = new URL(request.url)
@@ -24,6 +15,10 @@ export async function GET(request: NextRequest) {
     
     if (!prefix) {
       return Response.json({ error: 'Prefix requerido' }, { status: 400 })
+    }
+
+    if (!prefix.startsWith(`musicalia-projects/${session.userId}/`)) {
+      return Response.json({ error: 'Acceso denegado' }, { status: 403 })
     }
     
     const storeId = process.env.MUSICALIA_STORE_ID

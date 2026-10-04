@@ -17,7 +17,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0044b'
+const APP_VERSION = '0.0045b'
 
 interface Clip {
   player: Tone.Player
@@ -943,13 +943,11 @@ function App() {
 
     const bpmResult = await detectBPM(buffer)
     if (bpmResult.bpm) {
-      console.log('[BPM] Detected:', bpmResult.bpm)
       setBpm(bpmResult.bpm)
       Tone.getTransport().bpm.value = bpmResult.bpm
       setErrorMessage(`Tempo: ${bpmResult.bpm}`)
       setTimeout(() => setErrorMessage(null), 3000)
     } else {
-      console.log('[BPM] Detection failed, keeping current BPM')
       setErrorMessage('No se pudo detectar el tempo')
       setTimeout(() => setErrorMessage(null), 3000)
     }
@@ -990,13 +988,11 @@ function App() {
 
     const bpmResult = await detectBPM(originalBuffer)
     if (bpmResult.bpm) {
-      console.log('[BPM] Detected:', bpmResult.bpm)
       setBpm(bpmResult.bpm)
       Tone.getTransport().bpm.value = bpmResult.bpm
       setErrorMessage(`Tempo: ${bpmResult.bpm}`)
       setTimeout(() => setErrorMessage(null), 3000)
     } else {
-      console.log('[BPM] Detection failed, keeping current BPM')
       setErrorMessage('No se pudo detectar el tempo')
       setTimeout(() => setErrorMessage(null), 3000)
     }

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import * as Tone from 'tone'
 import './App.css'
 import './AudioDiagnostics.css'
@@ -17,7 +17,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0042b'
+const APP_VERSION = '0.0044b'
 
 interface Clip {
   player: Tone.Player
@@ -43,8 +43,9 @@ function App() {
   const [metronomeEnabled, setMetronomeEnabled] = useState(true)
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
   const [countInBars, _setCountInBars] = useState(2)
-  const [isMarkingLoopStart, setIsMarkingLoopStart] = useState(false)
-  const [isMarkingLoopEnd, setIsMarkingLoopEnd] = useState(false)
+  const [isDraggingLoop, setIsDraggingLoop] = useState(false)
+  const [isDraggingLoopEdge, setIsDraggingLoopEdge] = useState<'start' | 'end' | null>(null)
+  const [loopDragStart, setLoopDragStart] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
   const trackGainsRef = useRef<Tone.Gain[]>([])
@@ -136,6 +137,17 @@ function App() {
     
     saveState()
   }, [bpm, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled])
+
+  useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      if (isDraggingLoop || isDraggingLoopEdge) {
+        handleLoopMouseUp()
+      }
+    }
+    
+    window.addEventListener('mouseup', handleGlobalMouseUp)
+    return () => window.removeEventListener('mouseup', handleGlobalMouseUp)
+  }, [isDraggingLoop, isDraggingLoopEdge])
   
   // Load project on mount
   useEffect(() => {
@@ -1120,29 +1132,19 @@ function App() {
       return
     }
 
+    if (isDraggingLoop || isDraggingLoopEdge) {
+      return
+    }
+
     const rect = e.currentTarget.getBoundingClientRect()
     const clickX = e.clientX - rect.left
     const percentage = clickX / rect.width
     const maxDuration = getMaxDuration()
     const clickTime = percentage * maxDuration
 
-    if (isMarkingLoopStart) {
-      setLoopStart(clickTime)
-      setIsLoopEnabled(true)
-      setIsMarkingLoopStart(false)
-      if (loopEnd !== null && clickTime > loopEnd) {
-        setLoopEnd(null)
-      }
-    } else if (isMarkingLoopEnd) {
-      if (loopStart !== null && clickTime > loopStart) {
-        setLoopEnd(clickTime)
-        setIsMarkingLoopEnd(false)
-      }
-    } else {
-      seekToPosition(clickTime)
-      if (!isPlaying && !isPaused) {
-        handleLaneClick(trackIndex)
-      }
+    seekToPosition(clickTime)
+    if (!isPlaying && !isPaused) {
+      handleLaneClick(trackIndex)
     }
   }
 
@@ -1150,21 +1152,61 @@ function App() {
     setLoopStart(null)
     setLoopEnd(null)
     setIsLoopEnabled(false)
-    setIsMarkingLoopStart(false)
-    setIsMarkingLoopEnd(false)
+    setIsDraggingLoop(false)
+    setIsDraggingLoopEdge(null)
+    setLoopDragStart(null)
   }
 
-  const handleMarkLoopStart = () => {
-    setIsMarkingLoopStart(true)
-    setIsMarkingLoopEnd(false)
-  }
-
-  const handleMarkLoopEnd = () => {
-    if (loopStart === null) {
-      return
+  const handleLoopMouseDown = (e: React.MouseEvent<HTMLDivElement>, edge?: 'start' | 'end') => {
+    if (!isLoopEnabled) return
+    
+    if (edge) {
+      e.stopPropagation()
+      setIsDraggingLoopEdge(edge)
+    } else {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const clickX = e.clientX - rect.left
+      const percentage = clickX / rect.width
+      const clickTime = percentage * getMaxDuration()
+      
+      setIsDraggingLoop(true)
+      setLoopDragStart(clickTime)
+      setLoopStart(clickTime)
+      setLoopEnd(clickTime)
     }
-    setIsMarkingLoopEnd(true)
-    setIsMarkingLoopStart(false)
+  }
+
+  const handleLoopMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isLoopEnabled) return
+    
+    const rect = e.currentTarget.getBoundingClientRect()
+    const clickX = e.clientX - rect.left
+    const percentage = Math.max(0, Math.min(1, clickX / rect.width))
+    const currentTime = percentage * getMaxDuration()
+    
+    if (isDraggingLoop && loopDragStart !== null) {
+      if (currentTime < loopDragStart) {
+        setLoopStart(currentTime)
+        setLoopEnd(loopDragStart)
+      } else {
+        setLoopStart(loopDragStart)
+        setLoopEnd(currentTime)
+      }
+    } else if (isDraggingLoopEdge === 'start') {
+      if (loopEnd === null || currentTime < loopEnd) {
+        setLoopStart(currentTime)
+      }
+    } else if (isDraggingLoopEdge === 'end') {
+      if (loopStart === null || currentTime > loopStart) {
+        setLoopEnd(currentTime)
+      }
+    }
+  }
+
+  const handleLoopMouseUp = () => {
+    setIsDraggingLoop(false)
+    setIsDraggingLoopEdge(null)
+    setLoopDragStart(null)
   }
 
   useEffect(() => {
@@ -1228,6 +1270,42 @@ function App() {
       document.body.style.cursor = ''
     }
   }, [isDraggingPlayhead, trackStates, isPlaying])
+
+  const rulerBars = useMemo(() => {
+    const maxDuration = getMaxDuration()
+    if (maxDuration === 0) return null
+    
+    const secondsPerBeat = 60 / bpm
+    const beatsPerBar = 4
+    const secondsPerBar = secondsPerBeat * beatsPerBar
+    const totalBars = Math.ceil(maxDuration / secondsPerBar)
+    const bars = []
+    
+    for (let bar = 0; bar <= totalBars; bar++) {
+      const barTime = bar * secondsPerBar
+      const position = (barTime / maxDuration) * 100
+      
+      if (position <= 100) {
+        bars.push(
+          <div key={bar} className="bar-marker" style={{ left: `${position}%` }}>
+            <span className="bar-number">{bar + 1}</span>
+          </div>
+        )
+        
+        for (let beat = 1; beat < beatsPerBar; beat++) {
+          const beatTime = barTime + beat * secondsPerBeat
+          const beatPosition = (beatTime / maxDuration) * 100
+          if (beatPosition <= 100) {
+            bars.push(
+              <div key={`${bar}-${beat}`} className="beat-marker" style={{ left: `${beatPosition}%` }} />
+            )
+          }
+        }
+      }
+    }
+    
+    return bars
+  }, [bpm, trackStates])
 
   return (
     <div className="app">
@@ -1301,29 +1379,10 @@ function App() {
           <button
             className={`transport-button ${isLoopEnabled ? 'active' : ''}`}
             onClick={() => setIsLoopEnabled(!isLoopEnabled)}
-            title="Loop (marca inicio y fin en el timeline)"
+            title="Activar loop - arrastra en el timeline para marcar zona"
           >
             🔁 Loop
           </button>
-          {isLoopEnabled && (
-            <>
-              <button
-                className={`transport-button ${isMarkingLoopStart ? 'active' : ''}`}
-                onClick={handleMarkLoopStart}
-                title="Click aquí, luego en el timeline para marcar inicio"
-              >
-                ⏮ Inicio
-              </button>
-              <button
-                className={`transport-button ${isMarkingLoopEnd ? 'active' : ''}`}
-                onClick={handleMarkLoopEnd}
-                disabled={loopStart === null}
-                title="Click aquí, luego en el timeline para marcar fin"
-              >
-                ⏭ Fin
-              </button>
-            </>
-          )}
         </div>
         <div className="time-display">
           <span className="time-label">Time</span>
@@ -1334,7 +1393,7 @@ function App() {
         {isLoopEnabled && (loopStart !== null || loopEnd !== null) && (
           <div className="loop-indicator">
             <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
-            <button className="transport-button clear-loop" onClick={clearLoop}>Borrar</button>
+            <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
           </div>
         )}
         <div className="bpm-control">
@@ -1506,41 +1565,7 @@ function App() {
         />
         <div className="lanes-column">
           <div className="bar-ruler">
-            {(() => {
-              const maxDuration = getMaxDuration()
-              if (maxDuration === 0) return null
-              
-              const secondsPerBeat = 60 / bpm
-              const beatsPerBar = 4
-              const secondsPerBar = secondsPerBeat * beatsPerBar
-              const totalBars = Math.ceil(maxDuration / secondsPerBar)
-              const bars = []
-              
-              for (let bar = 0; bar <= totalBars; bar++) {
-                const barTime = bar * secondsPerBar
-                const position = (barTime / maxDuration) * 100
-                
-                if (position <= 100) {
-                  bars.push(
-                    <div key={bar} className="bar-marker" style={{ left: `${position}%` }}>
-                      <span className="bar-number">{bar + 1}</span>
-                    </div>
-                  )
-                  
-                  for (let beat = 1; beat < beatsPerBar; beat++) {
-                    const beatTime = barTime + beat * secondsPerBeat
-                    const beatPosition = (beatTime / maxDuration) * 100
-                    if (beatPosition <= 100) {
-                      bars.push(
-                        <div key={`${bar}-${beat}`} className="beat-marker" style={{ left: `${beatPosition}%` }} />
-                      )
-                    }
-                  }
-                }
-              }
-              
-              return bars
-            })()}
+            {rulerBars}
           </div>
           {trackStates.map((trackState, trackIndex) => (
             <div 
@@ -1549,7 +1574,16 @@ function App() {
               onClick={(e) => handleWaveformClick(e, trackIndex)}
             >
               {trackState.clip ? (
-                <div className="clip-region">
+                <div 
+                  className="clip-region"
+                  onMouseDown={(e) => {
+                    if (isLoopEnabled && e.button === 0 && !isDraggingLoopEdge) {
+                      handleLoopMouseDown(e)
+                    }
+                  }}
+                  onMouseMove={handleLoopMouseMove}
+                  onMouseUp={handleLoopMouseUp}
+                >
                   <div 
                     className="clip-wrapper"
                     style={{
@@ -1559,13 +1593,12 @@ function App() {
                   >
                     <div className="clip-info">
                       <span className="clip-filename">{trackState.clip.fileName}</span>
-                      {isMarkingLoopStart && <span className="clip-hint">👆 Click aquí para marcar inicio de loop</span>}
-                      {isMarkingLoopEnd && <span className="clip-hint">👆 Click aquí para marcar fin de loop</span>}
+                      {isLoopEnabled && !loopStart && !loopEnd && <span className="clip-hint">Arrastra para marcar zona de loop</span>}
                     </div>
                     <canvas
                       ref={(el) => {
-                        canvasRefs.current[trackIndex] = el
-                        if (el && trackState.clip) {
+                        if (el && trackState.clip && !canvasRefs.current[trackIndex]) {
+                          canvasRefs.current[trackIndex] = el
                           el.width = el.offsetWidth * 2
                           el.height = el.offsetHeight * 2
                           drawWaveform(el, trackState.clip.buffer)
@@ -1576,18 +1609,22 @@ function App() {
                   </div>
                   {loopStart !== null && (
                     <div 
-                      className="loop-marker loop-start"
+                      className="loop-marker loop-start draggable"
                       style={{ 
                         left: `${(loopStart / getMaxDuration()) * 100}%` 
                       }}
+                      onMouseDown={(e) => handleLoopMouseDown(e, 'start')}
+                      title="Arrastra para ajustar inicio"
                     />
                   )}
                   {loopEnd !== null && (
                     <div 
-                      className="loop-marker loop-end"
+                      className="loop-marker loop-end draggable"
                       style={{ 
                         left: `${(loopEnd / getMaxDuration()) * 100}%` 
                       }}
+                      onMouseDown={(e) => handleLoopMouseDown(e, 'end')}
+                      title="Arrastra para ajustar fin"
                     />
                   )}
                   {loopStart !== null && loopEnd !== null && (

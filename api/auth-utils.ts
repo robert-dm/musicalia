@@ -83,7 +83,8 @@ export async function findUserByEmail(email: string): Promise<User | null> {
 
   for (const blob of blobs) {
     try {
-      const response = await fetch(blob.url)
+      const blobMeta = await head(blob.pathname, { storeId, token: oidcToken })
+      const response = await fetch(blobMeta.downloadUrl)
       const user: User = await response.json()
       if (user.email === email) {
         return user
@@ -115,7 +116,8 @@ export async function findUserByUsername(username: string): Promise<User | null>
 
   for (const blob of blobs) {
     try {
-      const response = await fetch(blob.url)
+      const blobMeta = await head(blob.pathname, { storeId, token: oidcToken })
+      const response = await fetch(blobMeta.downloadUrl)
       const user: User = await response.json()
       if (user.username === username) {
         return user

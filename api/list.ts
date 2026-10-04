@@ -37,7 +37,7 @@ export async function GET(request: NextRequest) {
       oidcToken
     })
     
-    const projectMap = new Map<string, { name: string, totalSize: number, uploadedAt: Date }>()
+    const projectMap = new Map<string, { name: string, totalSize: number, uploadedAt: Date, hasProjectJson: boolean }>()
     
     for (const blob of blobs) {
       const pathParts = blob.pathname.split('/')
@@ -50,8 +50,11 @@ export async function GET(request: NextRequest) {
             projectMap.set(projectName, {
               name: projectName,
               totalSize: existing?.totalSize || 0,
-              uploadedAt: blob.uploadedAt
+              uploadedAt: blob.uploadedAt,
+              hasProjectJson: true
             })
+          } else {
+            existing.hasProjectJson = true
           }
         }
         
@@ -62,7 +65,8 @@ export async function GET(request: NextRequest) {
           projectMap.set(projectName, {
             name: projectName,
             totalSize: blob.size,
-            uploadedAt: blob.uploadedAt
+            uploadedAt: blob.uploadedAt,
+            hasProjectJson: false
           })
         }
       } else if (blob.pathname.endsWith('.musicalia')) {
@@ -70,17 +74,20 @@ export async function GET(request: NextRequest) {
         projectMap.set(projectName, {
           name: projectName,
           totalSize: blob.size,
-          uploadedAt: blob.uploadedAt
+          uploadedAt: blob.uploadedAt,
+          hasProjectJson: true
         })
       }
     }
     
-    const projects = Array.from(projectMap.values()).map(project => ({
-      name: project.name,
-      pathname: `musicalia/${project.name}`,
-      size: project.totalSize,
-      uploadedAt: project.uploadedAt
-    }))
+    const projects = Array.from(projectMap.values())
+      .filter(project => project.hasProjectJson)
+      .map(project => ({
+        name: project.name,
+        pathname: `musicalia/${project.name}`,
+        size: project.totalSize,
+        uploadedAt: project.uploadedAt
+      }))
     
     return Response.json(projects)
   } catch (error: any) {

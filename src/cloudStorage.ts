@@ -245,6 +245,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     ? pathname
     : `${pathname}/project.json`
   
+  console.log('[openProject] Fetching project.json from:', projectJsonPath)
   const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(projectJsonPath)}`, {
     headers: { 'x-musicalia-key': musicaliaKey }
   })
@@ -263,7 +264,9 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
         try {
           const errorData = await oldFormatResponse.json()
           if (errorData.error) {
-            errorMessage = errorData.error
+            errorMessage = errorData.error === 'Archivo no encontrado' 
+              ? 'El proyecto no existe en la nube'
+              : errorData.error
           }
         } catch {
         }
@@ -326,6 +329,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     if (!t.clip || !t.clip.audioFile) return { ...t, clip: null }
     
     const audioPath = `${basePathname}/${t.clip.audioFile}`
+    console.log('[openProject] Fetching audio for track', t.name, 'from:', audioPath)
     const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioPath)}`, {
       headers: { 'x-musicalia-key': musicaliaKey! }
     })
@@ -338,13 +342,17 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
         try {
           const errorData = await audioResponse.json()
           if (errorData.error) {
-            errorMessage = `Error al cargar ${t.name}: ${errorData.error}`
+            if (errorData.error === 'Archivo no encontrado') {
+              errorMessage = `Audio no encontrado para ${t.name}`
+            } else {
+              errorMessage = `Error al cargar ${t.name}: ${errorData.error}`
+            }
           }
         } catch {
         }
       }
       
-      console.error(errorMessage)
+      console.error(errorMessage, '- Path requested:', audioPath)
       return { ...t, clip: null }
     }
     

@@ -62,6 +62,8 @@ export async function GET(request: NextRequest) {
     
     if (message.includes('OIDC') || message.includes('credentials') || message.includes('authentication') || message.includes('No blob credentials')) {
       message = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'
+    } else if (message.includes('does not exist') || message.includes('not found') || message.includes('NotFound')) {
+      message = 'Archivo no encontrado'
     }
     
     return Response.json({ error: message }, { status: 500 })

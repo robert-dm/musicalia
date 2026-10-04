@@ -1,22 +1,13 @@
 import { list } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
-
-function verifyAuth(request: NextRequest): boolean {
-  const key = request.headers.get('x-musicalia-key')
-  const expectedKey = process.env.MUSICALIA_KEY
-  
-  if (!expectedKey) {
-    throw new Error('MUSICALIA_KEY no configurada')
-  }
-  
-  return key === expectedKey
-}
+import { getSessionFromRequest } from './auth-utils'
 
 export async function GET(request: NextRequest) {
   try {
-    if (!verifyAuth(request)) {
-      return Response.json({ error: 'Clave incorrecta' }, { status: 401 })
+    const session = getSessionFromRequest(request)
+    if (!session) {
+      return Response.json({ error: 'No autenticado' }, { status: 401 })
     }
     
     const storeId = process.env.MUSICALIA_STORE_ID
@@ -32,7 +23,7 @@ export async function GET(request: NextRequest) {
     }
     
     const { blobs } = await list({ 
-      prefix: 'musicalia/',
+      prefix: `musicalia-projects/${session.userId}/`,
       storeId,
       oidcToken
     })
@@ -41,12 +32,12 @@ export async function GET(request: NextRequest) {
     
     for (const blob of blobs) {
       const pathParts = blob.pathname.split('/')
-      if (pathParts.length >= 2 && pathParts[0] === 'musicalia') {
-        const projectName = pathParts[1]
+      if (pathParts.length >= 3 && pathParts[0] === 'musicalia-projects' && pathParts[1] === session.userId) {
+        const projectName = pathParts[2]
         
         // Match project.json or project-*.json or similar patterns
-        if (pathParts.length === 3 && (pathParts[2] === 'project.json' || pathParts[2].match(/^project[^/]*\.json$/))) {
-          const folderPath = `${pathParts[0]}/${pathParts[1]}`
+        if (pathParts.length === 4 && (pathParts[3] === 'project.json' || pathParts[3].match(/^project[^/]*\.json$/))) {
+          const folderPath = `${pathParts[0]}/${pathParts[1]}/${pathParts[2]}`
           const existing = projectMap.get(projectName)
           if (!existing || blob.uploadedAt > existing.uploadedAt) {
             projectMap.set(projectName, {
@@ -68,7 +59,7 @@ export async function GET(request: NextRequest) {
         if (existing) {
           existing.totalSize += blob.size
         } else {
-          const folderPath = pathParts.length >= 2 ? `${pathParts[0]}/${pathParts[1]}` : null
+          const folderPath = pathParts.length >= 3 ? `${pathParts[0]}/${pathParts[1]}/${pathParts[2]}` : null
           projectMap.set(projectName, {
             name: projectName,
             totalSize: blob.size,

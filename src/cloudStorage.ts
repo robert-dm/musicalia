@@ -8,19 +8,98 @@ export interface ProjectMetadata {
   uploadedAt: string
 }
 
-let musicaliaKey: string | null = localStorage.getItem('musicalia_key')
-
-export function setMusicaliKey(key: string) {
-  musicaliaKey = key
-  localStorage.setItem('musicalia_key', key)
+export interface User {
+  id: string
+  username: string
+  email: string
 }
 
-export function getMusicaliKey(): string | null {
-  return musicaliaKey
+let authToken: string | null = localStorage.getItem('musicalia_auth_token')
+let currentUser: User | null = null
+
+export function setAuthToken(token: string) {
+  authToken = token
+  localStorage.setItem('musicalia_auth_token', token)
 }
 
-export function hasMusicaliKey(): boolean {
-  return !!musicaliaKey
+export function getAuthToken(): string | null {
+  return authToken
+}
+
+export function clearAuth() {
+  authToken = null
+  currentUser = null
+  localStorage.removeItem('musicalia_auth_token')
+}
+
+export function hasAuth(): boolean {
+  return !!authToken
+}
+
+export function setCurrentUser(user: User) {
+  currentUser = user
+}
+
+export function getCurrentUser(): User | null {
+  return currentUser
+}
+
+export async function register(username: string, email: string, password: string): Promise<{ token: string, user: User }> {
+  const response = await fetch('/api/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, email, password })
+  })
+
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.error || 'Error al registrar usuario')
+  }
+
+  const data = await response.json()
+  setAuthToken(data.token)
+  setCurrentUser(data.user)
+  return data
+}
+
+export async function login(email: string, password: string): Promise<{ token: string, user: User }> {
+  const response = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  })
+
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.error || 'Error al iniciar sesión')
+  }
+
+  const data = await response.json()
+  setAuthToken(data.token)
+  setCurrentUser(data.user)
+  return data
+}
+
+export async function verifyAuth(): Promise<User | null> {
+  if (!authToken) return null
+
+  try {
+    const response = await fetch('/api/me', {
+      headers: { 'Authorization': `Bearer ${authToken}` }
+    })
+
+    if (!response.ok) {
+      clearAuth()
+      return null
+    }
+
+    const data = await response.json()
+    setCurrentUser(data.user)
+    return data.user
+  } catch (error) {
+    clearAuth()
+    return null
+  }
 }
 
 async function compressAudio(left: Float32Array, right: Float32Array, sampleRate: number): Promise<Uint8Array> {
@@ -87,13 +166,15 @@ function encodeWAV(channelData: Float32Array[], sampleRate: number): Uint8Array 
 }
 
 async function probeUploadEndpoint(fileName: string, projectName: string): Promise<void> {
-  const fullPathname = `musicalia/${projectName}/${fileName}`
+  if (!authToken) throw new Error('No autenticado')
+  
+  const fullPathname = `musicalia-projects/${fileName}`
   const probePayload = {
     type: 'blob.generate-presigned-url',
     payload: {
       pathname: fullPathname,
       clientPayload: JSON.stringify({ 
-        musicaliaKey,
+        token: authToken,
         projectName 
       }),
       multipart: false
@@ -125,7 +206,7 @@ export async function saveProjectToCloud(
   projectName: string,
   onProgress?: (progress: number) => void
 ): Promise<void> {
-  if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
+  if (!authToken) throw new Error('Debe iniciar sesión para guardar')
   
   onProgress?.(5)
   
@@ -167,12 +248,12 @@ export async function saveProjectToCloud(
       const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
       const file = new File([blob], fileName, { type: 'audio/wav' })
       
-      const fullPathname = `musicalia/${projectName}/${fileName}`
+      const fullPathname = `musicalia-projects/${fileName}`
       await uploadPresigned(fullPathname, file, {
         access: 'public',
         handleUploadUrl: '/api/handle-upload',
         clientPayload: JSON.stringify({ 
-          musicaliaKey,
+          token: authToken,
           projectName 
         })
       })
@@ -227,12 +308,12 @@ export async function saveProjectToCloud(
     const metadataBlob = new Blob([metadataJson], { type: 'application/json' })
     const metadataFile = new File([metadataBlob], 'project.json', { type: 'application/json' })
     
-    const fullPathname = `musicalia/${projectName}/project.json`
+    const fullPathname = `musicalia-projects/project.json`
     await uploadPresigned(fullPathname, metadataFile, {
       access: 'public',
       handleUploadUrl: '/api/handle-upload',
       clientPayload: JSON.stringify({ 
-        musicaliaKey,
+        token: authToken,
         projectName 
       })
     })
@@ -245,10 +326,10 @@ export async function saveProjectToCloud(
 }
 
 export async function listCloudProjects(): Promise<ProjectMetadata[]> {
-  if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
+  if (!authToken) throw new Error('Debe iniciar sesión')
   
   const response = await fetch('/api/list', {
-    headers: { 'x-musicalia-key': musicaliaKey }
+    headers: { 'Authorization': `Bearer ${authToken}` }
   })
   
   if (!response.ok) {
@@ -269,12 +350,12 @@ export async function listCloudProjects(): Promise<ProjectMetadata[]> {
 }
 
 export async function openProjectFromCloud(pathname: string): Promise<any> {
-  if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
+  if (!authToken) throw new Error('Debe iniciar sesión')
   
   // First check for legacy .musicalia format
   if (pathname.endsWith('.musicalia')) {
     const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(pathname)}`, {
-      headers: { 'x-musicalia-key': musicaliaKey }
+      headers: { 'Authorization': `Bearer ${authToken}` }
     })
     
     if (!metadataResponse.ok) {
@@ -327,7 +408,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
   
   // For folder-based projects, list blobs with the project prefix
   const listResponse = await fetch(`/api/list-project-blobs?prefix=${encodeURIComponent(pathname)}`, {
-    headers: { 'x-musicalia-key': musicaliaKey }
+    headers: { 'Authorization': `Bearer ${authToken}` }
   })
   
   if (!listResponse.ok) {
@@ -347,7 +428,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
   
   // Download project.json using its exact pathname from list()
   const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(projectJsonBlob.pathname)}`, {
-    headers: { 'x-musicalia-key': musicaliaKey }
+    headers: { 'Authorization': `Bearer ${authToken}` }
   })
   
   if (!metadataResponse.ok) {
@@ -375,7 +456,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
         }
         
         const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioBlob.pathname)}`, {
-          headers: { 'x-musicalia-key': musicaliaKey! }
+          headers: { 'Authorization': `Bearer ${authToken!}` }
         })
         
         if (!audioResponse.ok) {
@@ -424,7 +505,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
       }
       
       const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioBlob.pathname)}`, {
-        headers: { 'x-musicalia-key': musicaliaKey! }
+        headers: { 'Authorization': `Bearer ${authToken!}` }
       })
       
       if (!audioResponse.ok) {
@@ -476,12 +557,12 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
 }
 
 export async function deleteProjectFromCloud(pathname: string): Promise<void> {
-  if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
+  if (!authToken) throw new Error('Debe iniciar sesión')
   
   const response = await fetch('/api/delete-folder', {
     method: 'DELETE',
     headers: {
-      'x-musicalia-key': musicaliaKey,
+      'Authorization': `Bearer ${authToken}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({ pathname })
@@ -503,7 +584,7 @@ export async function deleteProjectFromCloud(pathname: string): Promise<void> {
 }
 
 export async function getStorageUsage(): Promise<number> {
-  if (!musicaliaKey) return 0
+  if (!authToken) return 0
   
   try {
     const projects = await listCloudProjects()
@@ -511,4 +592,9 @@ export async function getStorageUsage(): Promise<number> {
   } catch {
     return 0
   }
+}
+
+// Legacy migration function - not exposed to UI
+export function hasMusicaliKey(): boolean {
+  return false
 }

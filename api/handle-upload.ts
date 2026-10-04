@@ -2,6 +2,7 @@ import { handleUploadPresigned, type HandleUploadPresignedBody } from '@vercel/b
 import { issueSignedToken } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
+import { verifyJWT, type Session } from './auth-utils'
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,12 +12,6 @@ export async function POST(request: NextRequest) {
     if (!storeId) {
       console.error('[handle-upload] Missing MUSICALIA_STORE_ID')
       return Response.json({ error: 'MUSICALIA_STORE_ID no configurado' }, { status: 500 })
-    }
-    
-    const expectedKey = process.env.MUSICALIA_KEY
-    if (!expectedKey) {
-      console.error('[handle-upload] Missing MUSICALIA_KEY')
-      return Response.json({ error: 'MUSICALIA_KEY no configurada en servidor' }, { status: 500 })
     }
     
     let oidcToken: string | null = null
@@ -63,9 +58,16 @@ export async function POST(request: NextRequest) {
             }
           }
           
-          if (payload.musicaliaKey !== expectedKey) {
-            console.error('[getSignedToken] Invalid musicalia key')
-            throw new Error('Clave incorrecta')
+          const token = payload.token
+          if (!token) {
+            console.error('[getSignedToken] Missing auth token')
+            throw new Error('No autenticado')
+          }
+
+          const session = verifyJWT(token)
+          if (!session) {
+            console.error('[getSignedToken] Invalid auth token')
+            throw new Error('Token inválido o expirado')
           }
           
           const projectName = payload.projectName
@@ -75,7 +77,7 @@ export async function POST(request: NextRequest) {
           }
           
           const fileName = pathname.split('/').pop() || 'file'
-          const finalPathname = `musicalia/${projectName}/${fileName}`
+          const finalPathname = `musicalia-projects/${session.userId}/${projectName}/${fileName}`
           
           console.log('[getSignedToken] Issuing signed token for pathname:', finalPathname)
           

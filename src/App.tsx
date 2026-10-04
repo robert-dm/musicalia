@@ -6,18 +6,21 @@ import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 import { autosaveProject, loadProject, clearProject, saveAudioBuffer, loadAudioBuffer } from './projectManager'
 import {
-  hasMusicaliKey,
-  setMusicaliKey,
+  register,
+  login,
+  verifyAuth,
+  clearAuth,
   saveProjectToCloud,
   listCloudProjects,
   openProjectFromCloud,
   deleteProjectFromCloud,
   getStorageUsage,
-  type ProjectMetadata
+  type ProjectMetadata,
+  type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0052b'
+const APP_VERSION = '0.0053b'
 
 interface Clip {
   player: Tone.Player
@@ -81,13 +84,16 @@ function App() {
   const [audioLevel, setAudioLevel] = useState(0)
   const meterRef = useRef<Tone.Meter | null>(null)
   const [showToast, setShowToast] = useState(false)
-  const [hasCloudKey, setHasCloudKey] = useState(hasMusicaliKey())
+  const [currentUser, setCurrentUser] = useState<User | null>(null)
+  const [showAuth, setShowAuth] = useState(false)
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [showCloudProjects, setShowCloudProjects] = useState(false)
   const [cloudProjects, setCloudProjects] = useState<ProjectMetadata[]>([])
   const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
   const [uploadProgress, setUploadProgress] = useState(0)
   const [storageUsage, setStorageUsage] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [toastMessage, setToastMessage] = useState<string>('')
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [exportTracks, setExportTracks] = useState<boolean[]>([])
   const [isExporting, setIsExporting] = useState(false)
@@ -105,6 +111,17 @@ function App() {
     const beatsPerBar = 4
     return countInBars * beatsPerBar * secondsPerBeat
   }
+
+  // Verify authentication on mount
+  useEffect(() => {
+    const checkAuth = async () => {
+      const user = await verifyAuth()
+      if (user) {
+        setCurrentUser(user)
+      }
+    }
+    checkAuth()
+  }, [])
   
   // Autosave on state changes (excluding playheadPosition to avoid copying audio on every tick)
   useEffect(() => {
@@ -259,6 +276,7 @@ function App() {
       }))
       
       setTrackStates(newTrackStates)
+      setToastMessage('Proyecto cargado')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     })
@@ -272,18 +290,45 @@ function App() {
     window.location.reload()
   }
   
-  const handleSetCloudKey = () => {
-    const key = prompt('Introduce la clave de Musicalia:')
-    if (!key) return
-    
-    setMusicaliKey(key)
-    setHasCloudKey(true)
-    alert('Clave configurada correctamente')
+  const handleLogin = async (email: string, password: string) => {
+    try {
+      const { user } = await login(email, password)
+      setCurrentUser(user)
+      setShowAuth(false)
+      setToastMessage(`Bienvenido, ${user.username}`)
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+    } catch (error: any) {
+      setErrorMessage(error.message || 'Error al iniciar sesión')
+    }
+  }
+
+  const handleRegister = async (username: string, email: string, password: string) => {
+    try {
+      const { user } = await register(username, email, password)
+      setCurrentUser(user)
+      setShowAuth(false)
+      setToastMessage(`Cuenta creada. Bienvenido, ${user.username}`)
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+    } catch (error: any) {
+      setErrorMessage(error.message || 'Error al crear cuenta')
+    }
+  }
+
+  const handleLogout = () => {
+    clearAuth()
+    setCurrentUser(null)
+    setToastMessage('Sesión cerrada')
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 3000)
   }
   
   const handleSaveToCloud = async () => {
-    if (!hasCloudKey) {
-      setErrorMessage('Primero configura la clave de Musicalia')
+    if (!currentUser) {
+      setShowAuth(true)
+      setAuthMode('login')
+      setErrorMessage('Inicia sesión para guardar en la nube')
       return
     }
     
@@ -321,6 +366,7 @@ function App() {
       setErrorMessage(null)
       await saveProjectToCloud(projectData, name, setUploadProgress)
       setCurrentProjectName(name)
+      setToastMessage('Proyecto guardado en la nube')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
@@ -331,8 +377,10 @@ function App() {
   }
   
   const handleShowCloudProjects = async () => {
-    if (!hasCloudKey) {
-      setErrorMessage('Primero configura la clave de Musicalia')
+    if (!currentUser) {
+      setShowAuth(true)
+      setAuthMode('login')
+      setErrorMessage('Inicia sesión para ver tus proyectos')
       return
     }
     
@@ -429,6 +477,7 @@ function App() {
       setTrackStates(newTrackStates)
       setCurrentProjectName(name)
       setShowCloudProjects(false)
+      setToastMessage('Proyecto abierto')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
@@ -437,6 +486,11 @@ function App() {
   }
   
   const handleDeleteCloudProject = async (pathname: string, name: string) => {
+    if (!currentUser) {
+      setErrorMessage('Inicia sesión para eliminar proyectos')
+      return
+    }
+
     if (!confirm(`¿Eliminar permanentemente "${name}"?`)) return
     
     try {
@@ -453,6 +507,7 @@ function App() {
       const usage = await getStorageUsage()
       setStorageUsage(usage)
       
+      setToastMessage('Proyecto eliminado')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
@@ -547,6 +602,7 @@ function App() {
         await new Promise(resolve => setTimeout(resolve, 100))
       }
       
+      setToastMessage('Exportación completada')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
@@ -1043,6 +1099,7 @@ function App() {
     }
     
     setTrackStates(newTrackStates)
+    setToastMessage('Audio importado')
     setShowToast(true)
     setTimeout(() => setShowToast(false), 2000)
   }
@@ -1062,6 +1119,7 @@ function App() {
       fileName: clipToCopy.fileName
     })
     
+    setToastMessage('Clip dividido')
     setShowToast(true)
     setTimeout(() => setShowToast(false), 2000)
   }
@@ -1097,6 +1155,7 @@ function App() {
     }
     setTrackStates(newTrackStates)
     
+    setToastMessage('Clip copiado')
     setShowToast(true)
     setTimeout(() => setShowToast(false), 2000)
   }
@@ -1685,13 +1744,23 @@ function App() {
       <div className="transport-bar">
         <div className="transport-controls">
           <button className="header-btn" onClick={handleNewProject} title="Nuevo proyecto">🆕</button>
-          <button 
-            className="header-btn" 
-            onClick={handleSetCloudKey}
-            title={hasCloudKey ? 'Clave configurada' : 'Configurar clave'}
-          >
-            {hasCloudKey ? '✓' : '🔑'} Clave
-          </button>
+          {currentUser ? (
+            <button 
+              className="header-btn" 
+              onClick={handleLogout}
+              title={`Sesión: ${currentUser.username}`}
+            >
+              👤 {currentUser.username}
+            </button>
+          ) : (
+            <button 
+              className="header-btn" 
+              onClick={() => { setShowAuth(true); setAuthMode('login') }}
+              title="Iniciar sesión"
+            >
+              🔑 Iniciar sesión
+            </button>
+          )}
           <button 
             className="header-btn" 
             onClick={handleSaveToCloud}
@@ -1834,8 +1903,8 @@ function App() {
         <StemSplitProgress progress={stemProgress} onCancel={handleCancelStemSeparation} />
       )}
       
-      {showToast && (
-        <div className="toast">✓ Operación exitosa</div>
+      {showToast && toastMessage && (
+        <div className="toast">✓ {toastMessage}</div>
       )}
       
       {errorMessage && (
@@ -1883,6 +1952,94 @@ function App() {
               <button className="modal-close" onClick={handleExport}>Exportar</button>
               <button className="modal-close" onClick={() => setShowExportDialog(false)}>Cancelar</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showAuth && (
+        <div className="drive-projects-modal">
+          <div className="modal-content">
+            <h2>{authMode === 'login' ? 'Iniciar sesión' : 'Crear cuenta'}</h2>
+            {authMode === 'login' ? (
+              <form onSubmit={(e) => {
+                e.preventDefault()
+                const formData = new FormData(e.currentTarget)
+                handleLogin(
+                  formData.get('email') as string,
+                  formData.get('password') as string
+                )
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <input
+                    type="email"
+                    name="email"
+                    placeholder="Email"
+                    required
+                    style={{ padding: '8px', fontSize: '14px' }}
+                  />
+                  <input
+                    type="password"
+                    name="password"
+                    placeholder="Contraseña"
+                    required
+                    style={{ padding: '8px', fontSize: '14px' }}
+                  />
+                  <button type="submit" style={{ padding: '8px' }}>Iniciar sesión</button>
+                  <button
+                    type="button"
+                    onClick={() => setAuthMode('register')}
+                    style={{ padding: '8px', background: '#444' }}
+                  >
+                    ¿No tienes cuenta? Crear una
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={(e) => {
+                e.preventDefault()
+                const formData = new FormData(e.currentTarget)
+                handleRegister(
+                  formData.get('username') as string,
+                  formData.get('email') as string,
+                  formData.get('password') as string
+                )
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <input
+                    type="text"
+                    name="username"
+                    placeholder="Usuario"
+                    required
+                    minLength={3}
+                    style={{ padding: '8px', fontSize: '14px' }}
+                  />
+                  <input
+                    type="email"
+                    name="email"
+                    placeholder="Email"
+                    required
+                    style={{ padding: '8px', fontSize: '14px' }}
+                  />
+                  <input
+                    type="password"
+                    name="password"
+                    placeholder="Contraseña (mínimo 6 caracteres)"
+                    required
+                    minLength={6}
+                    style={{ padding: '8px', fontSize: '14px' }}
+                  />
+                  <button type="submit" style={{ padding: '8px' }}>Crear cuenta</button>
+                  <button
+                    type="button"
+                    onClick={() => setAuthMode('login')}
+                    style={{ padding: '8px', background: '#444' }}
+                  >
+                    ¿Ya tienes cuenta? Iniciar sesión
+                  </button>
+                </div>
+              </form>
+            )}
+            <button className="modal-close" onClick={() => { setShowAuth(false); setErrorMessage(null) }}>Cerrar</button>
           </div>
         </div>
       )}

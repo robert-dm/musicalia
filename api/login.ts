@@ -1,0 +1,37 @@
+import type { NextRequest } from 'next/server'
+import { findUserByEmail, verifyPassword, createJWT } from './auth-utils'
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json()
+    const { email, password } = body
+
+    if (!email || !password) {
+      return Response.json({ error: 'Email y contraseña son requeridos' }, { status: 400 })
+    }
+
+    const user = await findUserByEmail(email)
+    if (!user) {
+      return Response.json({ error: 'Email o contraseña incorrectos' }, { status: 401 })
+    }
+
+    const isValid = await verifyPassword(password, user.passwordHash)
+    if (!isValid) {
+      return Response.json({ error: 'Email o contraseña incorrectos' }, { status: 401 })
+    }
+
+    const token = createJWT(user)
+
+    return Response.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email
+      }
+    })
+  } catch (error: any) {
+    console.error('Login error:', error)
+    return Response.json({ error: error.message || 'Error al iniciar sesión' }, { status: 500 })
+  }
+}

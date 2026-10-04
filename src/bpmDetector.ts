@@ -21,14 +21,18 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
       ? mono.slice(0, maxAnalysisSamples) 
       : mono
     
+    console.log(`[BPM] Analyzing ${audioToAnalyze.length} samples at ${sampleRate}Hz (${(audioToAnalyze.length / sampleRate).toFixed(1)}s)`)
+    
     // Compute onset strength envelope
     const onsetEnvelope = computeOnsetEnvelope(audioToAnalyze, sampleRate)
     
     // Find peaks (potential beats)
     const peaks = findPeaks(onsetEnvelope, sampleRate)
     
+    console.log(`[BPM] Found ${peaks.length} onset peaks`)
+    
     if (peaks.length < 8) {
-      // Not enough beats detected
+      console.log('[BPM] Too few peaks detected for reliable BPM estimation')
       return { bpm: null, confidence: 0 }
     }
     
@@ -36,12 +40,14 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
     const bpm = estimateBPMFromPeaks(peaks, sampleRate)
     
     if (bpm && bpm >= 60 && bpm <= 200) {
+      console.log(`[BPM] Estimated tempo: ${Math.round(bpm)} BPM`)
       return { bpm: Math.round(bpm), confidence: 0.8 }
     }
     
+    console.log(`[BPM] Invalid tempo estimate: ${bpm}`)
     return { bpm: null, confidence: 0 }
   } catch (error) {
-    console.error('BPM detection error:', error)
+    console.error('[BPM] Detection error:', error)
     return { bpm: null, confidence: 0 }
   }
 }

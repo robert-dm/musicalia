@@ -672,8 +672,8 @@ function App() {
     const updatedStates = trackStates.map(track => {
       if (track.clip && !track.clip.isPlaying) {
         track.clip.player.loop = true
-        const actualStartTime = startTime + countInSeconds
-        const offset = actualStartTime % track.clip.buffer.duration
+        const bufferOffset = Math.max(0, startTime - countInSeconds)
+        const offset = bufferOffset % track.clip.buffer.duration
         const when = metronomeEnabled && !isPaused ? Tone.now() + countInSeconds : Tone.now()
         
         console.log('[DEBUG] Starting player:', {
@@ -705,26 +705,25 @@ function App() {
         let currentTime = Tone.getTransport().seconds
         
         if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
-          const actualCurrentTime = currentTime + countInSeconds
-          if (actualCurrentTime >= loopEnd + countInSeconds) {
+          if (currentTime >= loopEnd) {
             currentTime = loopStart
             Tone.getTransport().seconds = loopStart
             trackStates.forEach(track => {
               if (track.clip?.isPlaying) {
                 track.clip.player.stop()
-                const offset = (loopStart + countInSeconds) % track.clip.buffer.duration
+                const bufferOffset = Math.max(0, loopStart - countInSeconds)
+                const offset = bufferOffset % track.clip.buffer.duration
                 track.clip.player.start(Tone.now(), offset)
               }
             })
           }
-        } else if (maxDuration > 0 && currentTime + countInSeconds >= maxDuration + countInSeconds) {
+        } else if (maxDuration > 0 && currentTime >= maxDuration) {
           currentTime = 0
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
             if (track.clip?.isPlaying) {
               track.clip.player.stop()
-              const offset = countInSeconds % track.clip.buffer.duration
-              track.clip.player.start(Tone.now(), offset)
+              track.clip.player.start(Tone.now())
             }
           })
         }
@@ -924,8 +923,8 @@ function App() {
       console.log('[BPM] Detected:', bpmResult.bpm)
       setBpm(bpmResult.bpm)
       Tone.getTransport().bpm.value = bpmResult.bpm
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
+      setErrorMessage(`Tempo: ${bpmResult.bpm}`)
+      setTimeout(() => setErrorMessage(null), 3000)
     } else {
       console.log('[BPM] Detection failed, keeping current BPM')
       setErrorMessage('No se pudo detectar el tempo')
@@ -971,6 +970,8 @@ function App() {
       console.log('[BPM] Detected:', bpmResult.bpm)
       setBpm(bpmResult.bpm)
       Tone.getTransport().bpm.value = bpmResult.bpm
+      setErrorMessage(`Tempo: ${bpmResult.bpm}`)
+      setTimeout(() => setErrorMessage(null), 3000)
     } else {
       console.log('[BPM] Detection failed, keeping current BPM')
       setErrorMessage('No se pudo detectar el tempo')
@@ -1083,6 +1084,8 @@ function App() {
     setPlayheadPosition(clampedSeconds)
     Tone.getTransport().seconds = clampedSeconds
     
+    const countInSeconds = getCountInSeconds()
+    
     trackStates.forEach(track => {
       if (track.clip) {
         const wasPlaying = track.clip.isPlaying
@@ -1090,8 +1093,8 @@ function App() {
           track.clip.player.stop()
         }
         if (isPlaying) {
-          const actualTime = clampedSeconds + getCountInSeconds()
-          const offset = actualTime % track.clip.buffer.duration
+          const bufferOffset = Math.max(0, clampedSeconds - countInSeconds)
+          const offset = bufferOffset % track.clip.buffer.duration
           track.clip.player.start(Tone.now(), offset)
           track.clip.isPlaying = true
         }

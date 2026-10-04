@@ -17,7 +17,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0049b'
+const APP_VERSION = '0.00XXb'
 
 interface Clip {
   player: Tone.Player
@@ -26,6 +26,7 @@ interface Clip {
   buffer: AudioBuffer
   startPosition: number
   offsetSeconds: number
+  id: string
 }
 
 interface TrackState {
@@ -92,6 +93,11 @@ function App() {
   const [exportTracks, setExportTracks] = useState<boolean[]>([])
   const [isExporting, setIsExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState('')
+  const [isDraggingClip, setIsDraggingClip] = useState(false)
+  const [draggedClipTrack, setDraggedClipTrack] = useState<number | null>(null)
+  const [dragStartX, setDragStartX] = useState<number>(0)
+  const [dragStartPosition, setDragStartPosition] = useState<number>(0)
+  const [clipboard, setClipboard] = useState<{buffer: AudioBuffer, fileName: string} | null>(null)
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -226,7 +232,8 @@ function App() {
             isPlaying: false,
             buffer,
             startPosition: t.clip.startPosition,
-            offsetSeconds: t.clip.offsetSeconds || getCountInSeconds()
+            offsetSeconds: t.clip.offsetSeconds || getCountInSeconds(),
+            id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
           }
         }
       }))
@@ -363,7 +370,8 @@ function App() {
             isPlaying: false,
             buffer,
             startPosition: t.clip.startPosition,
-            offsetSeconds: t.clip.offsetSeconds || getCountInSeconds()
+            offsetSeconds: t.clip.offsetSeconds || getCountInSeconds(),
+            id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
           }
         }
       })
@@ -852,6 +860,224 @@ function App() {
     setIsPaused(false)
   }
 
+  const handleJumpToStart = () => {
+    seekToPosition(0)
+    if (!isPlaying) {
+      setPlayheadPosition(0)
+      Tone.getTransport().seconds = 0
+    }
+  }
+
+  const handleSplitClip = async (trackIndex: number) => {
+    const track = trackStates[trackIndex]
+    if (!track.clip) return
+    
+    await ensureAudio()
+    
+    const splitTime = playheadPosition
+    const clipStartTime = track.clip.offsetSeconds
+    const clipEndTime = clipStartTime + track.clip.buffer.duration
+    
+    if (splitTime <= clipStartTime || splitTime >= clipEndTime) {
+      setErrorMessage('El playhead debe estar dentro del clip')
+      setTimeout(() => setErrorMessage(null), 3000)
+      return
+    }
+    
+    const splitOffset = splitTime - clipStartTime
+    const originalBuffer = track.clip.buffer
+    const sampleRate = originalBuffer.sampleRate
+    
+    const firstPartLength = Math.floor(splitOffset * sampleRate)
+    const secondPartLength = originalBuffer.length - firstPartLength
+    
+    const firstBuffer = new AudioBuffer({
+      numberOfChannels: originalBuffer.numberOfChannels,
+      length: firstPartLength,
+      sampleRate: sampleRate
+    })
+    
+    const secondBuffer = new AudioBuffer({
+      numberOfChannels: originalBuffer.numberOfChannels,
+      length: secondPartLength,
+      sampleRate: sampleRate
+    })
+    
+    for (let ch = 0; ch < originalBuffer.numberOfChannels; ch++) {
+      const originalData = originalBuffer.getChannelData(ch)
+      firstBuffer.getChannelData(ch).set(originalData.slice(0, firstPartLength))
+      secondBuffer.getChannelData(ch).set(originalData.slice(firstPartLength))
+    }
+    
+    track.clip.player.dispose()
+    
+    const firstPlayer = new Tone.Player()
+    firstPlayer.buffer = new Tone.ToneAudioBuffer(firstBuffer)
+    firstPlayer.loop = true
+    firstPlayer.connect(trackGainsRef.current[trackIndex])
+    
+    const newTrackStates = [...trackStates]
+    newTrackStates[trackIndex] = {
+      ...newTrackStates[trackIndex],
+      clip: {
+        player: firstPlayer,
+        fileName: track.clip.fileName,
+        isPlaying: false,
+        buffer: firstBuffer,
+        startPosition: track.clip.startPosition,
+        offsetSeconds: track.clip.offsetSeconds,
+        id: `${track.clip.id}-part1`
+      }
+    }
+    
+    const nextEmptyTrack = trackStates.findIndex((t, i) => i > trackIndex && !t.clip)
+    if (nextEmptyTrack !== -1) {
+      const secondPlayer = new Tone.Player()
+      secondPlayer.buffer = new Tone.ToneAudioBuffer(secondBuffer)
+      secondPlayer.loop = true
+      secondPlayer.connect(trackGainsRef.current[nextEmptyTrack])
+      
+      newTrackStates[nextEmptyTrack] = {
+        ...newTrackStates[nextEmptyTrack],
+        clip: {
+          player: secondPlayer,
+          fileName: track.clip.fileName,
+          isPlaying: false,
+          buffer: secondBuffer,
+          startPosition: 0,
+          offsetSeconds: splitTime,
+          id: `${track.clip.id}-part2`
+        }
+      }
+      
+      setTimeout(() => {
+        const canvas = canvasRefs.current[nextEmptyTrack]
+        if (canvas) drawWaveform(canvas, secondBuffer)
+      }, 100)
+    }
+    
+    setTrackStates(newTrackStates)
+    
+    setTimeout(() => {
+      const canvas = canvasRefs.current[trackIndex]
+      if (canvas) drawWaveform(canvas, firstBuffer)
+    }, 100)
+    
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 2000)
+  }
+
+  const handleCopyClip = (trackIndex: number) => {
+    const track = trackStates[trackIndex]
+    if (!track.clip) return
+    
+    setClipboard({
+      buffer: track.clip.buffer,
+      fileName: track.clip.fileName
+    })
+    
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 2000)
+  }
+
+  const handlePasteClip = async (trackIndex: number) => {
+    if (!clipboard) {
+      setErrorMessage('No hay clip copiado')
+      setTimeout(() => setErrorMessage(null), 2000)
+      return
+    }
+    
+    await ensureAudio()
+    
+    const existingClip = trackStates[trackIndex].clip
+    if (existingClip) {
+      existingClip.player.dispose()
+    }
+    
+    const player = new Tone.Player()
+    player.buffer = new Tone.ToneAudioBuffer(clipboard.buffer)
+    player.loop = true
+    player.connect(trackGainsRef.current[trackIndex])
+    
+    const newTrackStates = [...trackStates]
+    newTrackStates[trackIndex] = {
+      ...newTrackStates[trackIndex],
+      clip: {
+        player,
+        fileName: clipboard.fileName,
+        isPlaying: false,
+        buffer: clipboard.buffer,
+        startPosition: 0,
+        offsetSeconds: playheadPosition,
+        id: `clip-${Date.now()}-${Math.random()}`
+      }
+    }
+    setTrackStates(newTrackStates)
+    
+    setTimeout(() => {
+      const canvas = canvasRefs.current[trackIndex]
+      if (canvas) drawWaveform(canvas, clipboard.buffer)
+    }, 100)
+    
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 2000)
+  }
+
+  const handleClipDragStart = (e: React.MouseEvent, trackIndex: number) => {
+    e.stopPropagation()
+    setIsDraggingClip(true)
+    setDraggedClipTrack(trackIndex)
+    setDragStartX(e.clientX)
+    setDragStartPosition(trackStates[trackIndex].clip?.offsetSeconds || 0)
+  }
+
+  useEffect(() => {
+    if (!isDraggingClip || draggedClipTrack === null) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      
+      const firstLane = lanes[0] as HTMLElement
+      const rect = firstLane.getBoundingClientRect()
+      const deltaX = e.clientX - dragStartX
+      const deltaPercentage = deltaX / rect.width
+      const maxDuration = getMaxDuration()
+      const deltaTime = deltaPercentage * maxDuration
+      
+      const newOffset = Math.max(0, dragStartPosition + deltaTime)
+      
+      const newTrackStates = [...trackStates]
+      if (newTrackStates[draggedClipTrack].clip) {
+        newTrackStates[draggedClipTrack] = {
+          ...newTrackStates[draggedClipTrack],
+          clip: {
+            ...newTrackStates[draggedClipTrack].clip!,
+            offsetSeconds: newOffset
+          }
+        }
+        setTrackStates(newTrackStates)
+      }
+    }
+
+    const handleMouseUp = () => {
+      setIsDraggingClip(false)
+      setDraggedClipTrack(null)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'ew-resize'
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+  }, [isDraggingClip, draggedClipTrack, dragStartX, dragStartPosition, trackStates])
+
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
     setBpm(newBpm)
@@ -1014,7 +1240,8 @@ function App() {
         isPlaying: false,
         buffer,
         startPosition: 0,
-        offsetSeconds: getCountInSeconds()
+        offsetSeconds: getCountInSeconds(),
+        id: `clip-${Date.now()}-${Math.random()}`
       }
     }
     setTrackStates(newTrackStates)
@@ -1099,7 +1326,8 @@ function App() {
           isPlaying: false,
           buffer: stemBuffers[i],
           startPosition: 0,
-          offsetSeconds: getCountInSeconds()
+          offsetSeconds: getCountInSeconds(),
+          id: `clip-${Date.now()}-${i}-${Math.random()}`
         }
       }
 
@@ -1420,40 +1648,52 @@ function App() {
           >
             💾 Exportar
           </button>
+        </div>
+        <div className="transport-playback">
           <button
-            className={`transport-button ${isPlaying ? 'active' : ''}`}
+            className="transport-button icon-btn"
+            onClick={handleJumpToStart}
+            title="Ir al inicio"
+          >
+            ⏮
+          </button>
+          <button
+            className={`transport-button icon-btn ${isPlaying ? 'active' : ''}`}
             onClick={handlePlay}
             disabled={isPlaying}
+            title="Reproducir"
           >
-            Play
+            ▶
           </button>
           <button
-            className="transport-button"
+            className="transport-button icon-btn"
             onClick={handlePause}
             disabled={!isPlaying}
+            title="Pausar"
           >
-            Pause
+            ⏸
           </button>
           <button
-            className="transport-button"
+            className="transport-button icon-btn"
             onClick={handleStop}
             disabled={!isPlaying && !isPaused}
+            title="Detener"
           >
-            Stop
+            ⏹
           </button>
           <button
             className={`transport-button ${metronomeEnabled ? 'active' : ''}`}
             onClick={() => setMetronomeEnabled(!metronomeEnabled)}
             title="Metrónomo (cuenta 2 compases antes)"
           >
-            🎵 Metro
+            🎵
           </button>
           <button
             className={`transport-button ${isLoopEnabled ? 'active' : ''}`}
             onClick={() => setIsLoopEnabled(!isLoopEnabled)}
             title="Activar loop - arrastra en el timeline para marcar zona"
           >
-            🔁 Loop
+            🔁
           </button>
         </div>
         <div className="time-display">
@@ -1651,6 +1891,31 @@ function App() {
                   title={`Volume: ${Math.round(trackState.volume * 100)}%`}
                 />
               </div>
+              {trackState.clip && (
+                <div className="track-actions">
+                  <button
+                    className="action-button"
+                    onClick={() => handleSplitClip(trackIndex)}
+                    title="Dividir clip en el playhead"
+                  >
+                    ✂️
+                  </button>
+                  <button
+                    className="action-button"
+                    onClick={() => handleCopyClip(trackIndex)}
+                    title="Copiar clip"
+                  >
+                    📋
+                  </button>
+                  <button
+                    className="action-button"
+                    onClick={() => handlePasteClip(trackIndex)}
+                    title="Pegar clip"
+                  >
+                    📄
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -1684,10 +1949,17 @@ function App() {
                   <div 
                     className="clip-wrapper"
                     style={{
-                      marginLeft: `${(getCountInSeconds() / getMaxDuration()) * 100}%`,
+                      marginLeft: `${(trackState.clip.offsetSeconds / getMaxDuration()) * 100}%`,
                       width: `${(trackState.clip.buffer.duration / getMaxDuration()) * 100}%`
                     }}
                   >
+                    <div 
+                      className="clip-drag-handle"
+                      onMouseDown={(e) => handleClipDragStart(e, trackIndex)}
+                      title="Arrastra para mover el clip en el tiempo"
+                    >
+                      <span className="drag-icon">↔</span>
+                    </div>
                     <div className="clip-info">
                       <span className="clip-filename">{trackState.clip.fileName}</span>
                       {isLoopEnabled && !loopStart && !loopEnd && <span className="clip-hint">Arrastra para marcar zona de loop</span>}

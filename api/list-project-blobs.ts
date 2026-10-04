@@ -1,4 +1,4 @@
-import { head } from '@vercel/blob'
+import { list } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import type { NextRequest } from 'next/server'
 
@@ -20,10 +20,10 @@ export async function GET(request: NextRequest) {
     }
     
     const { searchParams } = new URL(request.url)
-    const pathname = searchParams.get('path')
+    const prefix = searchParams.get('prefix')
     
-    if (!pathname) {
-      return Response.json({ error: 'Path requerido' }, { status: 400 })
+    if (!prefix) {
+      return Response.json({ error: 'Prefix requerido' }, { status: 400 })
     }
     
     const storeId = process.env.MUSICALIA_STORE_ID
@@ -38,32 +38,27 @@ export async function GET(request: NextRequest) {
       }, { status: 500 })
     }
     
-    const blob = await head(pathname, { storeId, oidcToken })
-    
-    if (!blob) {
-      return Response.json({ error: 'Archivo no encontrado' }, { status: 404 })
-    }
-    
-    const response = await fetch(blob.url)
-    
-    if (!response.ok) {
-      return Response.json({ error: 'Error al descargar archivo' }, { status: 500 })
-    }
-    
-    return new Response(response.body, {
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': blob.size.toString()
-      }
+    // Call list() with the prefix and return the blobs array
+    // Example blob shape from list() result:
+    // {
+    //   pathname: "musicalia/MyProject/project.json",
+    //   url: "https://...",
+    //   size: 1234,
+    //   uploadedAt: Date
+    // }
+    const { blobs } = await list({ 
+      prefix: prefix.endsWith('/') ? prefix : `${prefix}/`,
+      storeId,
+      oidcToken
     })
+    
+    return Response.json(blobs)
   } catch (error: any) {
-    console.error('Download error:', error)
-    let message = error.message || 'Error al descargar'
+    console.error('List project blobs error:', error)
+    let message = error.message || 'Error al listar archivos'
     
     if (message.includes('OIDC') || message.includes('credentials') || message.includes('authentication') || message.includes('No blob credentials')) {
       message = 'En el Blob store, pestaña Projects, conecta este proyecto o elige Upgrade to OIDC'
-    } else if (message.includes('does not exist') || message.includes('not found') || message.includes('NotFound')) {
-      message = 'Archivo no encontrado'
     }
     
     return Response.json({ error: message }, { status: 500 })

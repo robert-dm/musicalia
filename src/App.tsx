@@ -17,7 +17,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0044b'
+const APP_VERSION = '0.00XXb' // Will be updated after PR is created
 
 interface Clip {
   player: Tone.Player
@@ -58,6 +58,11 @@ function App() {
   const [loopStart, setLoopStart] = useState<number | null>(null)
   const [loopEnd, setLoopEnd] = useState<number | null>(null)
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
+  const [tempLoopStart, setTempLoopStart] = useState<number | null>(null)
+  const [tempLoopEnd, setTempLoopEnd] = useState<number | null>(null)
+  const [horizontalZoom, setHorizontalZoom] = useState(1)
+  const [verticalZoom, setVerticalZoom] = useState(1)
+  const lanesColumnRef = useRef<HTMLDivElement>(null)
   const [showStemDialog, setShowStemDialog] = useState(false)
   const [stemProgress, setStemProgress] = useState<number>(0)
   const [isProcessingStems, setIsProcessingStems] = useState(false)
@@ -148,6 +153,26 @@ function App() {
     window.addEventListener('mouseup', handleGlobalMouseUp)
     return () => window.removeEventListener('mouseup', handleGlobalMouseUp)
   }, [isDraggingLoop, isDraggingLoopEdge])
+
+  useEffect(() => {
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        const delta = e.deltaY > 0 ? -0.1 : 0.1
+        setHorizontalZoom(prev => Math.max(0.5, Math.min(4, prev + delta)))
+      } else if (e.shiftKey) {
+        e.preventDefault()
+        const delta = e.deltaY > 0 ? -0.1 : 0.1
+        setVerticalZoom(prev => Math.max(0.5, Math.min(3, prev + delta)))
+      }
+    }
+
+    const lanesColumn = lanesColumnRef.current
+    if (lanesColumn) {
+      lanesColumn.addEventListener('wheel', handleWheel, { passive: false })
+      return () => lanesColumn.removeEventListener('wheel', handleWheel)
+    }
+  }, [])
   
   // Load project on mount
   useEffect(() => {
@@ -667,6 +692,15 @@ function App() {
     const countInSeconds = getCountInSeconds()
     const startTime = isPaused ? playheadPosition : (loopStart !== null && isLoopEnabled ? loopStart : 0)
     
+    // Configure Transport loop
+    if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
+      Tone.getTransport().loop = true
+      Tone.getTransport().loopStart = loopStart
+      Tone.getTransport().loopEnd = loopEnd
+    } else {
+      Tone.getTransport().loop = false
+    }
+    
     Tone.getTransport().seconds = startTime
     Tone.getTransport().start()
     
@@ -720,27 +754,10 @@ function App() {
         }
         lastUpdateTime = timestamp
         
-        let currentTime = Tone.getTransport().seconds
+        const currentTime = Tone.getTransport().seconds
         
-        if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
-          if (currentTime >= loopEnd) {
-            currentTime = loopStart
-            Tone.getTransport().seconds = loopStart
-            
-            const loopInsideGap = loopStart < countInSeconds
-            
-            trackStates.forEach(track => {
-              if (track.clip?.isPlaying) {
-                track.clip.player.stop()
-                const bufferOffset = Math.max(0, loopStart - countInSeconds)
-                const offset = bufferOffset % track.clip.buffer.duration
-                const when = loopInsideGap ? Tone.now() + (countInSeconds - loopStart) : Tone.now()
-                track.clip.player.start(when, offset)
-              }
-            })
-          }
-        } else if (maxDuration > 0 && currentTime >= maxDuration) {
-          currentTime = 0
+        // Check if we need to restart players at end of non-looped timeline
+        if (!isLoopEnabled && maxDuration > 0 && currentTime >= maxDuration) {
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
             if (track.clip?.isPlaying) {
@@ -1163,6 +1180,8 @@ function App() {
     if (edge) {
       e.stopPropagation()
       setIsDraggingLoopEdge(edge)
+      setTempLoopStart(loopStart)
+      setTempLoopEnd(loopEnd)
     } else {
       const rect = e.currentTarget.getBoundingClientRect()
       const clickX = e.clientX - rect.left
@@ -1171,13 +1190,14 @@ function App() {
       
       setIsDraggingLoop(true)
       setLoopDragStart(clickTime)
-      setLoopStart(clickTime)
-      setLoopEnd(clickTime)
+      setTempLoopStart(clickTime)
+      setTempLoopEnd(clickTime)
     }
   }
 
   const handleLoopMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isLoopEnabled) return
+    if (!isDraggingLoop && !isDraggingLoopEdge) return
     
     const rect = e.currentTarget.getBoundingClientRect()
     const clickX = e.clientX - rect.left
@@ -1186,24 +1206,33 @@ function App() {
     
     if (isDraggingLoop && loopDragStart !== null) {
       if (currentTime < loopDragStart) {
-        setLoopStart(currentTime)
-        setLoopEnd(loopDragStart)
+        setTempLoopStart(currentTime)
+        setTempLoopEnd(loopDragStart)
       } else {
-        setLoopStart(loopDragStart)
-        setLoopEnd(currentTime)
+        setTempLoopStart(loopDragStart)
+        setTempLoopEnd(currentTime)
       }
     } else if (isDraggingLoopEdge === 'start') {
-      if (loopEnd === null || currentTime < loopEnd) {
-        setLoopStart(currentTime)
+      const currentEnd = tempLoopEnd ?? loopEnd
+      if (currentEnd === null || currentTime < currentEnd) {
+        setTempLoopStart(currentTime)
       }
     } else if (isDraggingLoopEdge === 'end') {
-      if (loopStart === null || currentTime > loopStart) {
-        setLoopEnd(currentTime)
+      const currentStart = tempLoopStart ?? loopStart
+      if (currentStart === null || currentTime > currentStart) {
+        setTempLoopEnd(currentTime)
       }
     }
   }
 
   const handleLoopMouseUp = () => {
+    if (isDraggingLoop || isDraggingLoopEdge) {
+      // Commit temporary values to actual state
+      if (tempLoopStart !== null) setLoopStart(tempLoopStart)
+      if (tempLoopEnd !== null) setLoopEnd(tempLoopEnd)
+      setTempLoopStart(null)
+      setTempLoopEnd(null)
+    }
     setIsDraggingLoop(false)
     setIsDraggingLoopEdge(null)
     setLoopDragStart(null)
@@ -1396,6 +1425,30 @@ function App() {
             <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
           </div>
         )}
+        <div className="zoom-controls">
+          <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)">⬌</span>
+          <input
+            type="range"
+            className="zoom-slider"
+            min="0.5"
+            max="4"
+            step="0.1"
+            value={horizontalZoom}
+            onChange={(e) => setHorizontalZoom(parseFloat(e.target.value))}
+            title={`Zoom horizontal: ${(horizontalZoom * 100).toFixed(0)}%`}
+          />
+          <span className="zoom-label" title="Zoom vertical (Shift+Rueda)">⬍</span>
+          <input
+            type="range"
+            className="zoom-slider"
+            min="0.5"
+            max="3"
+            step="0.1"
+            value={verticalZoom}
+            onChange={(e) => setVerticalZoom(parseFloat(e.target.value))}
+            title={`Zoom vertical: ${(verticalZoom * 100).toFixed(0)}%`}
+          />
+        </div>
         <div className="bpm-control">
           <span className="bpm-label">BPM</span>
           <input
@@ -1527,7 +1580,7 @@ function App() {
       <div className="arrangement-view">
         <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
           {trackStates.map((trackState, trackIndex) => (
-            <div key={trackIndex} className="track-header">
+            <div key={trackIndex} className="track-header" style={{ height: `${88 * verticalZoom}px` }}>
               <div className="track-name">{trackState.name || `Track ${trackIndex + 1}`}</div>
               <div className="track-controls">
                 <button
@@ -1563,7 +1616,7 @@ function App() {
           onMouseDown={() => setIsResizing(true)}
           title="Drag to resize sidebar"
         />
-        <div className="lanes-column">
+        <div className="lanes-column" ref={lanesColumnRef} style={{ minWidth: `${100 * horizontalZoom}%` }}>
           <div className="bar-ruler">
             {rulerBars}
           </div>
@@ -1571,6 +1624,7 @@ function App() {
             <div 
               key={trackIndex}
               className={`track-content ${trackState.clip ? 'has-clip' : ''} ${trackState.clip?.isPlaying ? 'playing' : ''}`}
+              style={{ height: `${88 * verticalZoom}px` }}
               onClick={(e) => handleWaveformClick(e, trackIndex)}
             >
               {trackState.clip ? (
@@ -1607,32 +1661,32 @@ function App() {
                       className="waveform-canvas"
                     />
                   </div>
-                  {loopStart !== null && (
+                  {(loopStart !== null || tempLoopStart !== null) && (
                     <div 
                       className="loop-marker loop-start draggable"
                       style={{ 
-                        left: `${(loopStart / getMaxDuration()) * 100}%` 
+                        left: `${((tempLoopStart ?? loopStart)! / getMaxDuration()) * 100}%` 
                       }}
                       onMouseDown={(e) => handleLoopMouseDown(e, 'start')}
                       title="Arrastra para ajustar inicio"
                     />
                   )}
-                  {loopEnd !== null && (
+                  {(loopEnd !== null || tempLoopEnd !== null) && (
                     <div 
                       className="loop-marker loop-end draggable"
                       style={{ 
-                        left: `${(loopEnd / getMaxDuration()) * 100}%` 
+                        left: `${((tempLoopEnd ?? loopEnd)! / getMaxDuration()) * 100}%` 
                       }}
                       onMouseDown={(e) => handleLoopMouseDown(e, 'end')}
                       title="Arrastra para ajustar fin"
                     />
                   )}
-                  {loopStart !== null && loopEnd !== null && (
+                  {((loopStart !== null && loopEnd !== null) || (tempLoopStart !== null && tempLoopEnd !== null)) && (
                     <div 
                       className="loop-region"
                       style={{ 
-                        left: `${(loopStart / getMaxDuration()) * 100}%`,
-                        width: `${((loopEnd - loopStart) / getMaxDuration()) * 100}%`
+                        left: `${((tempLoopStart ?? loopStart)! / getMaxDuration()) * 100}%`,
+                        width: `${(((tempLoopEnd ?? loopEnd)! - (tempLoopStart ?? loopStart)!) / getMaxDuration()) * 100}%`
                       }}
                     />
                   )}

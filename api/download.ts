@@ -5,7 +5,7 @@ import { getSessionFromRequest } from './auth-utils'
 
 export async function GET(request: NextRequest) {
   try {
-    const session = getSessionFromRequest(request)
+    const session = await getSessionFromRequest(request)
     if (!session) {
       return Response.json({ error: 'No autenticado' }, { status: 401 })
     }
@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
       return Response.json({ error: 'Path requerido' }, { status: 400 })
     }
 
-    if (!pathname.startsWith(`musicalia-projects/${session.userId}/`) && !pathname.startsWith('musicalia-users/')) {
+    if (!pathname.startsWith(`musicalia-projects/${session.userId}/`)) {
       return Response.json({ error: 'Acceso denegado' }, { status: 403 })
     }
     

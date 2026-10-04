@@ -64,7 +64,7 @@ export async function POST(request: NextRequest) {
             throw new Error('No autenticado')
           }
 
-          const session = verifyJWT(token)
+          const session = await verifyJWT(token)
           if (!session) {
             console.error('[getSignedToken] Invalid auth token')
             throw new Error('Token inválido o expirado')

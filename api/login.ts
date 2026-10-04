@@ -15,12 +15,12 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'Email o contraseña incorrectos' }, { status: 401 })
     }
 
-    const isValid = await verifyPassword(password, user.passwordHash)
+    const isValid = await verifyPassword(password, user.passwordHash, user.salt)
     if (!isValid) {
       return Response.json({ error: 'Email o contraseña incorrectos' }, { status: 401 })
     }
 
-    const token = createJWT(user)
+    const token = await createJWT(user)
 
     return Response.json({
       token,

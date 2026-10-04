@@ -6,6 +6,7 @@ export interface User {
   username: string
   email: string
   passwordHash: string
+  salt: string
   createdAt: string
 }
 
@@ -16,18 +17,16 @@ export interface Session {
   exp: number
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'musicalia-jwt-secret-change-in-production'
-
-async function hashPassword(password: string): Promise<string> {
+async function hashPassword(password: string, salt: string): Promise<string> {
   const encoder = new TextEncoder()
-  const data = encoder.encode(password)
+  const data = encoder.encode(salt + password)
   const hashBuffer = await crypto.subtle.digest('SHA-256', data)
   const hashArray = Array.from(new Uint8Array(hashBuffer))
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-export async function verifyPassword(password: string, hash: string): Promise<boolean> {
-  const passwordHash = await hashPassword(password)
+export async function verifyPassword(password: string, hash: string, salt: string): Promise<boolean> {
+  const passwordHash = await hashPassword(password, salt)
   return passwordHash === hash
 }
 
@@ -43,11 +42,13 @@ export async function createUser(username: string, email: string, password: stri
   }
 
   const userId = crypto.randomUUID()
+  const salt = crypto.randomUUID()
   const user: User = {
     id: userId,
     username,
     email,
-    passwordHash: await hashPassword(password),
+    passwordHash: await hashPassword(password, salt),
+    salt,
     createdAt: new Date().toISOString()
   }
 
@@ -55,7 +56,7 @@ export async function createUser(username: string, email: string, password: stri
   const pathname = `musicalia-users/${userId}.json`
   
   await put(pathname, userBlob, {
-    access: 'public',
+    access: 'private',
     storeId,
     token: oidcToken
   })
@@ -127,7 +128,30 @@ export async function findUserByUsername(username: string): Promise<User | null>
   return null
 }
 
-export function createJWT(user: User): string {
+async function hmacSHA256(secret: string, message: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const keyData = encoder.encode(secret)
+  const messageData = encoder.encode(message)
+  
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyData,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  )
+  
+  const signature = await crypto.subtle.sign('HMAC', key, messageData)
+  const signatureArray = Array.from(new Uint8Array(signature))
+  return signatureArray.map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+export async function createJWT(user: User): Promise<string> {
+  const signingKey = process.env.MUSICALIA_KEY
+  if (!signingKey) {
+    throw new Error('MUSICALIA_KEY no configurada')
+  }
+
   const header = { alg: 'HS256', typ: 'JWT' }
   const payload: Session = {
     userId: user.id,
@@ -138,20 +162,27 @@ export function createJWT(user: User): string {
 
   const base64Header = Buffer.from(JSON.stringify(header)).toString('base64url')
   const base64Payload = Buffer.from(JSON.stringify(payload)).toString('base64url')
-  const signature = Buffer.from(JWT_SECRET + base64Header + '.' + base64Payload).toString('base64url')
+  const message = `${base64Header}.${base64Payload}`
+  const signature = await hmacSHA256(signingKey, message)
 
-  return `${base64Header}.${base64Payload}.${signature}`
+  return `${message}.${signature}`
 }
 
-export function verifyJWT(token: string): Session | null {
+export async function verifyJWT(token: string): Promise<Session | null> {
   try {
+    const signingKey = process.env.MUSICALIA_KEY
+    if (!signingKey) {
+      return null
+    }
+
     const parts = token.split('.')
     if (parts.length !== 3) return null
 
-    const [headerB64, payloadB64, signatureB64] = parts
-    const expectedSignature = Buffer.from(JWT_SECRET + headerB64 + '.' + payloadB64).toString('base64url')
+    const [headerB64, payloadB64, signatureHex] = parts
+    const message = `${headerB64}.${payloadB64}`
+    const expectedSignature = await hmacSHA256(signingKey, message)
     
-    if (signatureB64 !== expectedSignature) return null
+    if (signatureHex !== expectedSignature) return null
 
     const payload: Session = JSON.parse(Buffer.from(payloadB64, 'base64url').toString())
     
@@ -163,12 +194,12 @@ export function verifyJWT(token: string): Session | null {
   }
 }
 
-export function getSessionFromRequest(request: Request): Session | null {
+export async function getSessionFromRequest(request: Request): Promise<Session | null> {
   const authHeader = request.headers.get('authorization')
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return null
   }
 
   const token = authHeader.substring(7)
-  return verifyJWT(token)
+  return await verifyJWT(token)
 }

@@ -5,7 +5,7 @@ import { getVercelOidcToken } from '@vercel/oidc'
 
 export async function POST(request: NextRequest) {
   try {
-    const session = getSessionFromRequest(request)
+    const session = await getSessionFromRequest(request)
     if (!session) {
       return Response.json({ error: 'No autenticado' }, { status: 401 })
     }
@@ -65,14 +65,8 @@ export async function POST(request: NextRequest) {
 
     await Promise.all(migrations)
 
-    // Delete old blobs after successful migration
-    const oldPaths = legacyBlobs.map(b => b.pathname)
-    if (oldPaths.length > 0) {
-      await del(oldPaths, { storeId, oidcToken })
-    }
-
     return Response.json({
-      message: `${legacyBlobs.length} archivos migrados exitosamente`,
+      message: `${legacyBlobs.length} archivos copiados a tu cuenta (los originales permanecen)`,
       migratedCount: legacyBlobs.length
     })
   } catch (error: any) {

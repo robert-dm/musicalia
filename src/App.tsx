@@ -2071,9 +2071,9 @@ function App() {
               <button 
                 onClick={handleMigrateLegacyProjects}
                 style={{ marginLeft: '10px', padding: '4px 8px', fontSize: '12px' }}
-                title="Migrar proyectos antiguos a tu cuenta"
+                title="Copiar proyectos compartidos antiguos a tu cuenta (no elimina los originales)"
               >
-                📦 Migrar proyectos antiguos
+                📦 Copiar proyectos compartidos
               </button>
             </div>
             <div className="projects-list">

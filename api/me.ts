@@ -3,7 +3,7 @@ import { getSessionFromRequest } from './auth-utils'
 
 export async function GET(request: NextRequest) {
   try {
-    const session = getSessionFromRequest(request)
+    const session = await getSessionFromRequest(request)
     
     if (!session) {
       return Response.json({ error: 'No autenticado' }, { status: 401 })

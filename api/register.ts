@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
     }
 
     const user = await createUser(username, email, password)
-    const token = createJWT(user)
+    const token = await createJWT(user)
 
     return Response.json({
       token,

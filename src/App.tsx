@@ -33,7 +33,7 @@ interface TrackState {
   mute: boolean
   solo: boolean
   volume: number
-  clip: Clip | null
+  clips: Clip[]
   name?: string
 }
 
@@ -75,7 +75,7 @@ function App() {
       mute: false,
       solo: false,
       volume: 0.8,
-      clip: null,
+      clips: [],
       name: `Track ${i + 1}`
     }))
   )
@@ -95,8 +95,10 @@ function App() {
   const [exportProgress, setExportProgress] = useState('')
   const [isDraggingClip, setIsDraggingClip] = useState(false)
   const [draggedClipTrack, setDraggedClipTrack] = useState<number | null>(null)
+  const [draggedClipId, setDraggedClipId] = useState<string | null>(null)
   const [dragStartX, setDragStartX] = useState<number>(0)
   const [dragStartPosition, setDragStartPosition] = useState<number>(0)
+  const [tempDragOffset, setTempDragOffset] = useState<number>(0)
   const [clipboard, setClipboard] = useState<{buffer: AudioBuffer, fileName: string} | null>(null)
   
   const getCountInSeconds = () => {
@@ -109,28 +111,24 @@ function App() {
   useEffect(() => {
     const saveState = async () => {
       const tracks = await Promise.all(trackStates.map(async (t, i) => {
-        if (t.clip) {
-          const bufferKey = `audio-buffer-${i}`
-          await saveAudioBuffer(bufferKey, t.clip.buffer)
+        const savedClips = await Promise.all(t.clips.map(async (clip, clipIdx) => {
+          const bufferKey = `audio-buffer-${i}-${clipIdx}`
+          await saveAudioBuffer(bufferKey, clip.buffer)
           return {
-            name: t.name || '',
-            mute: t.mute,
-            solo: t.solo,
-            volume: t.volume,
-            clip: {
-              fileName: t.clip.fileName,
-              startPosition: t.clip.startPosition,
-              audioBufferKey: bufferKey,
-              offsetSeconds: t.clip.offsetSeconds
-            }
+            fileName: clip.fileName,
+            startPosition: clip.startPosition,
+            audioBufferKey: bufferKey,
+            offsetSeconds: clip.offsetSeconds,
+            id: clip.id
           }
-        }
+        }))
+        
         return {
           name: t.name || '',
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
-          clip: null
+          clips: savedClips
         }
       }))
       
@@ -208,33 +206,56 @@ function App() {
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
       
       const newTrackStates = await Promise.all(state.tracks.map(async (t, i) => {
-        if (!t.clip) return { ...t, clip: null }
+        // Handle old format with single clip
+        if (t.clip) {
+          const buffer = await loadAudioBuffer(t.clip.audioBufferKey)
+          if (!buffer) return { ...t, clips: [] }
+          
+          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
+          const player = new Tone.Player()
+          player.buffer = toneBuffer
+          player.loop = true
+          player.connect(trackGainsRef.current[i])
+          
+          return {
+            ...t,
+            clips: [{
+              player,
+              fileName: t.clip.fileName,
+              isPlaying: false,
+              buffer,
+              startPosition: t.clip.startPosition,
+              offsetSeconds: t.clip.offsetSeconds || getCountInSeconds(),
+              id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
+            }]
+          }
+        }
         
-        const buffer = await loadAudioBuffer(t.clip.audioBufferKey)
-        if (!buffer) return { ...t, clip: null }
-        
-        const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-        const player = new Tone.Player()
-        player.buffer = toneBuffer
-        player.loop = true
-        player.connect(trackGainsRef.current[i])
-        
-        setTimeout(() => {
-          const canvas = canvasRefs.current[i]
-          if (canvas) drawWaveform(canvas, buffer)
-        }, 100)
+        // Handle new format with clips array
+        const loadedClips = await Promise.all((t.clips || []).map(async (clipData: any) => {
+          const buffer = await loadAudioBuffer(clipData.audioBufferKey)
+          if (!buffer) return null
+          
+          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
+          const player = new Tone.Player()
+          player.buffer = toneBuffer
+          player.loop = true
+          player.connect(trackGainsRef.current[i])
+          
+          return {
+            player,
+            fileName: clipData.fileName,
+            isPlaying: false,
+            buffer,
+            startPosition: clipData.startPosition,
+            offsetSeconds: clipData.offsetSeconds || getCountInSeconds(),
+            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`
+          }
+        }))
         
         return {
           ...t,
-          clip: {
-            player,
-            fileName: t.clip.fileName,
-            isPlaying: false,
-            buffer,
-            startPosition: t.clip.startPosition,
-            offsetSeconds: t.clip.offsetSeconds || getCountInSeconds(),
-            id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
-          }
+          clips: loadedClips.filter(c => c !== null) as Clip[]
         }
       }))
       
@@ -281,16 +302,18 @@ function App() {
         mute: t.mute,
         solo: t.solo,
         volume: t.volume,
-        clip: t.clip ? {
-          fileName: t.clip.fileName,
-          startPosition: t.clip.startPosition,
-          audioFile: `audio_${i}.wav`,
+        clips: t.clips.map((clip, clipIdx) => ({
+          fileName: clip.fileName,
+          startPosition: clip.startPosition,
+          offsetSeconds: clip.offsetSeconds,
+          id: clip.id,
+          audioFile: `audio_${i}_${clipIdx}.wav`,
           audioData: {
-            left: Array.from(t.clip.buffer.getChannelData(0)),
-            right: Array.from(t.clip.buffer.getChannelData(1)),
-            sampleRate: t.clip.buffer.sampleRate
+            left: Array.from(clip.buffer.getChannelData(0)),
+            right: Array.from(clip.buffer.getChannelData(1)),
+            sampleRate: clip.buffer.sampleRate
           }
-        } : null
+        }))
       }))
     }
     
@@ -341,38 +364,66 @@ function App() {
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
       
       const newTrackStates = state.tracks.map((t: any, i: number) => {
-        if (!t.clip) return { ...t, clip: null }
+        // Handle old format with single clip
+        if (t.clip) {
+          const buffer = new AudioBuffer({
+            numberOfChannels: 2,
+            length: t.clip.audioData.left.length,
+            sampleRate: t.clip.audioData.sampleRate
+          })
+          buffer.getChannelData(0).set(new Float32Array(t.clip.audioData.left))
+          buffer.getChannelData(1).set(new Float32Array(t.clip.audioData.right))
+          
+          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
+          const player = new Tone.Player()
+          player.buffer = toneBuffer
+          player.loop = true
+          player.connect(trackGainsRef.current[i])
+          
+          return {
+            ...t,
+            clips: [{
+              player,
+              fileName: t.clip.fileName,
+              isPlaying: false,
+              buffer,
+              startPosition: t.clip.startPosition,
+              offsetSeconds: t.clip.offsetSeconds || getCountInSeconds(),
+              id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
+            }]
+          }
+        }
         
-        const buffer = new AudioBuffer({
-          numberOfChannels: 2,
-          length: t.clip.audioData.left.length,
-          sampleRate: t.clip.audioData.sampleRate
+        // Handle new format with clips array
+        const loadedClips = (t.clips || []).map((clipData: any) => {
+          const buffer = new AudioBuffer({
+            numberOfChannels: 2,
+            length: clipData.audioData.left.length,
+            sampleRate: clipData.audioData.sampleRate
+          })
+          buffer.getChannelData(0).set(new Float32Array(clipData.audioData.left))
+          buffer.getChannelData(1).set(new Float32Array(clipData.audioData.right))
+          
+          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
+          const player = new Tone.Player()
+          player.buffer = toneBuffer
+          player.loop = true
+          player.connect(trackGainsRef.current[i])
+          
+          return {
+            player,
+            fileName: clipData.fileName,
+            isPlaying: false,
+            buffer,
+            startPosition: clipData.startPosition,
+            offsetSeconds: clipData.offsetSeconds || getCountInSeconds(),
+            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`
+          }
         })
-        buffer.getChannelData(0).set(new Float32Array(t.clip.audioData.left))
-        buffer.getChannelData(1).set(new Float32Array(t.clip.audioData.right))
-        
-        const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-        const player = new Tone.Player()
-        player.buffer = toneBuffer
-        player.loop = true
-        player.connect(trackGainsRef.current[i])
-        
-        setTimeout(() => {
-          const canvas = canvasRefs.current[i]
-          if (canvas) drawWaveform(canvas, buffer)
-        }, 100)
         
         return {
           ...t,
-          clip: {
-            player,
-            fileName: t.clip.fileName,
-            isPlaying: false,
-            buffer,
-            startPosition: t.clip.startPosition,
-            offsetSeconds: t.clip.offsetSeconds || getCountInSeconds(),
-            id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
-          }
+          clips: loadedClips
         }
       })
       
@@ -411,7 +462,7 @@ function App() {
   }
 
   const handleOpenExportDialog = () => {
-    const tracksWithAudio = trackStates.map(t => t.clip !== null && !t.mute)
+    const tracksWithAudio = trackStates.map(t => t.clips.length > 0 && !t.mute)
     setExportTracks(tracksWithAudio)
     setShowExportDialog(true)
   }
@@ -429,7 +480,7 @@ function App() {
       
       const selectedIndices = exportTracks
         .map((selected, i) => selected ? i : -1)
-        .filter(i => i >= 0 && trackStates[i].clip)
+        .filter(i => i >= 0 && trackStates[i].clips.length > 0)
       
       if (selectedIndices.length === 0) {
         setErrorMessage('Selecciona al menos una pista para exportar')
@@ -448,8 +499,10 @@ function App() {
         return
       }
       
-      const maxDuration = Math.max(...effectiveIndices.map(i => trackStates[i].clip!.buffer.duration))
-      const sampleRate = trackStates[effectiveIndices[0]].clip!.buffer.sampleRate
+      const maxDuration = Math.max(...effectiveIndices.flatMap(i => 
+        trackStates[i].clips.map(clip => clip.offsetSeconds + clip.buffer.duration)
+      ))
+      const sampleRate = trackStates[effectiveIndices[0]].clips[0].buffer.sampleRate
       
       for (let idx = 0; idx < effectiveIndices.length; idx++) {
         const i = effectiveIndices[idx]
@@ -458,16 +511,17 @@ function App() {
         setExportProgress(`Renderizando ${idx + 1}/${effectiveIndices.length}...`)
         
         const offlineContext = new OfflineAudioContext(2, maxDuration * sampleRate, sampleRate)
-        
-        const source = offlineContext.createBufferSource()
-        source.buffer = track.clip!.buffer
-        
         const gainNode = offlineContext.createGain()
         gainNode.gain.value = track.volume
-        
-        source.connect(gainNode)
         gainNode.connect(offlineContext.destination)
-        source.start(0)
+        
+        // Render all clips on this track
+        for (const clip of track.clips) {
+          const source = offlineContext.createBufferSource()
+          source.buffer = clip.buffer
+          source.connect(gainNode)
+          source.start(clip.offsetSeconds)
+        }
         
         const renderedBuffer = await offlineContext.startRendering()
         
@@ -623,11 +677,12 @@ function App() {
   const getMaxDuration = (): number => {
     let maxDuration = 0
     trackStates.forEach(track => {
-      if (track.clip?.buffer.duration) {
-        maxDuration = Math.max(maxDuration, track.clip.buffer.duration)
-      }
+      track.clips.forEach(clip => {
+        const clipEnd = clip.offsetSeconds + clip.buffer.duration
+        maxDuration = Math.max(maxDuration, clipEnd)
+      })
     })
-    return maxDuration > 0 ? maxDuration + getCountInSeconds() : 0
+    return maxDuration > 0 ? maxDuration : 0
   }
 
   useEffect(() => {
@@ -744,24 +799,35 @@ function App() {
     const maxDuration = getMaxDuration()
     
     const updatedStates = trackStates.map(track => {
-      if (track.clip && !track.clip.isPlaying) {
-        track.clip.player.loop = true
-        const bufferOffset = Math.max(0, startTime - countInSeconds)
-        const offset = bufferOffset % track.clip.buffer.duration
-        const when = startingInsideGap ? Tone.now() + (countInSeconds - startTime) : Tone.now()
-        
-        console.log('[DEBUG] Starting player:', {
-          trackName: track.name,
-          bufferLoaded: track.clip.player.loaded,
-          bufferDuration: track.clip.player.buffer.duration,
-          offset,
-          when,
-          startingInsideGap
-        })
-        track.clip.player.start(when, offset)
-        return { ...track, clip: { ...track.clip, isPlaying: true } }
-      }
-      return track
+      const updatedClips = track.clips.map(clip => {
+        if (!clip.isPlaying && startTime < clip.offsetSeconds + clip.buffer.duration) {
+          clip.player.loop = false
+          
+          const clipStartTime = clip.offsetSeconds
+          const clipEndTime = clip.offsetSeconds + clip.buffer.duration
+          
+          // Determine when to play this clip and what offset to use
+          let when = Tone.now()
+          let offset = 0
+          
+          if (startTime < clipStartTime) {
+            // Playhead is before clip starts - schedule for later
+            when = Tone.now() + (clipStartTime - startTime)
+            offset = 0
+          } else if (startTime >= clipStartTime && startTime < clipEndTime) {
+            // Playhead is inside clip - start immediately with offset
+            when = Tone.now()
+            offset = startTime - clipStartTime
+          }
+          
+          if (when >= Tone.now() && offset < clip.buffer.duration) {
+            clip.player.start(when, offset)
+            return { ...clip, isPlaying: true }
+          }
+        }
+        return clip
+      })
+      return { ...track, clips: updatedClips }
     })
     
     setTrackStates(updatedStates)
@@ -784,28 +850,43 @@ function App() {
         if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
           if (currentTime < lastLoopCheck && lastLoopCheck > loopStart) {
             // Transport looped, restart players at loop start
-            // Check player.state instead of isPlaying to avoid stale closure
-            const loopInsideGap = loopStart < countInSeconds
-            
             trackStates.forEach(track => {
-              if (track.clip && track.clip.player.state === 'started') {
-                track.clip.player.stop()
-                const bufferOffset = Math.max(0, loopStart - countInSeconds)
-                const offset = bufferOffset % track.clip.buffer.duration
-                const when = loopInsideGap ? Tone.now() + (countInSeconds - loopStart) : Tone.now()
-                track.clip.player.start(when, offset)
-              }
+              track.clips.forEach(clip => {
+                if (clip.player.state === 'started') {
+                  clip.player.stop()
+                }
+                
+                // Restart clips that overlap with loop region
+                if (loopStart < clip.offsetSeconds + clip.buffer.duration) {
+                  let when = Tone.now()
+                  let offset = 0
+                  
+                  if (loopStart < clip.offsetSeconds) {
+                    when = Tone.now() + (clip.offsetSeconds - loopStart)
+                    offset = 0
+                  } else if (loopStart >= clip.offsetSeconds) {
+                    when = Tone.now()
+                    offset = loopStart - clip.offsetSeconds
+                  }
+                  
+                  if (offset < clip.buffer.duration) {
+                    clip.player.start(when, offset)
+                  }
+                }
+              })
             })
           }
         } else if (!isLoopEnabled && maxDuration > 0 && currentTime >= maxDuration) {
           // End of timeline, restart from beginning
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
-            if (track.clip && track.clip.player.state === 'started') {
-              track.clip.player.stop()
-              const when = Tone.now() + countInSeconds
-              track.clip.player.start(when)
-            }
+            track.clips.forEach(clip => {
+              if (clip.player.state === 'started') {
+                clip.player.stop()
+              }
+              const when = Tone.now() + clip.offsetSeconds
+              clip.player.start(when, 0)
+            })
           })
         }
         
@@ -825,13 +906,15 @@ function App() {
       playheadAnimationRef.current = null
     }
     
-    setTrackStates(prev => prev.map(track => {
-      if (track.clip?.isPlaying) {
-        track.clip.player.stop()
-        track.clip.isPlaying = false
-      }
-      return { ...track }
-    }))
+    setTrackStates(prev => prev.map(track => ({
+      ...track,
+      clips: track.clips.map(clip => {
+        if (clip.isPlaying) {
+          clip.player.stop()
+        }
+        return { ...clip, isPlaying: false }
+      })
+    })))
     
     setIsPlaying(false)
     setIsPaused(true)
@@ -848,13 +931,15 @@ function App() {
     
     setPlayheadPosition(0)
     
-    setTrackStates(prev => prev.map(track => {
-      if (track.clip?.isPlaying) {
-        track.clip.player.stop()
-        track.clip.isPlaying = false
-      }
-      return { ...track }
-    }))
+    setTrackStates(prev => prev.map(track => ({
+      ...track,
+      clips: track.clips.map(clip => {
+        if (clip.isPlaying) {
+          clip.player.stop()
+        }
+        return { ...clip, isPlaying: false }
+      })
+    })))
     
     setIsPlaying(false)
     setIsPaused(false)
@@ -870,22 +955,25 @@ function App() {
 
   const handleSplitClip = async (trackIndex: number) => {
     const track = trackStates[trackIndex]
-    if (!track.clip) return
+    if (track.clips.length === 0) return
     
     await ensureAudio()
     
     const splitTime = playheadPosition
-    const clipStartTime = track.clip.offsetSeconds
-    const clipEndTime = clipStartTime + track.clip.buffer.duration
     
-    if (splitTime <= clipStartTime || splitTime >= clipEndTime) {
-      setErrorMessage('El playhead debe estar dentro del clip')
+    // Find the clip that contains the playhead
+    const clipToSplit = track.clips.find(clip => 
+      splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.buffer.duration
+    )
+    
+    if (!clipToSplit) {
+      setErrorMessage('El playhead debe estar dentro de un clip')
       setTimeout(() => setErrorMessage(null), 3000)
       return
     }
     
-    const splitOffset = splitTime - clipStartTime
-    const originalBuffer = track.clip.buffer
+    const splitOffset = splitTime - clipToSplit.offsetSeconds
+    const originalBuffer = clipToSplit.buffer
     const sampleRate = originalBuffer.sampleRate
     
     const firstPartLength = Math.floor(splitOffset * sampleRate)
@@ -909,71 +997,70 @@ function App() {
       secondBuffer.getChannelData(ch).set(originalData.slice(firstPartLength))
     }
     
-    track.clip.player.dispose()
+    clipToSplit.player.dispose()
     
     const firstPlayer = new Tone.Player()
     firstPlayer.buffer = new Tone.ToneAudioBuffer(firstBuffer)
-    firstPlayer.loop = true
+    firstPlayer.loop = false
     firstPlayer.connect(trackGainsRef.current[trackIndex])
     
+    const secondPlayer = new Tone.Player()
+    secondPlayer.buffer = new Tone.ToneAudioBuffer(secondBuffer)
+    secondPlayer.loop = false
+    secondPlayer.connect(trackGainsRef.current[trackIndex])
+    
     const newTrackStates = [...trackStates]
+    const updatedClips = track.clips.map(clip => {
+      if (clip.id === clipToSplit.id) {
+        return null // Will be replaced with two clips
+      }
+      return clip
+    }).filter(c => c !== null) as Clip[]
+    
+    // Add the two new clips
+    updatedClips.push({
+      player: firstPlayer,
+      fileName: clipToSplit.fileName,
+      isPlaying: false,
+      buffer: firstBuffer,
+      startPosition: clipToSplit.startPosition,
+      offsetSeconds: clipToSplit.offsetSeconds,
+      id: `${clipToSplit.id}-part1`
+    })
+    
+    updatedClips.push({
+      player: secondPlayer,
+      fileName: clipToSplit.fileName,
+      isPlaying: false,
+      buffer: secondBuffer,
+      startPosition: 0,
+      offsetSeconds: splitTime,
+      id: `${clipToSplit.id}-part2`
+    })
+    
     newTrackStates[trackIndex] = {
       ...newTrackStates[trackIndex],
-      clip: {
-        player: firstPlayer,
-        fileName: track.clip.fileName,
-        isPlaying: false,
-        buffer: firstBuffer,
-        startPosition: track.clip.startPosition,
-        offsetSeconds: track.clip.offsetSeconds,
-        id: `${track.clip.id}-part1`
-      }
-    }
-    
-    const nextEmptyTrack = trackStates.findIndex((t, i) => i > trackIndex && !t.clip)
-    if (nextEmptyTrack !== -1) {
-      const secondPlayer = new Tone.Player()
-      secondPlayer.buffer = new Tone.ToneAudioBuffer(secondBuffer)
-      secondPlayer.loop = true
-      secondPlayer.connect(trackGainsRef.current[nextEmptyTrack])
-      
-      newTrackStates[nextEmptyTrack] = {
-        ...newTrackStates[nextEmptyTrack],
-        clip: {
-          player: secondPlayer,
-          fileName: track.clip.fileName,
-          isPlaying: false,
-          buffer: secondBuffer,
-          startPosition: 0,
-          offsetSeconds: splitTime,
-          id: `${track.clip.id}-part2`
-        }
-      }
-      
-      setTimeout(() => {
-        const canvas = canvasRefs.current[nextEmptyTrack]
-        if (canvas) drawWaveform(canvas, secondBuffer)
-      }, 100)
+      clips: updatedClips
     }
     
     setTrackStates(newTrackStates)
-    
-    setTimeout(() => {
-      const canvas = canvasRefs.current[trackIndex]
-      if (canvas) drawWaveform(canvas, firstBuffer)
-    }, 100)
-    
     setShowToast(true)
     setTimeout(() => setShowToast(false), 2000)
   }
 
   const handleCopyClip = (trackIndex: number) => {
     const track = trackStates[trackIndex]
-    if (!track.clip) return
+    if (track.clips.length === 0) return
+    
+    // Find clip under playhead, or use first clip
+    const clipToCopy = track.clips.find(clip =>
+      playheadPosition >= clip.offsetSeconds && 
+      playheadPosition < clip.offsetSeconds + clip.buffer.duration
+    ) || track.clips[0]
     
     setClipboard({
-      buffer: track.clip.buffer,
-      fileName: track.clip.fileName
+      buffer: clipToCopy.buffer,
+      fileName: clipToCopy.fileName
     })
     
     setShowToast(true)
@@ -989,50 +1076,48 @@ function App() {
     
     await ensureAudio()
     
-    const existingClip = trackStates[trackIndex].clip
-    if (existingClip) {
-      existingClip.player.dispose()
-    }
-    
     const player = new Tone.Player()
     player.buffer = new Tone.ToneAudioBuffer(clipboard.buffer)
-    player.loop = true
+    player.loop = false
     player.connect(trackGainsRef.current[trackIndex])
+    
+    const newClip: Clip = {
+      player,
+      fileName: clipboard.fileName,
+      isPlaying: false,
+      buffer: clipboard.buffer,
+      startPosition: 0,
+      offsetSeconds: playheadPosition,
+      id: `clip-${Date.now()}-${Math.random()}`
+    }
     
     const newTrackStates = [...trackStates]
     newTrackStates[trackIndex] = {
       ...newTrackStates[trackIndex],
-      clip: {
-        player,
-        fileName: clipboard.fileName,
-        isPlaying: false,
-        buffer: clipboard.buffer,
-        startPosition: 0,
-        offsetSeconds: playheadPosition,
-        id: `clip-${Date.now()}-${Math.random()}`
-      }
+      clips: [...newTrackStates[trackIndex].clips, newClip]
     }
     setTrackStates(newTrackStates)
-    
-    setTimeout(() => {
-      const canvas = canvasRefs.current[trackIndex]
-      if (canvas) drawWaveform(canvas, clipboard.buffer)
-    }, 100)
     
     setShowToast(true)
     setTimeout(() => setShowToast(false), 2000)
   }
 
-  const handleClipDragStart = (e: React.MouseEvent, trackIndex: number) => {
+  const handleClipDragStart = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
+    
+    const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
+    if (!clip) return
+    
     setIsDraggingClip(true)
     setDraggedClipTrack(trackIndex)
+    setDraggedClipId(clipId)
     setDragStartX(e.clientX)
-    setDragStartPosition(trackStates[trackIndex].clip?.offsetSeconds || 0)
+    setDragStartPosition(clip.offsetSeconds)
+    setTempDragOffset(clip.offsetSeconds)
   }
 
   useEffect(() => {
-    if (!isDraggingClip || draggedClipTrack === null) return
+    if (!isDraggingClip || draggedClipTrack === null || draggedClipId === null) return
 
     const handleMouseMove = (e: MouseEvent) => {
       const lanes = document.querySelectorAll('.track-content')
@@ -1042,27 +1127,32 @@ function App() {
       const rect = firstLane.getBoundingClientRect()
       const deltaX = e.clientX - dragStartX
       const deltaPercentage = deltaX / rect.width
-      const maxDuration = getMaxDuration()
+      const maxDuration = getMaxDuration() || 100
       const deltaTime = deltaPercentage * maxDuration
       
       const newOffset = Math.max(0, dragStartPosition + deltaTime)
-      
-      const newTrackStates = [...trackStates]
-      if (newTrackStates[draggedClipTrack].clip) {
-        newTrackStates[draggedClipTrack] = {
-          ...newTrackStates[draggedClipTrack],
-          clip: {
-            ...newTrackStates[draggedClipTrack].clip!,
-            offsetSeconds: newOffset
-          }
-        }
-        setTrackStates(newTrackStates)
-      }
+      setTempDragOffset(newOffset)
     }
 
     const handleMouseUp = () => {
+      // Update the actual state only on mouseup
+      const newTrackStates = [...trackStates]
+      const track = newTrackStates[draggedClipTrack]
+      const updatedClips = track.clips.map(clip => {
+        if (clip.id === draggedClipId) {
+          return { ...clip, offsetSeconds: tempDragOffset }
+        }
+        return clip
+      })
+      newTrackStates[draggedClipTrack] = {
+        ...track,
+        clips: updatedClips
+      }
+      setTrackStates(newTrackStates)
+      
       setIsDraggingClip(false)
       setDraggedClipTrack(null)
+      setDraggedClipId(null)
     }
 
     document.addEventListener('mousemove', handleMouseMove)
@@ -1076,7 +1166,7 @@ function App() {
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
     }
-  }, [isDraggingClip, draggedClipTrack, dragStartX, dragStartPosition, trackStates])
+  }, [isDraggingClip, draggedClipTrack, draggedClipId, dragStartX, dragStartPosition, tempDragOffset])
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
@@ -1085,18 +1175,11 @@ function App() {
   }
 
   const handleLaneClick = async (trackIndex: number) => {
-    const clip = trackStates[trackIndex].clip
+    const track = trackStates[trackIndex]
 
-    if (clip) {
-      await ensureAudio()
-      if (clip.isPlaying) {
-        clip.player.stop()
-        clip.isPlaying = false
-      } else {
-        clip.player.start()
-        clip.isPlaying = true
-      }
-      setTrackStates([...trackStates])
+    if (track.clips.length > 0) {
+      // If track has clips, do nothing on empty space click
+      return
     } else {
       setSelectedTrack(trackIndex)
       fileInputRef.current?.click()
@@ -1200,16 +1283,11 @@ function App() {
     await ensureAudio()
     console.log('[DEBUG] loadSingleTrack: trackIndex=', trackIndex, 'gain exists=', !!trackGainsRef.current[trackIndex])
 
-    const existingClip = trackStates[trackIndex].clip
-    if (existingClip) {
-      existingClip.player.dispose()
-    }
-
     const url = URL.createObjectURL(file)
     const trackGain = trackGainsRef.current[trackIndex]
     
     const player = new Tone.Player()
-    player.loop = true
+    player.loop = false
     player.connect(trackGain)
     
     console.log('[DEBUG] Before load')
@@ -1231,27 +1309,22 @@ function App() {
       setTimeout(() => setErrorMessage(null), 3000)
     }
 
+    const newClip: Clip = {
+      player,
+      fileName: file.name,
+      isPlaying: false,
+      buffer,
+      startPosition: 0,
+      offsetSeconds: getCountInSeconds(),
+      id: `clip-${Date.now()}-${Math.random()}`
+    }
+
     const newTrackStates = [...trackStates]
     newTrackStates[trackIndex] = {
       ...newTrackStates[trackIndex],
-      clip: {
-        player,
-        fileName: file.name,
-        isPlaying: false,
-        buffer,
-        startPosition: 0,
-        offsetSeconds: getCountInSeconds(),
-        id: `clip-${Date.now()}-${Math.random()}`
-      }
+      clips: [...newTrackStates[trackIndex].clips, newClip]
     }
     setTrackStates(newTrackStates)
-
-    setTimeout(() => {
-      const canvas = canvasRefs.current[trackIndex]
-      if (canvas && buffer) {
-        drawWaveform(canvas, buffer)
-      }
-    }, 100)
   }
 
   const processStemSeparation = async (file: File, startTrackIndex: number) => {
@@ -1305,38 +1378,29 @@ function App() {
       const targetTrackIndex = startTrackIndex + i
       if (targetTrackIndex >= trackStates.length) break
 
-      if (newTrackStates[targetTrackIndex].clip) {
-        newTrackStates[targetTrackIndex].clip!.player.dispose()
-      }
-
       const player = new Tone.Player()
-      player.loop = true
+      player.loop = false
       
       const toneBuffer = new Tone.ToneAudioBuffer(stemBuffers[i])
       player.buffer = toneBuffer
       
       player.connect(trackGainsRef.current[targetTrackIndex])
 
+      const newClip: Clip = {
+        player,
+        fileName: `${file.name} - ${stemNames[i]}`,
+        isPlaying: false,
+        buffer: stemBuffers[i],
+        startPosition: 0,
+        offsetSeconds: getCountInSeconds(),
+        id: `clip-${Date.now()}-${i}-${Math.random()}`
+      }
+
       newTrackStates[targetTrackIndex] = {
         ...newTrackStates[targetTrackIndex],
         name: stemNames[i],
-        clip: {
-          player,
-          fileName: `${file.name} - ${stemNames[i]}`,
-          isPlaying: false,
-          buffer: stemBuffers[i],
-          startPosition: 0,
-          offsetSeconds: getCountInSeconds(),
-          id: `clip-${Date.now()}-${i}-${Math.random()}`
-        }
+        clips: [...newTrackStates[targetTrackIndex].clips, newClip]
       }
-
-      setTimeout(() => {
-        const canvas = canvasRefs.current[targetTrackIndex]
-        if (canvas && stemBuffers[i]) {
-          drawWaveform(canvas, stemBuffers[i])
-        }
-      }, 100)
     }
 
     setTrackStates(newTrackStates)
@@ -1386,32 +1450,39 @@ function App() {
     setPlayheadPosition(clampedSeconds)
     Tone.getTransport().seconds = clampedSeconds
     
-    const countInSeconds = getCountInSeconds()
-    
     trackStates.forEach(track => {
-      if (track.clip) {
-        const wasPlaying = track.clip.isPlaying
+      track.clips.forEach(clip => {
+        const wasPlaying = clip.isPlaying
         if (wasPlaying) {
-          track.clip.player.stop()
+          clip.player.stop()
         }
         if (isPlaying) {
-          const bufferOffset = Math.max(0, clampedSeconds - countInSeconds)
-          const offset = bufferOffset % track.clip.buffer.duration
-          track.clip.player.start(Tone.now(), offset)
-          track.clip.isPlaying = true
+          const clipStartTime = clip.offsetSeconds
+          const clipEndTime = clip.offsetSeconds + clip.buffer.duration
+          
+          if (clampedSeconds >= clipStartTime && clampedSeconds < clipEndTime) {
+            const offset = clampedSeconds - clipStartTime
+            clip.player.start(Tone.now(), offset)
+            clip.isPlaying = true
+          } else if (clampedSeconds < clipStartTime) {
+            // Will be scheduled later by the normal playback logic
+            const when = Tone.now() + (clipStartTime - clampedSeconds)
+            clip.player.start(when, 0)
+            clip.isPlaying = true
+          }
         }
-      }
+      })
     })
   }
 
   const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>, trackIndex: number) => {
     const track = trackStates[trackIndex]
-    if (!track.clip) {
+    if (track.clips.length === 0) {
       handleLaneClick(trackIndex)
       return
     }
 
-    if (isDraggingLoop || isDraggingLoopEdge) {
+    if (isDraggingLoop || isDraggingLoopEdge || isDraggingClip) {
       return
     }
 
@@ -1422,11 +1493,6 @@ function App() {
     const clickTime = percentage * maxDuration
 
     seekToPosition(clickTime)
-    // Only auto-start playback if not in loop mode
-    // In loop mode, clicking is for marking the loop zone, not for starting playback
-    if (!isPlaying && !isPaused && !isLoopEnabled) {
-      handleLaneClick(trackIndex)
-    }
   }
 
   const clearLoop = () => {
@@ -1796,7 +1862,7 @@ function App() {
             </p>
             <div className="export-tracks-list">
               {trackStates.map((track, i) => (
-                track.clip && (
+                track.clips.length > 0 && (
                   <label key={i} className="export-track-item">
                     <input
                       type="checkbox"
@@ -1891,7 +1957,7 @@ function App() {
                   title={`Volume: ${Math.round(trackState.volume * 100)}%`}
                 />
               </div>
-              {trackState.clip && (
+              {trackState.clips.length > 0 && (
                 <div className="track-actions">
                   <button
                     className="action-button"
@@ -1928,59 +1994,75 @@ function App() {
           <div className="bar-ruler">
             {rulerBars}
           </div>
-          {trackStates.map((trackState, trackIndex) => (
+          {trackStates.map((trackState, trackIndex) => {
+            const hasClips = trackState.clips.length > 0
+            const isAnyClipPlaying = trackState.clips.some(c => c.isPlaying)
+            const maxDur = getMaxDuration() || 100
+            
+            return (
             <div 
               key={trackIndex}
-              className={`track-content ${trackState.clip ? 'has-clip' : ''} ${trackState.clip?.isPlaying ? 'playing' : ''}`}
+              className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
               style={{ height: `${88 * verticalZoom}px` }}
               onClick={(e) => handleWaveformClick(e, trackIndex)}
             >
-              {trackState.clip ? (
+              {hasClips ? (
                 <div 
                   className="clip-region"
                   onMouseDown={(e) => {
-                    if (isLoopEnabled && e.button === 0 && !isDraggingLoopEdge) {
+                    if (isLoopEnabled && e.button === 0 && !isDraggingLoopEdge && !isDraggingClip) {
                       handleLoopMouseDown(e)
                     }
                   }}
                   onMouseMove={handleLoopMouseMove}
                   onMouseUp={handleLoopMouseUp}
                 >
-                  <div 
-                    className="clip-wrapper"
-                    style={{
-                      marginLeft: `${(trackState.clip.offsetSeconds / getMaxDuration()) * 100}%`,
-                      width: `${(trackState.clip.buffer.duration / getMaxDuration()) * 100}%`
-                    }}
-                  >
-                    <div 
-                      className="clip-drag-handle"
-                      onMouseDown={(e) => handleClipDragStart(e, trackIndex)}
-                      title="Arrastra para mover el clip en el tiempo"
-                    >
-                      <span className="drag-icon">↔</span>
-                    </div>
-                    <div className="clip-info">
-                      <span className="clip-filename">{trackState.clip.fileName}</span>
-                      {isLoopEnabled && !loopStart && !loopEnd && <span className="clip-hint">Arrastra para marcar zona de loop</span>}
-                    </div>
-                    <canvas
-                      ref={(el) => {
-                        if (el && trackState.clip && !canvasRefs.current[trackIndex]) {
-                          canvasRefs.current[trackIndex] = el
-                          el.width = el.offsetWidth * 2
-                          el.height = el.offsetHeight * 2
-                          drawWaveform(el, trackState.clip.buffer)
-                        }
-                      }}
-                      className="waveform-canvas"
-                    />
+                  {trackState.clips.map((clip) => {
+                    const clipOffset = (isDraggingClip && draggedClipTrack === trackIndex && draggedClipId === clip.id) 
+                      ? tempDragOffset 
+                      : clip.offsetSeconds
+                    
+                    return (
+                      <div 
+                        key={clip.id}
+                        className="clip-wrapper"
+                        style={{
+                          position: 'absolute',
+                          left: `${(clipOffset / maxDur) * 100}%`,
+                          width: `${(clip.buffer.duration / maxDur) * 100}%`,
+                          height: '100%'
+                        }}
+                      >
+                        <div 
+                          className="clip-drag-handle"
+                          onMouseDown={(e) => handleClipDragStart(e, trackIndex, clip.id)}
+                          title="Arrastra para mover el clip en el tiempo"
+                        >
+                          <span className="drag-icon">↔</span>
+                        </div>
+                        <div className="clip-info">
+                          <span className="clip-filename">{clip.fileName}</span>
+                        </div>
+                        <canvas
+                          className="waveform-canvas"
+                          ref={(el) => {
+                            if (el && !el.dataset.drawn) {
+                              el.width = el.offsetWidth * 2
+                              el.height = el.offsetHeight * 2
+                              drawWaveform(el, clip.buffer)
+                              el.dataset.drawn = 'true'
+                            }
+                          }}
+                        />
+                      </div>
+                    )
+                  })}
                   </div>
                   {(loopStart !== null || tempLoopStart !== null) && (
                     <div 
                       className="loop-marker loop-start draggable"
                       style={{ 
-                        left: `${((tempLoopStart ?? loopStart)! / getMaxDuration()) * 100}%` 
+                        left: `${((tempLoopStart ?? loopStart)! / maxDur) * 100}%` 
                       }}
                       onMouseDown={(e) => handleLoopMouseDown(e, 'start')}
                       title="Arrastra para ajustar inicio"
@@ -1990,7 +2072,7 @@ function App() {
                     <div 
                       className="loop-marker loop-end draggable"
                       style={{ 
-                        left: `${((tempLoopEnd ?? loopEnd)! / getMaxDuration()) * 100}%` 
+                        left: `${((tempLoopEnd ?? loopEnd)! / maxDur) * 100}%` 
                       }}
                       onMouseDown={(e) => handleLoopMouseDown(e, 'end')}
                       title="Arrastra para ajustar fin"
@@ -2000,8 +2082,8 @@ function App() {
                     <div 
                       className="loop-region"
                       style={{ 
-                        left: `${((tempLoopStart ?? loopStart)! / getMaxDuration()) * 100}%`,
-                        width: `${(((tempLoopEnd ?? loopEnd)! - (tempLoopStart ?? loopStart)!) / getMaxDuration()) * 100}%`
+                        left: `${((tempLoopStart ?? loopStart)! / maxDur) * 100}%`,
+                        width: `${(((tempLoopEnd ?? loopEnd)! - (tempLoopStart ?? loopStart)!) / maxDur) * 100}%`
                       }}
                     />
                   )}
@@ -2009,7 +2091,7 @@ function App() {
                     <div 
                       className="playhead"
                       style={{ 
-                        left: `${Math.min((playheadPosition / getMaxDuration()) * 100, 100)}%` 
+                        left: `${Math.min((playheadPosition / maxDur) * 100, 100)}%` 
                       }}
                       onMouseDown={handlePlayheadMouseDown}
                     />
@@ -2021,7 +2103,8 @@ function App() {
                 </div>
               )}
             </div>
-          ))}
+            )
+          })}
         </div>
       </div>
     </div>

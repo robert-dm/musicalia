@@ -776,10 +776,11 @@ function App() {
         if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
           if (currentTime < lastLoopCheck && lastLoopCheck > loopStart) {
             // Transport looped, restart players at loop start
+            // Check player.state instead of isPlaying to avoid stale closure
             const loopInsideGap = loopStart < countInSeconds
             
             trackStates.forEach(track => {
-              if (track.clip?.isPlaying) {
+              if (track.clip && track.clip.player.state === 'started') {
                 track.clip.player.stop()
                 const bufferOffset = Math.max(0, loopStart - countInSeconds)
                 const offset = bufferOffset % track.clip.buffer.duration
@@ -792,7 +793,7 @@ function App() {
           // End of timeline, restart from beginning
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
-            if (track.clip?.isPlaying) {
+            if (track.clip && track.clip.player.state === 'started') {
               track.clip.player.stop()
               const when = Tone.now() + countInSeconds
               track.clip.player.start(when)

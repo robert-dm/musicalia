@@ -15,24 +15,35 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
     const sampleRate = audioBuffer.sampleRate
     const mono = convertToMono(audioBuffer)
     
+    console.log(`[BPM] Analyzing ${mono.length} samples at ${sampleRate}Hz (${(mono.length/sampleRate).toFixed(1)}s)`)
+    
     const maxAnalysisSamples = sampleRate * 90
     const audioToAnalyze = mono.length > maxAnalysisSamples 
       ? mono.slice(0, maxAnalysisSamples) 
       : mono
     
     const energyEnvelope = computeEnergyEnvelope(audioToAnalyze, sampleRate)
+    console.log(`[BPM] Energy envelope: ${energyEnvelope.length} frames, max=${Math.max(...energyEnvelope).toFixed(4)}`)
+    
     const diffEnvelope = computeDifferenceEnvelope(energyEnvelope)
+    const diffMax = Math.max(...diffEnvelope)
+    const diffMean = diffEnvelope.reduce((a, b) => a + b, 0) / diffEnvelope.length
+    console.log(`[BPM] Difference envelope: max=${diffMax.toFixed(4)}, mean=${diffMean.toFixed(6)}`)
+    
     const autocorr = computeAutocorrelation(diffEnvelope)
+    console.log(`[BPM] Autocorrelation: ${autocorr.length} lags`)
     
-    const bpm = findBPMFromAutocorrelation(autocorr, sampleRate)
+    const result = findBPMFromAutocorrelation(autocorr, sampleRate)
     
-    if (bpm && bpm >= 60 && bpm <= 200) {
-      return { bpm: Math.round(bpm), confidence: 0.8 }
+    if (result.bpm && result.bpm >= 60 && result.bpm <= 200) {
+      console.log(`[BPM] ✓ Detected BPM: ${result.bpm} (${result.peakCount} peaks found)`)
+      return { bpm: Math.round(result.bpm), confidence: 0.8 }
     }
     
+    console.log(`[BPM] ✗ No valid BPM found (${result.peakCount} peaks, best=${result.bpm})`)
     return { bpm: null, confidence: 0 }
   } catch (error) {
-    console.error('BPM detection error:', error)
+    console.error('[BPM] Detection error:', error)
     return { bpm: null, confidence: 0 }
   }
 }
@@ -109,7 +120,10 @@ function computeAutocorrelation(signal: Float32Array): Float32Array {
   return autocorr
 }
 
-function findBPMFromAutocorrelation(autocorr: Float32Array, sampleRate: number): number | null {
+function findBPMFromAutocorrelation(
+  autocorr: Float32Array, 
+  sampleRate: number
+): { bpm: number | null, peakCount: number } {
   const minBPM = 60
   const maxBPM = 200
   
@@ -117,10 +131,22 @@ function findBPMFromAutocorrelation(autocorr: Float32Array, sampleRate: number):
   const minLag = Math.floor((60 / maxBPM) * sampleRate / hopSize)
   const maxLag = Math.floor((60 / minBPM) * sampleRate / hopSize)
   
+  // Find the maximum value in the search range to set adaptive threshold
+  let maxInRange = 0
+  for (let i = minLag; i < Math.min(maxLag, autocorr.length); i++) {
+    if (autocorr[i] > maxInRange) {
+      maxInRange = autocorr[i]
+    }
+  }
+  
+  // Use adaptive threshold: 5% of max or 0.01, whichever is higher
+  const threshold = Math.max(maxInRange * 0.05, 0.01)
+  console.log(`[BPM] Peak search: lag range [${minLag}, ${maxLag}], max=${maxInRange.toFixed(4)}, threshold=${threshold.toFixed(4)}`)
+  
   const peaks: Array<{ index: number, value: number, bpm: number }> = []
   
   for (let i = minLag + 1; i < Math.min(maxLag - 1, autocorr.length - 1); i++) {
-    if (autocorr[i] > autocorr[i - 1] && autocorr[i] > autocorr[i + 1] && autocorr[i] > 0.1) {
+    if (autocorr[i] > autocorr[i - 1] && autocorr[i] > autocorr[i + 1] && autocorr[i] > threshold) {
       const lagInSeconds = (i * hopSize) / sampleRate
       const bpm = 60 / lagInSeconds
       
@@ -130,22 +156,29 @@ function findBPMFromAutocorrelation(autocorr: Float32Array, sampleRate: number):
     }
   }
   
+  console.log(`[BPM] Found ${peaks.length} peaks above threshold`)
+  
   if (peaks.length === 0) {
-    return null
+    return { bpm: null, peakCount: 0 }
   }
   
   peaks.sort((a, b) => b.value - a.value)
   
+  // Log top peaks
+  const topPeaks = peaks.slice(0, 5).map(p => `${p.bpm.toFixed(1)} (${p.value.toFixed(3)})`).join(', ')
+  console.log(`[BPM] Top peaks: ${topPeaks}`)
+  
   const bestBPM = peaks[0].bpm
   
+  // Check for half/double time
   for (const candidate of peaks.slice(1, 5)) {
     if (Math.abs(candidate.bpm - bestBPM * 2) < 5) {
-      return candidate.bpm
+      return { bpm: candidate.bpm, peakCount: peaks.length }
     }
     if (Math.abs(candidate.bpm - bestBPM / 2) < 5) {
-      return candidate.bpm
+      return { bpm: candidate.bpm, peakCount: peaks.length }
     }
   }
   
-  return bestBPM
+  return { bpm: bestBPM, peakCount: peaks.length }
 }

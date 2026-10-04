@@ -245,7 +245,6 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     ? pathname
     : `${pathname}/project.json`
   
-  console.log('[openProject] Fetching project.json from:', projectJsonPath)
   const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(projectJsonPath)}`, {
     headers: { 'x-musicalia-key': musicaliaKey }
   })
@@ -259,10 +258,10 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     if (!oldFormatResponse.ok) {
       let errorMessage = 'Error al abrir proyecto'
       
-      const contentType = oldFormatResponse.headers.get('content-type')
+      const contentType = metadataResponse.headers.get('content-type')
       if (contentType?.includes('application/json')) {
         try {
-          const errorData = await oldFormatResponse.json()
+          const errorData = await metadataResponse.json()
           if (errorData.error) {
             errorMessage = errorData.error === 'Archivo no encontrado' 
               ? 'El proyecto no existe en la nube'
@@ -329,31 +328,13 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     if (!t.clip || !t.clip.audioFile) return { ...t, clip: null }
     
     const audioPath = `${basePathname}/${t.clip.audioFile}`
-    console.log('[openProject] Fetching audio for track', t.name, 'from:', audioPath)
     const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioPath)}`, {
       headers: { 'x-musicalia-key': musicaliaKey! }
     })
     
     if (!audioResponse.ok) {
-      let errorMessage = `Error al cargar audio: ${t.name}`
-      
-      const contentType = audioResponse.headers.get('content-type')
-      if (contentType?.includes('application/json')) {
-        try {
-          const errorData = await audioResponse.json()
-          if (errorData.error) {
-            if (errorData.error === 'Archivo no encontrado') {
-              errorMessage = `Audio no encontrado para ${t.name}`
-            } else {
-              errorMessage = `Error al cargar ${t.name}: ${errorData.error}`
-            }
-          }
-        } catch {
-        }
-      }
-      
-      console.error(errorMessage, '- Path requested:', audioPath)
-      return { ...t, clip: null }
+      console.error(`Audio no encontrado para ${t.name} en ${audioPath}`)
+      throw new Error(`Audio no encontrado para ${t.name}`)
     }
     
     const audioBuffer = await new AudioContext().decodeAudioData(await audioResponse.arrayBuffer())

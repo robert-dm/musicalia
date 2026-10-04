@@ -23,6 +23,13 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
     
     console.log(`[BPM] Analyzing ${audioToAnalyze.length} samples at ${sampleRate}Hz (${(audioToAnalyze.length / sampleRate).toFixed(1)}s)`)
     
+    // Check if audio is too quiet (likely silence)
+    const rms = Math.sqrt(audioToAnalyze.reduce((sum, val) => sum + val * val, 0) / audioToAnalyze.length)
+    if (rms < 0.001) {
+      console.log(`[BPM] Audio too quiet (RMS: ${rms.toFixed(6)}), skipping detection`)
+      return { bpm: null, confidence: 0 }
+    }
+    
     // Compute onset strength envelope
     const onsetEnvelope = computeOnsetEnvelope(audioToAnalyze, sampleRate)
     

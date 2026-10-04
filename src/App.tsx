@@ -17,7 +17,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0048b'
+const APP_VERSION = '0.0049b'
 
 interface Clip {
   player: Tone.Player
@@ -703,7 +703,9 @@ function App() {
     Tone.getTransport().bpm.value = bpm
     
     const countInSeconds = getCountInSeconds()
-    const startTime = isPaused ? playheadPosition : (loopStart !== null && isLoopEnabled ? loopStart : 0)
+    // When loop is enabled and marked, always start from loop start
+    // Otherwise, resume from playhead if paused, or start from beginning
+    const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : (isPaused ? playheadPosition : 0)
     
     // Configure Transport loop
     if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
@@ -774,10 +776,11 @@ function App() {
         if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
           if (currentTime < lastLoopCheck && lastLoopCheck > loopStart) {
             // Transport looped, restart players at loop start
+            // Check player.state instead of isPlaying to avoid stale closure
             const loopInsideGap = loopStart < countInSeconds
             
             trackStates.forEach(track => {
-              if (track.clip?.isPlaying) {
+              if (track.clip && track.clip.player.state === 'started') {
                 track.clip.player.stop()
                 const bufferOffset = Math.max(0, loopStart - countInSeconds)
                 const offset = bufferOffset % track.clip.buffer.duration
@@ -790,7 +793,7 @@ function App() {
           // End of timeline, restart from beginning
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
-            if (track.clip?.isPlaying) {
+            if (track.clip && track.clip.player.state === 'started') {
               track.clip.player.stop()
               const when = Tone.now() + countInSeconds
               track.clip.player.start(when)
@@ -1191,7 +1194,9 @@ function App() {
     const clickTime = percentage * maxDuration
 
     seekToPosition(clickTime)
-    if (!isPlaying && !isPaused) {
+    // Only auto-start playback if not in loop mode
+    // In loop mode, clicking is for marking the loop zone, not for starting playback
+    if (!isPlaying && !isPaused && !isLoopEnabled) {
       handleLaneClick(trackIndex)
     }
   }

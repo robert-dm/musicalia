@@ -44,7 +44,8 @@ export async function GET(request: NextRequest) {
       if (pathParts.length >= 2 && pathParts[0] === 'musicalia') {
         const projectName = pathParts[1]
         
-        if (pathParts.length === 3 && pathParts[2] === 'project.json') {
+        // Match project.json or project-*.json or similar patterns
+        if (pathParts.length === 3 && (pathParts[2] === 'project.json' || pathParts[2].match(/^project[^/]*\.json$/))) {
           const folderPath = `${pathParts[0]}/${pathParts[1]}`
           const existing = projectMap.get(projectName)
           if (!existing || blob.uploadedAt > existing.uploadedAt) {

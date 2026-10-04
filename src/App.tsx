@@ -17,7 +17,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0048b'
+const APP_VERSION = '0.00XXb' // Will be updated after PR is created
 
 interface Clip {
   player: Tone.Player
@@ -703,7 +703,9 @@ function App() {
     Tone.getTransport().bpm.value = bpm
     
     const countInSeconds = getCountInSeconds()
-    const startTime = isPaused ? playheadPosition : (loopStart !== null && isLoopEnabled ? loopStart : 0)
+    // When loop is enabled and marked, always start from loop start
+    // Otherwise, resume from playhead if paused, or start from beginning
+    const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : (isPaused ? playheadPosition : 0)
     
     // Configure Transport loop
     if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
@@ -1191,7 +1193,9 @@ function App() {
     const clickTime = percentage * maxDuration
 
     seekToPosition(clickTime)
-    if (!isPlaying && !isPaused) {
+    // Only auto-start playback if not in loop mode
+    // In loop mode, clicking is for marking the loop zone, not for starting playback
+    if (!isPlaying && !isPaused && !isLoopEnabled) {
       handleLaneClick(trackIndex)
     }
   }

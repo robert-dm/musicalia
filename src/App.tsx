@@ -17,7 +17,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0050b'
+const APP_VERSION = '0.0051b'
 
 interface Clip {
   player: Tone.Player
@@ -51,7 +51,6 @@ function App() {
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
-  const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([])
   const [sidebarWidth, setSidebarWidth] = useState(220)
   const [isResizing, setIsResizing] = useState(false)
   const [playheadPosition, setPlayheadPosition] = useState(0)
@@ -761,7 +760,7 @@ function App() {
     }
     
     console.log('[DEBUG] handlePlay: audio initialized, gains:', trackGainsRef.current.length)
-    console.log('[DEBUG] trackStates with clips:', trackStates.filter(t => t.clip).length)
+    console.log('[DEBUG] trackStates with clips:', trackStates.filter(t => t.clips.length > 0).length)
     
     Tone.getTransport().bpm.value = bpm
     
@@ -2057,7 +2056,6 @@ function App() {
                       </div>
                     )
                   })}
-                  </div>
                   {(loopStart !== null || tempLoopStart !== null) && (
                     <div 
                       className="loop-marker loop-start draggable"

@@ -746,6 +746,7 @@ function App() {
     setIsPaused(false)
     
     let lastUpdateTime = 0
+    let lastLoopCheck = startTime
     const updatePlayhead = (timestamp: number) => {
       if (Tone.getTransport().state === 'started') {
         if (timestamp - lastUpdateTime < 50) {
@@ -756,8 +757,24 @@ function App() {
         
         const currentTime = Tone.getTransport().seconds
         
-        // Check if we need to restart players at end of non-looped timeline
-        if (!isLoopEnabled && maxDuration > 0 && currentTime >= maxDuration) {
+        // Detect loop: if current time jumped backwards, restart players
+        if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
+          if (currentTime < lastLoopCheck && lastLoopCheck > loopStart) {
+            // Transport looped, restart players at loop start
+            const loopInsideGap = loopStart < countInSeconds
+            
+            trackStates.forEach(track => {
+              if (track.clip?.isPlaying) {
+                track.clip.player.stop()
+                const bufferOffset = Math.max(0, loopStart - countInSeconds)
+                const offset = bufferOffset % track.clip.buffer.duration
+                const when = loopInsideGap ? Tone.now() + (countInSeconds - loopStart) : Tone.now()
+                track.clip.player.start(when, offset)
+              }
+            })
+          }
+        } else if (!isLoopEnabled && maxDuration > 0 && currentTime >= maxDuration) {
+          // End of timeline, restart from beginning
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
             if (track.clip?.isPlaying) {
@@ -768,6 +785,7 @@ function App() {
           })
         }
         
+        lastLoopCheck = currentTime
         setPlayheadPosition(currentTime)
         playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
       }

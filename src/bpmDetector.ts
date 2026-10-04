@@ -15,10 +15,16 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
     const sampleRate = audioBuffer.sampleRate
     const mono = convertToMono(audioBuffer)
     
-    const energyEnvelope = computeEnergyEnvelope(mono, sampleRate)
-    const autocorr = computeAutocorrelation(energyEnvelope)
+    const maxAnalysisSamples = sampleRate * 90
+    const audioToAnalyze = mono.length > maxAnalysisSamples 
+      ? mono.slice(0, maxAnalysisSamples) 
+      : mono
     
-    const bpm = findBPMFromAutocorrelation(autocorr, sampleRate, energyEnvelope.length)
+    const energyEnvelope = computeEnergyEnvelope(audioToAnalyze, sampleRate)
+    const diffEnvelope = computeDifferenceEnvelope(energyEnvelope)
+    const autocorr = computeAutocorrelation(diffEnvelope)
+    
+    const bpm = findBPMFromAutocorrelation(autocorr, sampleRate)
     
     if (bpm && bpm >= 60 && bpm <= 200) {
       return { bpm: Math.round(bpm), confidence: 0.8 }
@@ -44,8 +50,8 @@ function convertToMono(audioBuffer: AudioBuffer): Float32Array {
 }
 
 function computeEnergyEnvelope(audio: Float32Array, sampleRate: number): Float32Array {
-  const windowSize = Math.floor(sampleRate * 0.05)
-  const hopSize = Math.floor(windowSize / 2)
+  const windowSize = Math.floor(sampleRate * 0.01)
+  const hopSize = Math.floor(sampleRate * 0.01)
   const numFrames = Math.floor((audio.length - windowSize) / hopSize)
   const envelope = new Float32Array(numFrames)
   
@@ -62,6 +68,18 @@ function computeEnergyEnvelope(audio: Float32Array, sampleRate: number): Float32
   }
   
   return envelope
+}
+
+function computeDifferenceEnvelope(envelope: Float32Array): Float32Array {
+  const diff = new Float32Array(envelope.length)
+  diff[0] = 0
+  
+  for (let i = 1; i < envelope.length; i++) {
+    const delta = envelope[i] - envelope[i - 1]
+    diff[i] = delta > 0 ? delta : 0
+  }
+  
+  return diff
 }
 
 function computeAutocorrelation(signal: Float32Array): Float32Array {
@@ -91,29 +109,43 @@ function computeAutocorrelation(signal: Float32Array): Float32Array {
   return autocorr
 }
 
-export function findBPMFromAutocorrelation(autocorr: Float32Array, sampleRate: number, _envelopeLength: number): number | null {
+function findBPMFromAutocorrelation(autocorr: Float32Array, sampleRate: number): number | null {
   const minBPM = 60
   const maxBPM = 200
   
-  const hopSize = Math.floor(sampleRate * 0.05) / 2
+  const hopSize = Math.floor(sampleRate * 0.01)
   const minLag = Math.floor((60 / maxBPM) * sampleRate / hopSize)
   const maxLag = Math.floor((60 / minBPM) * sampleRate / hopSize)
   
-  let maxValue = -Infinity
-  let maxIndex = -1
+  const peaks: Array<{ index: number, value: number, bpm: number }> = []
   
-  for (let i = minLag; i < Math.min(maxLag, autocorr.length); i++) {
-    if (autocorr[i] > maxValue) {
-      maxValue = autocorr[i]
-      maxIndex = i
+  for (let i = minLag + 1; i < Math.min(maxLag - 1, autocorr.length - 1); i++) {
+    if (autocorr[i] > autocorr[i - 1] && autocorr[i] > autocorr[i + 1] && autocorr[i] > 0.1) {
+      const lagInSeconds = (i * hopSize) / sampleRate
+      const bpm = 60 / lagInSeconds
+      
+      if (bpm >= minBPM && bpm <= maxBPM) {
+        peaks.push({ index: i, value: autocorr[i], bpm })
+      }
     }
   }
   
-  if (maxIndex > 0 && maxValue > 0.3) {
-    const lagInSeconds = (maxIndex * hopSize) / sampleRate
-    const bpm = 60 / lagInSeconds
-    return bpm
+  if (peaks.length === 0) {
+    return null
   }
   
-  return null
+  peaks.sort((a, b) => b.value - a.value)
+  
+  const bestBPM = peaks[0].bpm
+  
+  for (const candidate of peaks.slice(1, 5)) {
+    if (Math.abs(candidate.bpm - bestBPM * 2) < 5) {
+      return candidate.bpm
+    }
+    if (Math.abs(candidate.bpm - bestBPM / 2) < 5) {
+      return candidate.bpm
+    }
+  }
+  
+  return bestBPM
 }

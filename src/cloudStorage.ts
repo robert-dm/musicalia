@@ -241,17 +241,35 @@ export async function listCloudProjects(): Promise<ProjectMetadata[]> {
 export async function openProjectFromCloud(pathname: string): Promise<any> {
   if (!musicaliaKey) throw new Error('Clave de Musicalia no configurada')
   
-  const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(`${pathname}/project.json`)}`, {
+  const projectJsonPath = pathname.endsWith('/project.json') || pathname.endsWith('.musicalia')
+    ? pathname
+    : `${pathname}/project.json`
+  
+  const metadataResponse = await fetch(`/api/download?path=${encodeURIComponent(projectJsonPath)}`, {
     headers: { 'x-musicalia-key': musicaliaKey }
   })
   
   if (!metadataResponse.ok) {
-    const oldFormatResponse = await fetch(`/api/download?path=${encodeURIComponent(`${pathname}.musicalia`)}`, {
+    const legacyPath = pathname.endsWith('.musicalia') ? pathname : `${pathname}.musicalia`
+    const oldFormatResponse = await fetch(`/api/download?path=${encodeURIComponent(legacyPath)}`, {
       headers: { 'x-musicalia-key': musicaliaKey }
     })
     
     if (!oldFormatResponse.ok) {
-      throw new Error('Error al abrir proyecto')
+      let errorMessage = 'Error al abrir proyecto'
+      
+      const contentType = oldFormatResponse.headers.get('content-type')
+      if (contentType?.includes('application/json')) {
+        try {
+          const errorData = await oldFormatResponse.json()
+          if (errorData.error) {
+            errorMessage = errorData.error
+          }
+        } catch {
+        }
+      }
+      
+      throw new Error(errorMessage)
     }
     
     const buffer = await oldFormatResponse.arrayBuffer()
@@ -300,15 +318,33 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
   
   const projectJson = await metadataResponse.json()
   
+  const basePathname = pathname.endsWith('/project.json') 
+    ? pathname.replace('/project.json', '')
+    : pathname
+  
   const tracks = await Promise.all(projectJson.tracks.map(async (t: any) => {
     if (!t.clip || !t.clip.audioFile) return { ...t, clip: null }
     
-    const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(`${pathname}/${t.clip.audioFile}`)}`, {
+    const audioPath = `${basePathname}/${t.clip.audioFile}`
+    const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioPath)}`, {
       headers: { 'x-musicalia-key': musicaliaKey! }
     })
     
     if (!audioResponse.ok) {
-      console.error('Failed to load audio for track:', t.name)
+      let errorMessage = `Error al cargar audio: ${t.name}`
+      
+      const contentType = audioResponse.headers.get('content-type')
+      if (contentType?.includes('application/json')) {
+        try {
+          const errorData = await audioResponse.json()
+          if (errorData.error) {
+            errorMessage = `Error al cargar ${t.name}: ${errorData.error}`
+          }
+        } catch {
+        }
+      }
+      
+      console.error(errorMessage)
       return { ...t, clip: null }
     }
     

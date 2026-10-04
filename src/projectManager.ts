@@ -5,6 +5,8 @@ interface ProjectState {
   loopStart: number | null
   loopEnd: number | null
   playheadPosition: number
+  metronomeEnabled?: boolean
+  isLoopEnabled?: boolean
   tracks: {
     name: string
     mute: boolean
@@ -14,6 +16,7 @@ interface ProjectState {
       fileName: string
       startPosition: number
       audioBufferKey: string
+      offsetSeconds?: number
     } | null
   }[]
 }

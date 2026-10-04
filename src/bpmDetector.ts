@@ -31,7 +31,7 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
     
     console.log(`[BPM] Found ${peaks.length} onset peaks`)
     
-    if (peaks.length < 8) {
+    if (peaks.length < 4) {
       console.log('[BPM] Too few peaks detected for reliable BPM estimation')
       return { bpm: null, confidence: 0 }
     }
@@ -116,7 +116,8 @@ function findPeaks(envelope: Float32Array, sampleRate: number): number[] {
   // Compute adaptive threshold (median + factor)
   const sorted = Array.from(envelope).sort((a, b) => a - b)
   const median = sorted[Math.floor(sorted.length / 2)]
-  const threshold = Math.max(0.05, median * 1.5)
+  // Use lower threshold for better detection in quieter music
+  const threshold = Math.max(0.03, median * 1.2)
   
   // Minimum distance between peaks (prevents double-detections)
   const minPeakDistance = Math.floor(sampleRate * 0.15 / hopSize) // 150ms minimum
@@ -153,7 +154,7 @@ function estimateBPMFromPeaks(peaks: number[], sampleRate: number): number | nul
     }
   }
   
-  if (intervals.length < 4) return null
+  if (intervals.length < 2) return null
   
   // Build histogram of intervals (rounded to nearest 0.01s)
   const histogram = new Map<number, number>()

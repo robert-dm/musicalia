@@ -12,12 +12,20 @@ interface ProjectState {
     mute: boolean
     solo: boolean
     volume: number
-    clip: {
+    clip?: {
       fileName: string
       startPosition: number
       audioBufferKey: string
       offsetSeconds?: number
+      id?: string
     } | null
+    clips?: {
+      fileName: string
+      startPosition: number
+      audioBufferKey: string
+      offsetSeconds: number
+      id: string
+    }[]
   }[]
 }
 

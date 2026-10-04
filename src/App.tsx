@@ -43,6 +43,8 @@ function App() {
   const [metronomeEnabled, setMetronomeEnabled] = useState(true)
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
   const [countInBars, _setCountInBars] = useState(2)
+  const [isMarkingLoopStart, setIsMarkingLoopStart] = useState(false)
+  const [isMarkingLoopEnd, setIsMarkingLoopEnd] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
   const trackGainsRef = useRef<Tone.Gain[]>([])
@@ -1124,20 +1126,17 @@ function App() {
     const maxDuration = getMaxDuration()
     const clickTime = percentage * maxDuration
 
-    if (e.shiftKey) {
-      if (loopStart === null) {
-        setLoopStart(clickTime)
-        setIsLoopEnabled(true)
-      } else if (loopEnd === null) {
-        if (clickTime > loopStart) {
-          setLoopEnd(clickTime)
-        } else {
-          setLoopEnd(loopStart)
-          setLoopStart(clickTime)
-        }
-      } else {
-        setLoopStart(clickTime)
+    if (isMarkingLoopStart) {
+      setLoopStart(clickTime)
+      setIsLoopEnabled(true)
+      setIsMarkingLoopStart(false)
+      if (loopEnd !== null && clickTime > loopEnd) {
         setLoopEnd(null)
+      }
+    } else if (isMarkingLoopEnd) {
+      if (loopStart !== null && clickTime > loopStart) {
+        setLoopEnd(clickTime)
+        setIsMarkingLoopEnd(false)
       }
     } else {
       seekToPosition(clickTime)
@@ -1151,6 +1150,21 @@ function App() {
     setLoopStart(null)
     setLoopEnd(null)
     setIsLoopEnabled(false)
+    setIsMarkingLoopStart(false)
+    setIsMarkingLoopEnd(false)
+  }
+
+  const handleMarkLoopStart = () => {
+    setIsMarkingLoopStart(true)
+    setIsMarkingLoopEnd(false)
+  }
+
+  const handleMarkLoopEnd = () => {
+    if (loopStart === null) {
+      return
+    }
+    setIsMarkingLoopEnd(true)
+    setIsMarkingLoopStart(false)
   }
 
   useEffect(() => {
@@ -1287,10 +1301,29 @@ function App() {
           <button
             className={`transport-button ${isLoopEnabled ? 'active' : ''}`}
             onClick={() => setIsLoopEnabled(!isLoopEnabled)}
-            title="Loop (Shift+Click en timeline para marcar zona)"
+            title="Loop (marca inicio y fin en el timeline)"
           >
             🔁 Loop
           </button>
+          {isLoopEnabled && (
+            <>
+              <button
+                className={`transport-button ${isMarkingLoopStart ? 'active' : ''}`}
+                onClick={handleMarkLoopStart}
+                title="Click aquí, luego en el timeline para marcar inicio"
+              >
+                ⏮ Inicio
+              </button>
+              <button
+                className={`transport-button ${isMarkingLoopEnd ? 'active' : ''}`}
+                onClick={handleMarkLoopEnd}
+                disabled={loopStart === null}
+                title="Click aquí, luego en el timeline para marcar fin"
+              >
+                ⏭ Fin
+              </button>
+            </>
+          )}
         </div>
         <div className="time-display">
           <span className="time-label">Time</span>
@@ -1301,7 +1334,7 @@ function App() {
         {isLoopEnabled && (loopStart !== null || loopEnd !== null) && (
           <div className="loop-indicator">
             <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
-            <button className="transport-button clear-loop" onClick={clearLoop}>Clear</button>
+            <button className="transport-button clear-loop" onClick={clearLoop}>Borrar</button>
           </div>
         )}
         <div className="bpm-control">
@@ -1472,6 +1505,43 @@ function App() {
           title="Drag to resize sidebar"
         />
         <div className="lanes-column">
+          <div className="bar-ruler">
+            {(() => {
+              const maxDuration = getMaxDuration()
+              if (maxDuration === 0) return null
+              
+              const secondsPerBeat = 60 / bpm
+              const beatsPerBar = 4
+              const secondsPerBar = secondsPerBeat * beatsPerBar
+              const totalBars = Math.ceil(maxDuration / secondsPerBar)
+              const bars = []
+              
+              for (let bar = 0; bar <= totalBars; bar++) {
+                const barTime = bar * secondsPerBar
+                const position = (barTime / maxDuration) * 100
+                
+                if (position <= 100) {
+                  bars.push(
+                    <div key={bar} className="bar-marker" style={{ left: `${position}%` }}>
+                      <span className="bar-number">{bar + 1}</span>
+                    </div>
+                  )
+                  
+                  for (let beat = 1; beat < beatsPerBar; beat++) {
+                    const beatTime = barTime + beat * secondsPerBeat
+                    const beatPosition = (beatTime / maxDuration) * 100
+                    if (beatPosition <= 100) {
+                      bars.push(
+                        <div key={`${bar}-${beat}`} className="beat-marker" style={{ left: `${beatPosition}%` }} />
+                      )
+                    }
+                  }
+                }
+              }
+              
+              return bars
+            })()}
+          </div>
           {trackStates.map((trackState, trackIndex) => (
             <div 
               key={trackIndex}
@@ -1489,7 +1559,8 @@ function App() {
                   >
                     <div className="clip-info">
                       <span className="clip-filename">{trackState.clip.fileName}</span>
-                      <span className="clip-hint">Shift+Click para marcar loop</span>
+                      {isMarkingLoopStart && <span className="clip-hint">👆 Click aquí para marcar inicio de loop</span>}
+                      {isMarkingLoopEnd && <span className="clip-hint">👆 Click aquí para marcar fin de loop</span>}
                     </div>
                     <canvas
                       ref={(el) => {

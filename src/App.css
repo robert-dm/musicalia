@@ -207,6 +207,42 @@
   overflow: auto;
 }
 
+.bar-ruler {
+  position: relative;
+  height: 32px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.bar-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #555;
+  pointer-events: none;
+}
+
+.bar-number {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 11px;
+  color: #0a5;
+  font-weight: 600;
+  user-select: none;
+}
+
+.beat-marker {
+  position: absolute;
+  top: 20px;
+  bottom: 0;
+  width: 1px;
+  background: #333;
+  pointer-events: none;
+}
+
 .track-content {
   background: #1e1e1e;
   cursor: pointer;

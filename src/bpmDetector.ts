@@ -1,5 +1,5 @@
 /**
- * BPM detection using autocorrelation and onset detection
+ * BPM detection using onset detection and inter-onset interval analysis
  */
 
 export interface BPMDetectionResult {
@@ -15,16 +15,25 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
     const sampleRate = audioBuffer.sampleRate
     const mono = convertToMono(audioBuffer)
     
-    const maxAnalysisSamples = sampleRate * 90
+    // Analyze first 30 seconds for performance
+    const maxAnalysisSamples = sampleRate * 30
     const audioToAnalyze = mono.length > maxAnalysisSamples 
       ? mono.slice(0, maxAnalysisSamples) 
       : mono
     
-    const energyEnvelope = computeEnergyEnvelope(audioToAnalyze, sampleRate)
-    const diffEnvelope = computeDifferenceEnvelope(energyEnvelope)
-    const autocorr = computeAutocorrelation(diffEnvelope)
+    // Compute onset strength envelope
+    const onsetEnvelope = computeOnsetEnvelope(audioToAnalyze, sampleRate)
     
-    const bpm = findBPMFromAutocorrelation(autocorr, sampleRate)
+    // Find peaks (potential beats)
+    const peaks = findPeaks(onsetEnvelope, sampleRate)
+    
+    if (peaks.length < 8) {
+      // Not enough beats detected
+      return { bpm: null, confidence: 0 }
+    }
+    
+    // Analyze inter-onset intervals to find tempo
+    const bpm = estimateBPMFromPeaks(peaks, sampleRate)
     
     if (bpm && bpm >= 60 && bpm <= 200) {
       return { bpm: Math.round(bpm), confidence: 0.8 }
@@ -49,103 +58,126 @@ function convertToMono(audioBuffer: AudioBuffer): Float32Array {
   return mono
 }
 
-function computeEnergyEnvelope(audio: Float32Array, sampleRate: number): Float32Array {
-  const windowSize = Math.floor(sampleRate * 0.01)
-  const hopSize = Math.floor(sampleRate * 0.01)
+/**
+ * Compute onset strength envelope using spectral flux approximation
+ */
+function computeOnsetEnvelope(audio: Float32Array, sampleRate: number): Float32Array {
+  // Use smaller hop size for better temporal resolution
+  const hopSize = Math.floor(sampleRate * 0.005) // 5ms
+  const windowSize = Math.floor(sampleRate * 0.04) // 40ms
   const numFrames = Math.floor((audio.length - windowSize) / hopSize)
+  
   const envelope = new Float32Array(numFrames)
+  let prevEnergy = 0
   
   for (let i = 0; i < numFrames; i++) {
     const start = i * hopSize
     let energy = 0
     
+    // Compute RMS energy with emphasis on higher frequencies (simple spectral flux approximation)
     for (let j = 0; j < windowSize; j++) {
       const sample = audio[start + j]
-      energy += sample * sample
+      // Emphasize transients by using absolute value and power
+      energy += Math.abs(sample) ** 1.5
     }
     
-    envelope[i] = Math.sqrt(energy / windowSize)
+    energy = energy / windowSize
+    
+    // Positive difference = onset strength
+    const onset = Math.max(0, energy - prevEnergy * 0.9)
+    envelope[i] = onset
+    prevEnergy = energy
+  }
+  
+  // Normalize
+  const maxVal = Math.max(...Array.from(envelope))
+  if (maxVal > 0) {
+    for (let i = 0; i < envelope.length; i++) {
+      envelope[i] /= maxVal
+    }
   }
   
   return envelope
 }
 
-function computeDifferenceEnvelope(envelope: Float32Array): Float32Array {
-  const diff = new Float32Array(envelope.length)
-  diff[0] = 0
+/**
+ * Find peaks in onset envelope using adaptive thresholding
+ */
+function findPeaks(envelope: Float32Array, sampleRate: number): number[] {
+  const hopSize = Math.floor(sampleRate * 0.005)
+  const peaks: number[] = []
   
-  for (let i = 1; i < envelope.length; i++) {
-    const delta = envelope[i] - envelope[i - 1]
-    diff[i] = delta > 0 ? delta : 0
+  // Compute adaptive threshold (median + factor)
+  const sorted = Array.from(envelope).sort((a, b) => a - b)
+  const median = sorted[Math.floor(sorted.length / 2)]
+  const threshold = Math.max(0.05, median * 1.5)
+  
+  // Minimum distance between peaks (prevents double-detections)
+  const minPeakDistance = Math.floor(sampleRate * 0.15 / hopSize) // 150ms minimum
+  let lastPeakIdx = -minPeakDistance
+  
+  for (let i = 1; i < envelope.length - 1; i++) {
+    if (envelope[i] > threshold && 
+        envelope[i] >= envelope[i - 1] && 
+        envelope[i] >= envelope[i + 1] &&
+        i - lastPeakIdx >= minPeakDistance) {
+      peaks.push(i)
+      lastPeakIdx = i
+    }
   }
   
-  return diff
+  return peaks
 }
 
-function computeAutocorrelation(signal: Float32Array): Float32Array {
-  const maxLag = Math.min(signal.length, Math.floor(signal.length / 2))
-  const autocorr = new Float32Array(maxLag)
+/**
+ * Estimate BPM from peak positions using inter-onset interval analysis
+ */
+function estimateBPMFromPeaks(peaks: number[], sampleRate: number): number | null {
+  if (peaks.length < 2) return null
   
-  const mean = signal.reduce((sum, val) => sum + val, 0) / signal.length
+  const hopSize = Math.floor(sampleRate * 0.005)
   
-  for (let lag = 0; lag < maxLag; lag++) {
-    let sum = 0
-    let count = 0
-    
-    for (let i = 0; i < signal.length - lag; i++) {
-      sum += (signal[i] - mean) * (signal[i + lag] - mean)
-      count++
-    }
-    
-    autocorr[lag] = count > 0 ? sum / count : 0
-  }
-  
-  if (autocorr[0] > 0) {
-    for (let i = 0; i < autocorr.length; i++) {
-      autocorr[i] /= autocorr[0]
+  // Compute all inter-onset intervals (in seconds)
+  const intervals: number[] = []
+  for (let i = 1; i < peaks.length; i++) {
+    const interval = (peaks[i] - peaks[i - 1]) * hopSize / sampleRate
+    // Only consider reasonable intervals (60-200 BPM range, including half/double time)
+    if (interval >= 0.3 && interval <= 2.0) {
+      intervals.push(interval)
     }
   }
   
-  return autocorr
-}
-
-function findBPMFromAutocorrelation(autocorr: Float32Array, sampleRate: number): number | null {
-  const minBPM = 60
-  const maxBPM = 200
+  if (intervals.length < 4) return null
   
-  const hopSize = Math.floor(sampleRate * 0.01)
-  const minLag = Math.floor((60 / maxBPM) * sampleRate / hopSize)
-  const maxLag = Math.floor((60 / minBPM) * sampleRate / hopSize)
+  // Build histogram of intervals (rounded to nearest 0.01s)
+  const histogram = new Map<number, number>()
+  for (const interval of intervals) {
+    const rounded = Math.round(interval * 100) / 100
+    histogram.set(rounded, (histogram.get(rounded) || 0) + 1)
+  }
   
-  const peaks: Array<{ index: number, value: number, bpm: number }> = []
+  // Find most common interval
+  let bestInterval = 0
+  let bestCount = 0
   
-  for (let i = minLag + 1; i < Math.min(maxLag - 1, autocorr.length - 1); i++) {
-    if (autocorr[i] > autocorr[i - 1] && autocorr[i] > autocorr[i + 1] && autocorr[i] > 0.1) {
-      const lagInSeconds = (i * hopSize) / sampleRate
-      const bpm = 60 / lagInSeconds
-      
-      if (bpm >= minBPM && bpm <= maxBPM) {
-        peaks.push({ index: i, value: autocorr[i], bpm })
-      }
+  for (const [interval, count] of histogram.entries()) {
+    if (count > bestCount) {
+      bestCount = count
+      bestInterval = interval
     }
   }
   
-  if (peaks.length === 0) {
-    return null
+  // Convert interval to BPM
+  let bpm = 60 / bestInterval
+  
+  // Handle half-time/double-time ambiguity
+  // Prefer tempo in the 80-160 range
+  while (bpm < 70 && bpm > 0) {
+    bpm *= 2
+  }
+  while (bpm > 180) {
+    bpm /= 2
   }
   
-  peaks.sort((a, b) => b.value - a.value)
-  
-  const bestBPM = peaks[0].bpm
-  
-  for (const candidate of peaks.slice(1, 5)) {
-    if (Math.abs(candidate.bpm - bestBPM * 2) < 5) {
-      return candidate.bpm
-    }
-    if (Math.abs(candidate.bpm - bestBPM / 2) < 5) {
-      return candidate.bpm
-    }
-  }
-  
-  return bestBPM
+  return bpm
 }

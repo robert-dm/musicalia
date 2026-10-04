@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>BPM Detector Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #0f0;
+    }
+    .test-result {
+      margin: 10px 0;
+      padding: 10px;
+      border: 1px solid #333;
+    }
+    .pass { background: #004400; }
+    .fail { background: #440000; }
+    button {
+      padding: 10px 20px;
+      margin: 5px;
+      background: #333;
+      color: #0f0;
+      border: 1px solid #0f0;
+      cursor: pointer;
+      font-family: monospace;
+    }
+    button:hover {
+      background: #0f0;
+      color: #000;
+    }
+  </style>
+</head>
+<body>
+  <h1>BPM Detector Test Suite</h1>
+  <button onclick="runTests()">Run Tests</button>
+  <div id="results"></div>
+
+  <script type="module">
+    const detectBPM = (function() {
+      // Inline minimal detector for testing
+      function convertToMono(audioBuffer) {
+        const left = audioBuffer.getChannelData(0)
+        const right = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : left
+        const mono = new Float32Array(audioBuffer.length)
+        
+        for (let i = 0; i < mono.length; i++) {
+          mono[i] = (left[i] + right[i]) / 2
+        }
+        
+        return mono
+      }
+
+      function computeOnsetEnvelope(audio, sampleRate) {
+        const hopSize = Math.floor(sampleRate * 0.005)
+        const windowSize = Math.floor(sampleRate * 0.04)
+        const numFrames = Math.floor((audio.length - windowSize) / hopSize)
+        
+        const envelope = new Float32Array(numFrames)
+        let prevEnergy = 0
+        
+        for (let i = 0; i < numFrames; i++) {
+          const start = i * hopSize
+          let energy = 0
+          
+          for (let j = 0; j < windowSize; j++) {
+            const sample = audio[start + j]
+            energy += Math.abs(sample) ** 1.5
+          }
+          
+          energy = energy / windowSize
+          const onset = Math.max(0, energy - prevEnergy * 0.9)
+          envelope[i] = onset
+          prevEnergy = energy
+        }
+        
+        const maxVal = Math.max(...Array.from(envelope))
+        if (maxVal > 0) {
+          for (let i = 0; i < envelope.length; i++) {
+            envelope[i] /= maxVal
+          }
+        }
+        
+        return envelope
+      }
+
+      function findPeaks(envelope, sampleRate) {
+        const hopSize = Math.floor(sampleRate * 0.005)
+        const peaks = []
+        
+        const sorted = Array.from(envelope).sort((a, b) => a - b)
+        const median = sorted[Math.floor(sorted.length / 2)]
+        const threshold = Math.max(0.05, median * 1.5)
+        
+        const minPeakDistance = Math.floor(sampleRate * 0.15 / hopSize)
+        let lastPeakIdx = -minPeakDistance
+        
+        for (let i = 1; i < envelope.length - 1; i++) {
+          if (envelope[i] > threshold && 
+              envelope[i] >= envelope[i - 1] && 
+              envelope[i] >= envelope[i + 1] &&
+              i - lastPeakIdx >= minPeakDistance) {
+            peaks.push(i)
+            lastPeakIdx = i
+          }
+        }
+        
+        return peaks
+      }
+
+      function estimateBPMFromPeaks(peaks, sampleRate) {
+        if (peaks.length < 2) return null
+        
+        const hopSize = Math.floor(sampleRate * 0.005)
+        const intervals = []
+        
+        for (let i = 1; i < peaks.length; i++) {
+          const interval = (peaks[i] - peaks[i - 1]) * hopSize / sampleRate
+          if (interval >= 0.3 && interval <= 2.0) {
+            intervals.push(interval)
+          }
+        }
+        
+        if (intervals.length < 4) return null
+        
+        const histogram = new Map()
+        for (const interval of intervals) {
+          const rounded = Math.round(interval * 100) / 100
+          histogram.set(rounded, (histogram.get(rounded) || 0) + 1)
+        }
+        
+        let bestInterval = 0
+        let bestCount = 0
+        
+        for (const [interval, count] of histogram.entries()) {
+          if (count > bestCount) {
+            bestCount = count
+            bestInterval = interval
+          }
+        }
+        
+        let bpm = 60 / bestInterval
+        
+        while (bpm < 70 && bpm > 0) {
+          bpm *= 2
+        }
+        while (bpm > 180) {
+          bpm /= 2
+        }
+        
+        return bpm
+      }
+
+      return async function detectBPM(audioBuffer) {
+        try {
+          const sampleRate = audioBuffer.sampleRate
+          const mono = convertToMono(audioBuffer)
+          
+          const maxAnalysisSamples = sampleRate * 30
+          const audioToAnalyze = mono.length > maxAnalysisSamples 
+            ? mono.slice(0, maxAnalysisSamples) 
+            : mono
+          
+          const onsetEnvelope = computeOnsetEnvelope(audioToAnalyze, sampleRate)
+          const peaks = findPeaks(onsetEnvelope, sampleRate)
+          
+          if (peaks.length < 8) {
+            return { bpm: null, confidence: 0 }
+          }
+          
+          const bpm = estimateBPMFromPeaks(peaks, sampleRate)
+          
+          if (bpm && bpm >= 60 && bpm <= 200) {
+            return { bpm: Math.round(bpm), confidence: 0.8 }
+          }
+          
+          return { bpm: null, confidence: 0 }
+        } catch (error) {
+          console.error('BPM detection error:', error)
+          return { bpm: null, confidence: 0 }
+        }
+      }
+    })()
+
+    function createClickTrack(bpm, durationSeconds, sampleRate) {
+      const audioContext = new AudioContext({ sampleRate })
+      const length = Math.floor(sampleRate * durationSeconds)
+      const buffer = audioContext.createBuffer(2, length, sampleRate)
+      
+      const secondsPerBeat = 60 / bpm
+      const samplesPerBeat = Math.floor(sampleRate * secondsPerBeat)
+      
+      for (let channel = 0; channel < 2; channel++) {
+        const data = buffer.getChannelData(channel)
+        
+        for (let beat = 0; beat < Math.floor(durationSeconds / secondsPerBeat); beat++) {
+          const beatStart = beat * samplesPerBeat
+          const clickDuration = Math.floor(sampleRate * 0.01)
+          
+          for (let i = 0; i < clickDuration && beatStart + i < length; i++) {
+            const t = i / sampleRate
+            const envelope = Math.exp(-t * 100)
+            data[beatStart + i] = Math.sin(2 * Math.PI * 1000 * t) * envelope * 0.5
+          }
+        }
+      }
+      
+      return buffer
+    }
+
+    function createMusicLikeAudio(bpm, durationSeconds, sampleRate) {
+      const audioContext = new AudioContext({ sampleRate })
+      const length = Math.floor(sampleRate * durationSeconds)
+      const buffer = audioContext.createBuffer(2, length, sampleRate)
+      
+      const secondsPerBeat = 60 / bpm
+      const samplesPerBeat = Math.floor(sampleRate * secondsPerBeat)
+      
+      for (let channel = 0; channel < 2; channel++) {
+        const data = buffer.getChannelData(channel)
+        
+        for (let beat = 0; beat < Math.floor(durationSeconds / secondsPerBeat); beat++) {
+          const beatStart = beat * samplesPerBeat
+          const kickDuration = Math.floor(sampleRate * 0.15)
+          
+          for (let i = 0; i < kickDuration && beatStart + i < length; i++) {
+            const t = i / sampleRate
+            const freq = 60 * (1 - t * 4)
+            const envelope = Math.exp(-t * 15)
+            data[beatStart + i] += Math.sin(2 * Math.PI * freq * t) * envelope * 0.6
+          }
+        }
+        
+        for (let i = 0; i < length; i++) {
+          data[i] += (Math.random() - 0.5) * 0.02
+        }
+      }
+      
+      return buffer
+    }
+
+    window.runTests = async function() {
+      const resultsDiv = document.getElementById('results')
+      resultsDiv.innerHTML = '<h2>Running tests...</h2>'
+      
+      const testCases = [
+        { bpm: 120, name: 'Click track 120 BPM', generator: createClickTrack },
+        { bpm: 90, name: 'Click track 90 BPM', generator: createClickTrack },
+        { bpm: 140, name: 'Click track 140 BPM', generator: createClickTrack },
+        { bpm: 75, name: 'Click track 75 BPM', generator: createClickTrack },
+        { bpm: 120, name: 'Music-like 120 BPM', generator: createMusicLikeAudio },
+        { bpm: 90, name: 'Music-like 90 BPM', generator: createMusicLikeAudio },
+      ]
+      
+      let html = ''
+      let passed = 0
+      let failed = 0
+      
+      for (const testCase of testCases) {
+        const buffer = testCase.generator(testCase.bpm, 10, 44100)
+        const result = await detectBPM(buffer)
+        
+        let resultHtml = `<div class="test-result `
+        let status = ''
+        
+        if (result.bpm) {
+          const error = Math.abs(result.bpm - testCase.bpm)
+          const errorPercent = (error / testCase.bpm) * 100
+          
+          if (error <= 3) {
+            resultHtml += 'pass'
+            status = '✓ PASS'
+            passed++
+          } else {
+            resultHtml += 'fail'
+            status = '✗ FAIL (error > 3 BPM)'
+            failed++
+          }
+          
+          resultHtml += `">
+            <strong>${testCase.name}</strong><br>
+            Expected: ${testCase.bpm} BPM<br>
+            Detected: ${result.bpm} BPM<br>
+            Error: ${error.toFixed(1)} BPM (${errorPercent.toFixed(1)}%)<br>
+            ${status}
+          </div>`
+        } else {
+          resultHtml += 'fail">
+            <strong>${testCase.name}</strong><br>
+            Expected: ${testCase.bpm} BPM<br>
+            Detected: NULL<br>
+            ✗ FAIL (no BPM detected)
+          </div>'
+          failed++
+        }
+        
+        html += resultHtml
+      }
+      
+      resultsDiv.innerHTML = `
+        <h2>Results: ${passed} passed, ${failed} failed</h2>
+        ${html}
+      `
+    }
+  </script>
+</body>
+</html>

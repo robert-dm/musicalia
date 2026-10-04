@@ -656,12 +656,15 @@ function App() {
     Tone.getTransport().seconds = startTime
     Tone.getTransport().start()
     
-    if (metronomeEnabled && !isPaused && metronomePlayerRef.current) {
+    const startingInsideGap = startTime < countInSeconds
+    
+    if (metronomeEnabled && startingInsideGap && metronomePlayerRef.current) {
       const beatsPerBar = 4
       const totalBeats = countInBars * beatsPerBar
       const secondsPerBeat = 60 / bpm
+      const clicksNeeded = Math.ceil((countInSeconds - startTime) / secondsPerBeat)
       
-      for (let beat = 0; beat < totalBeats; beat++) {
+      for (let beat = 0; beat < Math.min(clicksNeeded, totalBeats); beat++) {
         const time = Tone.now() + beat * secondsPerBeat
         metronomePlayerRef.current.start(time)
       }
@@ -674,14 +677,15 @@ function App() {
         track.clip.player.loop = true
         const bufferOffset = Math.max(0, startTime - countInSeconds)
         const offset = bufferOffset % track.clip.buffer.duration
-        const when = metronomeEnabled && !isPaused ? Tone.now() + countInSeconds : Tone.now()
+        const when = startingInsideGap ? Tone.now() + (countInSeconds - startTime) : Tone.now()
         
         console.log('[DEBUG] Starting player:', {
           trackName: track.name,
           bufferLoaded: track.clip.player.loaded,
           bufferDuration: track.clip.player.buffer.duration,
           offset,
-          when
+          when,
+          startingInsideGap
         })
         track.clip.player.start(when, offset)
         return { ...track, clip: { ...track.clip, isPlaying: true } }
@@ -708,12 +712,16 @@ function App() {
           if (currentTime >= loopEnd) {
             currentTime = loopStart
             Tone.getTransport().seconds = loopStart
+            
+            const loopInsideGap = loopStart < countInSeconds
+            
             trackStates.forEach(track => {
               if (track.clip?.isPlaying) {
                 track.clip.player.stop()
                 const bufferOffset = Math.max(0, loopStart - countInSeconds)
                 const offset = bufferOffset % track.clip.buffer.duration
-                track.clip.player.start(Tone.now(), offset)
+                const when = loopInsideGap ? Tone.now() + (countInSeconds - loopStart) : Tone.now()
+                track.clip.player.start(when, offset)
               }
             })
           }
@@ -723,7 +731,8 @@ function App() {
           trackStates.forEach(track => {
             if (track.clip?.isPlaying) {
               track.clip.player.stop()
-              track.clip.player.start(Tone.now())
+              const when = Tone.now() + countInSeconds
+              track.clip.player.start(when)
             }
           })
         }

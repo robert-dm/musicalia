@@ -15,6 +15,7 @@ import {
   openProjectFromCloud,
   deleteProjectFromCloud,
   getStorageUsage,
+  migrateLegacyProjects,
   type ProjectMetadata,
   type User
 } from './cloudStorage'
@@ -376,6 +377,23 @@ function App() {
     }
   }
   
+  const handleMigrateLegacyProjects = async () => {
+    try {
+      const result = await migrateLegacyProjects()
+      setToastMessage(result.message)
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+      
+      // Refresh project list after migration
+      const projects = await listCloudProjects()
+      setCloudProjects(projects)
+      const usage = await getStorageUsage()
+      setStorageUsage(usage)
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error al migrar proyectos')
+    }
+  }
+
   const handleShowCloudProjects = async () => {
     if (!currentUser) {
       setShowAuth(true)
@@ -2050,6 +2068,13 @@ function App() {
             <h2>Mis proyectos en la nube</h2>
             <div className="storage-info">
               Espacio usado: {(storageUsage / 1024 / 1024).toFixed(2)} MB
+              <button 
+                onClick={handleMigrateLegacyProjects}
+                style={{ marginLeft: '10px', padding: '4px 8px', fontSize: '12px' }}
+                title="Migrar proyectos antiguos a tu cuenta"
+              >
+                📦 Migrar proyectos antiguos
+              </button>
             </div>
             <div className="projects-list">
               {cloudProjects.length === 0 ? (

@@ -594,6 +594,22 @@ export async function getStorageUsage(): Promise<number> {
   }
 }
 
+export async function migrateLegacyProjects(): Promise<{ message: string, migratedCount: number }> {
+  if (!authToken) throw new Error('Debe iniciar sesión')
+
+  const response = await fetch('/api/migrate-legacy-projects', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${authToken}` }
+  })
+
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.error || 'Error al migrar proyectos')
+  }
+
+  return response.json()
+}
+
 // Legacy migration function - not exposed to UI
 export function hasMusicaliKey(): boolean {
   return false

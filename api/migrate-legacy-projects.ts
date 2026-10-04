@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server'
-import { getSessionFromRequest } from './auth-utils'
-import { list, copy, del } from '@vercel/blob'
+import { getSessionFromRequest } from '../lib/auth-utils'
+import { list, copy } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 
 export async function POST(request: NextRequest) {

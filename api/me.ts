@@ -1,5 +1,5 @@
 import type { NextRequest } from 'next/server'
-import { getSessionFromRequest } from './auth-utils'
+import { getSessionFromRequest } from '../lib/auth-utils'
 
 export async function GET(request: NextRequest) {
   try {

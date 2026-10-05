@@ -1387,7 +1387,8 @@ function App() {
     setYoutubeError(null)
 
     try {
-      const response = await fetch('/api/youtube-audio', {
+      // Initial request to check if chunking is needed
+      const initialResponse = await fetch('/api/youtube-audio', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1396,21 +1397,72 @@ function App() {
         body: JSON.stringify({ url: youtubeUrl })
       })
 
-      if (!response.ok) {
-        const error = await response.json()
+      if (!initialResponse.ok) {
+        const error = await initialResponse.json()
         throw new Error(error.error || 'Error al obtener audio de YouTube')
       }
 
-      const data = await response.json()
+      const contentType = initialResponse.headers.get('Content-Type') || 'audio/mp4'
       
-      // Fetch the audio stream
-      const audioResponse = await fetch(data.streamUrl)
-      if (!audioResponse.ok) {
-        throw new Error('No se pudo descargar el audio')
+      // Check if response is JSON (chunking metadata) or binary (direct stream)
+      let audioBlob: Blob
+      let videoTitle = 'YouTube Audio'
+      
+      if (contentType.includes('application/json')) {
+        // Chunked response - fetch all chunks
+        const metadata = await initialResponse.json()
+        
+        if (!metadata.needsChunking) {
+          throw new Error('Respuesta inesperada del servidor')
+        }
+        
+        videoTitle = metadata.videoTitle
+        const chunks: Uint8Array[] = []
+        
+        console.log(`[YouTube] Fetching ${metadata.totalChunks} chunks (${(metadata.estimatedSize / 1024 / 1024).toFixed(1)}MB)`)
+        
+        // Fetch all chunks sequentially
+        for (let i = 0; i < metadata.totalChunks; i++) {
+          console.log(`[YouTube] Fetching chunk ${i + 1}/${metadata.totalChunks}`)
+          
+          const chunkResponse = await fetch('/api/youtube-audio', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${getAuthToken()}`
+            },
+            body: JSON.stringify({ url: youtubeUrl, chunkIndex: i })
+          })
+          
+          if (!chunkResponse.ok) {
+            throw new Error(`Error en chunk ${i + 1}: ${chunkResponse.statusText}`)
+          }
+          
+          const chunkData = await chunkResponse.arrayBuffer()
+          chunks.push(new Uint8Array(chunkData))
+          
+          // Optional: Update progress if we want to show it
+          // const progress = Math.round(((i + 1) / metadata.totalChunks) * 100)
+        }
+        
+        // Concatenate all chunks
+        const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0)
+        const combined = new Uint8Array(totalLength)
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+        
+        audioBlob = new Blob([combined], { type: metadata.mimeType })
+        
+      } else {
+        // Direct streaming response (small file)
+        videoTitle = decodeURIComponent(initialResponse.headers.get('X-Video-Title') || 'YouTube Audio')
+        audioBlob = await initialResponse.blob()
       }
-
-      const audioBlob = await audioResponse.blob()
-      const file = new File([audioBlob], `${data.title}.webm`, { type: data.mimeType || 'audio/webm' })
+      
+      const file = new File([audioBlob], `${videoTitle}.${contentType.includes('webm') ? 'webm' : 'm4a'}`, { type: contentType })
 
       // Close dialog
       setShowYoutubeDialog(false)

@@ -16,12 +16,14 @@ import {
   deleteProjectFromCloud,
   getStorageUsage,
   migrateLegacyProjects,
+  getAuthToken,
+  hasAuth,
   type ProjectMetadata,
   type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0060b'
+const APP_VERSION = '0.0061b'
 
 interface Clip {
   player: Tone.Player
@@ -53,6 +55,10 @@ function App() {
   const [loopDragStart, setLoopDragStart] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
+  const [showYoutubeDialog, setShowYoutubeDialog] = useState(false)
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [isLoadingYoutube, setIsLoadingYoutube] = useState(false)
+  const [youtubeError, setYoutubeError] = useState<string | null>(null)
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
   const [sidebarWidth, setSidebarWidth] = useState(220)
@@ -1366,6 +1372,73 @@ function App() {
     }
   }
 
+  const handleYoutubeImport = async () => {
+    if (!youtubeUrl.trim()) {
+      setYoutubeError('Ingresa una URL de YouTube')
+      return
+    }
+
+    if (selectedTrack === null) {
+      setYoutubeError('Selecciona una pista primero')
+      return
+    }
+
+    setIsLoadingYoutube(true)
+    setYoutubeError(null)
+
+    try {
+      const response = await fetch('/api/youtube-audio', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${getAuthToken()}`
+        },
+        body: JSON.stringify({ url: youtubeUrl })
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || 'Error al obtener audio de YouTube')
+      }
+
+      const data = await response.json()
+      
+      // Fetch the audio stream
+      const audioResponse = await fetch(data.streamUrl)
+      if (!audioResponse.ok) {
+        throw new Error('No se pudo descargar el audio')
+      }
+
+      const audioBlob = await audioResponse.blob()
+      const file = new File([audioBlob], `${data.title}.webm`, { type: data.mimeType || 'audio/webm' })
+
+      // Close dialog
+      setShowYoutubeDialog(false)
+      setYoutubeUrl('')
+
+      // Check if stem separation is supported
+      const { supported, reason } = await isStemSeparationSupported()
+      
+      if (!supported) {
+        console.warn('Stem separation not supported:', reason)
+        alert(`Separación de stems no disponible: ${reason}\n\nCargando como pista única.`)
+        await loadSingleTrack(file, selectedTrack)
+        setSelectedTrack(null)
+        return
+      }
+
+      // Store the file and show dialog
+      pendingFileRef.current = file
+      setShowStemDialog(true)
+
+    } catch (error: any) {
+      console.error('YouTube import error:', error)
+      setYoutubeError(error.message || 'Error al importar desde YouTube')
+    } finally {
+      setIsLoadingYoutube(false)
+    }
+  }
+
   const loadSingleTrack = async (file: File, trackIndex: number) => {
     await ensureAudio()
     console.log('[DEBUG] loadSingleTrack: trackIndex=', trackIndex, 'gain exists=', !!trackGainsRef.current[trackIndex])
@@ -1811,6 +1884,26 @@ function App() {
           >
             💾 Exportar
           </button>
+          <button
+            className="header-btn"
+            onClick={() => {
+              if (!hasAuth()) {
+                setErrorMessage('Inicia sesión para importar desde YouTube')
+                setTimeout(() => setErrorMessage(null), 3000)
+                return
+              }
+              if (trackStates.some(t => t.clips.length === 0)) {
+                setSelectedTrack(trackStates.findIndex(t => t.clips.length === 0))
+                setShowYoutubeDialog(true)
+              } else {
+                setErrorMessage('Todas las pistas están ocupadas')
+                setTimeout(() => setErrorMessage(null), 3000)
+              }
+            }}
+            title="Importar desde YouTube"
+          >
+            📺 YouTube
+          </button>
         </div>
         <div className="transport-playback">
           <button
@@ -1950,6 +2043,60 @@ function App() {
         </div>
       )}
       
+      {showYoutubeDialog && (
+        <div className="drive-projects-modal">
+          <div className="modal-content">
+            <h2>Importar desde YouTube</h2>
+            <p style={{ fontSize: '13px', color: '#999', marginBottom: '16px' }}>
+              Pega la URL de un video de YouTube (máximo 10 minutos)
+            </p>
+            <input
+              type="text"
+              placeholder="https://youtube.com/watch?v=..."
+              value={youtubeUrl}
+              onChange={(e) => setYoutubeUrl(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px',
+                marginBottom: '12px',
+                fontSize: '14px',
+                borderRadius: '4px',
+                border: '1px solid #444',
+                background: '#2a2a2a',
+                color: '#fff'
+              }}
+              disabled={isLoadingYoutube}
+            />
+            {youtubeError && (
+              <div style={{ color: '#ff6b6b', fontSize: '13px', marginBottom: '12px' }}>
+                {youtubeError}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button 
+                className="modal-close" 
+                onClick={handleYoutubeImport}
+                disabled={isLoadingYoutube}
+              >
+                {isLoadingYoutube ? 'Cargando...' : 'Importar'}
+              </button>
+              <button 
+                className="modal-close" 
+                onClick={() => {
+                  setShowYoutubeDialog(false)
+                  setYoutubeUrl('')
+                  setYoutubeError(null)
+                  setSelectedTrack(null)
+                }}
+                disabled={isLoadingYoutube}
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showExportDialog && (
         <div className="drive-projects-modal">
           <div className="modal-content">

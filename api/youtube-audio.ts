@@ -167,7 +167,9 @@ export async function POST(request: Request) {
     // Provide helpful error messages in Spanish
     let message = 'Error al obtener audio de YouTube'
     
-    if (error.message?.includes('Sign in to confirm')) {
+    if (error.message?.includes('not a bot')) {
+      message = 'YouTube bloqueó la solicitud. Intenta subir el archivo directamente.'
+    } else if (error.message?.includes('Sign in to confirm')) {
       message = 'Video con restricción de edad. Intenta subir el archivo directamente.'
     } else if (error.message?.includes('not available')) {
       message = 'Video no disponible en esta región. Intenta subir el archivo directamente.'

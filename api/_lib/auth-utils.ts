@@ -58,7 +58,7 @@ export async function createUser(username: string, email: string, password: stri
   await put(pathname, userBlob, {
     access: 'private',
     storeId,
-    token: oidcToken
+    oidcToken
   })
 
   return user
@@ -78,12 +78,12 @@ export async function findUserByEmail(email: string): Promise<User | null> {
   const { blobs } = await list({
     prefix: 'musicalia-users/',
     storeId,
-    token: oidcToken
+    oidcToken
   })
 
   for (const blob of blobs) {
     try {
-      const blobMeta = await head(blob.pathname, { storeId, token: oidcToken })
+      const blobMeta = await head(blob.pathname, { storeId, oidcToken })
       const response = await fetch(blobMeta.downloadUrl)
       const user: User = await response.json()
       if (user.email === email) {
@@ -111,12 +111,12 @@ export async function findUserByUsername(username: string): Promise<User | null>
   const { blobs } = await list({
     prefix: 'musicalia-users/',
     storeId,
-    token: oidcToken
+    oidcToken
   })
 
   for (const blob of blobs) {
-    try {
-      const blobMeta = await head(blob.pathname, { storeId, token: oidcToken })
+    try:
+      const blobMeta = await head(blob.pathname, { storeId, oidcToken })
       const response = await fetch(blobMeta.downloadUrl)
       const user: User = await response.json()
       if (user.username === username) {

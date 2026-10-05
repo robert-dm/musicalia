@@ -1,5 +1,5 @@
 import type { NextRequest } from 'next/server'
-import { findUserByEmail, verifyPassword, createJWT } from '../lib/auth-utils'
+import { findUserByEmail, verifyPassword, createJWT } from './_lib/auth-utils'
 
 export async function POST(request: NextRequest) {
   try {

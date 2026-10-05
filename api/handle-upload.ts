@@ -3,7 +3,10 @@ import { issueSignedToken } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import { verifyJWT, type Session } from './_lib/auth-utils'
 
-export async function POST(request: Request) {
+export default async function handler(request: Request) {
+  if (request.method !== 'POST') {
+    return Response.json({ error: 'Method not allowed' }, { status: 405 })
+  }
   try {
     const body = (await request.json()) as HandleUploadPresignedBody
     

@@ -2,7 +2,10 @@ import { list, del } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import { getSessionFromRequest } from './_lib/auth-utils'
 
-export async function DELETE(request: Request) {
+export default async function handler(request: Request) {
+  if (request.method !== 'DELETE') {
+    return Response.json({ error: 'Method not allowed' }, { status: 405 })
+  }
   try {
     const session = await getSessionFromRequest(request)
     if (!session) {

@@ -2,7 +2,7 @@ import { list } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import { getSessionFromRequest } from './_lib/auth-utils'
 
-export async function GET(request: Request) {
+export default async function handler(request: Request) {
   try {
     const session = await getSessionFromRequest(request)
     if (!session) {

@@ -2,7 +2,10 @@ import { getSessionFromRequest } from './_lib/auth-utils'
 import { list, copy } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 
-export async function POST(request: Request) {
+export default async function handler(request: Request) {
+  if (request.method !== 'POST') {
+    return Response.json({ error: 'Method not allowed' }, { status: 405 })
+  }
   try {
     const session = await getSessionFromRequest(request)
     if (!session) {

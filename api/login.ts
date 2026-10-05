@@ -2,7 +2,7 @@ import { findUserByEmail, verifyPassword, createJWT } from './_lib/auth-utils.js
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json()
+    const body = await request.json() as { email: string, password: string }
     const { email, password } = body
 
     if (!email || !password) {

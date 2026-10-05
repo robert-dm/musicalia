@@ -1,7 +1,7 @@
 import { handleUploadPresigned, type HandleUploadPresignedBody } from '@vercel/blob/client'
 import { issueSignedToken } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
-import { verifyJWT, type Session } from './_lib/auth-utils.js'
+import { verifyJWT } from './_lib/auth-utils.js'
 
 export async function POST(request: Request) {
   try {
@@ -43,7 +43,7 @@ export async function POST(request: Request) {
       body,
       request,
       webhookPublicKey,
-      getSignedToken: async (pathname, clientPayload, multipart) => {
+      getSignedToken: async (pathname, clientPayload, _multipart) => {
         try {
           console.log('[getSignedToken] Called with pathname:', pathname)
           
@@ -96,7 +96,7 @@ export async function POST(request: Request) {
           throw err
         }
       },
-      onUploadCompleted: async ({ blob, tokenPayload }) => {
+      onUploadCompleted: async ({ blob, tokenPayload: _tokenPayload }) => {
         console.log('[handle-upload] Upload completed:', blob.pathname)
       }
     })

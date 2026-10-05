@@ -53,6 +53,7 @@ export async function POST(request: Request) {
 
         migrations.push(
           copy(blob.url, newPathname, {
+            access: 'public',
             storeId,
             oidcToken
           }).then(() => {

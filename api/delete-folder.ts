@@ -9,7 +9,7 @@ export async function DELETE(request: Request) {
       return Response.json({ error: 'No autenticado' }, { status: 401 })
     }
     
-    const { pathname } = await request.json()
+    const { pathname } = await request.json() as { pathname: string }
     
     if (!pathname) {
       return Response.json({ error: 'Pathname requerido' }, { status: 400 })

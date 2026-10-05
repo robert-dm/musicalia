@@ -2,7 +2,7 @@ import { createUser, findUserByEmail, findUserByUsername, createJWT } from './_l
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json()
+    const body = await request.json() as { username: string, email: string, password: string }
     const { username, email, password } = body
 
     if (!username || !email || !password) {

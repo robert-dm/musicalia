@@ -1,5 +1,5 @@
 import { getVercelOidcToken } from '@vercel/oidc'
-import { list, put, head } from '@vercel/blob'
+import { list, put, get } from '@vercel/blob'
 
 export interface User {
   id: string
@@ -83,9 +83,19 @@ export async function findUserByEmail(email: string): Promise<User | null> {
 
   for (const blob of blobs) {
     try {
-      const blobMeta = await head(blob.pathname, { storeId, oidcToken })
-      const response = await fetch(blobMeta.downloadUrl)
-      const user: User = await response.json()
+      const result = await get(blob.pathname, {
+        access: 'private',
+        storeId,
+        oidcToken
+      })
+      if (!result || !result.stream) continue
+      
+      const chunks: Uint8Array[] = []
+      for await (const chunk of result.stream) {
+        chunks.push(chunk)
+      }
+      const text = Buffer.concat(chunks).toString('utf-8')
+      const user: User = JSON.parse(text)
       if (user.email === email) {
         return user
       }
@@ -115,10 +125,20 @@ export async function findUserByUsername(username: string): Promise<User | null>
   })
 
   for (const blob of blobs) {
-    try:
-      const blobMeta = await head(blob.pathname, { storeId, oidcToken })
-      const response = await fetch(blobMeta.downloadUrl)
-      const user: User = await response.json()
+    try {
+      const result = await get(blob.pathname, {
+        access: 'private',
+        storeId,
+        oidcToken
+      })
+      if (!result || !result.stream) continue
+      
+      const chunks: Uint8Array[] = []
+      for await (const chunk of result.stream) {
+        chunks.push(chunk)
+      }
+      const text = Buffer.concat(chunks).toString('utf-8')
+      const user: User = JSON.parse(text)
       if (user.username === username) {
         return user
       }

@@ -21,7 +21,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0054b'
+const APP_VERSION = '0.0055b'
 
 interface Clip {
   player: Tone.Player
@@ -88,6 +88,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null)
   const [showAuth, setShowAuth] = useState(false)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
+  const [authLoading, setAuthLoading] = useState(false)
   const [showCloudProjects, setShowCloudProjects] = useState(false)
   const [cloudProjects, setCloudProjects] = useState<ProjectMetadata[]>([])
   const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
@@ -292,6 +293,8 @@ function App() {
   }
   
   const handleLogin = async (email: string, password: string) => {
+    setAuthLoading(true)
+    setErrorMessage(null)
     try {
       const { user } = await login(email, password)
       setCurrentUser(user)
@@ -300,11 +303,16 @@ function App() {
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     } catch (error: any) {
+      console.error('Login error:', error)
       setErrorMessage(error.message || 'Error al iniciar sesión')
+    } finally {
+      setAuthLoading(false)
     }
   }
 
   const handleRegister = async (username: string, email: string, password: string) => {
+    setAuthLoading(true)
+    setErrorMessage(null)
     try {
       const { user } = await register(username, email, password)
       setCurrentUser(user)
@@ -313,7 +321,10 @@ function App() {
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     } catch (error: any) {
+      console.error('Register error:', error)
       setErrorMessage(error.message || 'Error al crear cuenta')
+    } finally {
+      setAuthLoading(false)
     }
   }
 
@@ -1981,6 +1992,7 @@ function App() {
             {authMode === 'login' ? (
               <form onSubmit={(e) => {
                 e.preventDefault()
+                if (authLoading) return
                 const formData = new FormData(e.currentTarget)
                 handleLogin(
                   formData.get('email') as string,
@@ -1993,6 +2005,7 @@ function App() {
                     name="email"
                     placeholder="Email"
                     required
+                    disabled={authLoading}
                     style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
@@ -2000,12 +2013,16 @@ function App() {
                     name="password"
                     placeholder="Contraseña"
                     required
+                    disabled={authLoading}
                     style={{ padding: '8px', fontSize: '14px' }}
                   />
-                  <button type="submit" style={{ padding: '8px' }}>Iniciar sesión</button>
+                  <button type="submit" disabled={authLoading} style={{ padding: '8px' }}>
+                    {authLoading ? 'Iniciando sesión...' : 'Iniciar sesión'}
+                  </button>
                   <button
                     type="button"
-                    onClick={() => setAuthMode('register')}
+                    onClick={() => { setAuthMode('register'); setErrorMessage(null) }}
+                    disabled={authLoading}
                     style={{ padding: '8px', background: '#444' }}
                   >
                     ¿No tienes cuenta? Crear una
@@ -2015,6 +2032,7 @@ function App() {
             ) : (
               <form onSubmit={(e) => {
                 e.preventDefault()
+                if (authLoading) return
                 const formData = new FormData(e.currentTarget)
                 handleRegister(
                   formData.get('username') as string,
@@ -2029,6 +2047,7 @@ function App() {
                     placeholder="Usuario"
                     required
                     minLength={3}
+                    disabled={authLoading}
                     style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
@@ -2036,6 +2055,7 @@ function App() {
                     name="email"
                     placeholder="Email"
                     required
+                    disabled={authLoading}
                     style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
@@ -2044,12 +2064,16 @@ function App() {
                     placeholder="Contraseña (mínimo 6 caracteres)"
                     required
                     minLength={6}
+                    disabled={authLoading}
                     style={{ padding: '8px', fontSize: '14px' }}
                   />
-                  <button type="submit" style={{ padding: '8px' }}>Crear cuenta</button>
+                  <button type="submit" disabled={authLoading} style={{ padding: '8px' }}>
+                    {authLoading ? 'Creando cuenta...' : 'Crear cuenta'}
+                  </button>
                   <button
                     type="button"
-                    onClick={() => setAuthMode('login')}
+                    onClick={() => { setAuthMode('login'); setErrorMessage(null) }}
+                    disabled={authLoading}
                     style={{ padding: '8px', background: '#444' }}
                   >
                     ¿Ya tienes cuenta? Iniciar sesión
@@ -2057,7 +2081,7 @@ function App() {
                 </div>
               </form>
             )}
-            <button className="modal-close" onClick={() => { setShowAuth(false); setErrorMessage(null) }}>Cerrar</button>
+            <button className="modal-close" onClick={() => { setShowAuth(false); setErrorMessage(null); setAuthLoading(false) }}>Cerrar</button>
           </div>
         </div>
       )}

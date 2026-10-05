@@ -1,4 +1,4 @@
-import { getSessionFromRequest } from './_lib/auth-utils'
+import { getSessionFromRequest } from './_lib/auth-utils.js'
 import { list, copy } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 

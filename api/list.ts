@@ -1,6 +1,6 @@
 import { list } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
-import { getSessionFromRequest } from './_lib/auth-utils'
+import { getSessionFromRequest } from './_lib/auth-utils.js'
 
 export async function GET(request: Request) {
   try {

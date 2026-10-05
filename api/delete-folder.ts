@@ -1,6 +1,6 @@
 import { list, del } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
-import { getSessionFromRequest } from './_lib/auth-utils'
+import { getSessionFromRequest } from './_lib/auth-utils.js'
 
 export async function DELETE(request: Request) {
   try {

@@ -1,4 +1,4 @@
-import { findUserByEmail, verifyPassword, createJWT } from './_lib/auth-utils'
+import { findUserByEmail, verifyPassword, createJWT } from './_lib/auth-utils.js'
 
 export async function POST(request: Request) {
   try {

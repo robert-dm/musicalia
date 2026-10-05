@@ -75,15 +75,19 @@ export async function POST(request: Request) {
             throw new Error('Nombre de proyecto requerido')
           }
           
-          const fileName = pathname.split('/').pop() || 'file'
-          const finalPathname = `musicalia-projects/${session.userId}/${projectName}/${fileName}`
+          // Verify the pathname starts with the expected user path
+          const expectedPrefix = `musicalia-projects/${session.userId}/${projectName}/`
+          if (!pathname.startsWith(expectedPrefix)) {
+            console.error('[getSignedToken] Pathname mismatch:', pathname, 'expected prefix:', expectedPrefix)
+            throw new Error('Ruta de archivo inválida')
+          }
           
-          console.log('[getSignedToken] Issuing signed token for pathname:', finalPathname)
+          console.log('[getSignedToken] Issuing signed token for pathname:', pathname)
           
           const signedToken = await issueSignedToken({
             oidcToken,
             storeId,
-            pathname: finalPathname,
+            pathname,
             operations: ['put'],
             allowedContentTypes: ['audio/wav', 'audio/mpeg', 'audio/mp3', 'application/json', 'application/octet-stream']
           })

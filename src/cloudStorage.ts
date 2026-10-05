@@ -165,10 +165,10 @@ function encodeWAV(channelData: Float32Array[], sampleRate: number): Uint8Array 
   return new Uint8Array(buffer)
 }
 
-async function probeUploadEndpoint(fileName: string, projectName: string): Promise<void> {
+async function probeUploadEndpoint(fileName: string, projectName: string, userId: string): Promise<void> {
   if (!authToken) throw new Error('No autenticado')
   
-  const fullPathname = `musicalia-projects/${fileName}`
+  const fullPathname = `musicalia-projects/${userId}/${projectName}/${fileName}`
   const probePayload = {
     type: 'blob.generate-presigned-url',
     payload: {
@@ -207,6 +207,7 @@ export async function saveProjectToCloud(
   onProgress?: (progress: number) => void
 ): Promise<void> {
   if (!authToken) throw new Error('Debe iniciar sesión para guardar')
+  if (!currentUser) throw new Error('Usuario no encontrado')
   
   onProgress?.(5)
   
@@ -243,12 +244,12 @@ export async function saveProjectToCloud(
     const fileName = `audio_${trackIndex}_${clipIndex}.wav`
     
     try {
-      await probeUploadEndpoint(fileName, projectName)
+      await probeUploadEndpoint(fileName, projectName, currentUser.id)
       
       const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
       const file = new File([blob], fileName, { type: 'audio/wav' })
       
-      const fullPathname = `musicalia-projects/${fileName}`
+      const fullPathname = `musicalia-projects/${currentUser.id}/${projectName}/${fileName}`
       await uploadPresigned(fullPathname, file, {
         access: 'public',
         handleUploadUrl: '/api/handle-upload',
@@ -302,13 +303,13 @@ export async function saveProjectToCloud(
   }
   
   try {
-    await probeUploadEndpoint('project.json', projectName)
+    await probeUploadEndpoint('project.json', projectName, currentUser.id)
     
     const metadataJson = JSON.stringify(metadataOnly, null, 2)
     const metadataBlob = new Blob([metadataJson], { type: 'application/json' })
     const metadataFile = new File([metadataBlob], 'project.json', { type: 'application/json' })
     
-    const fullPathname = `musicalia-projects/project.json`
+    const fullPathname = `musicalia-projects/${currentUser.id}/${projectName}/project.json`
     await uploadPresigned(fullPathname, metadataFile, {
       access: 'public',
       handleUploadUrl: '/api/handle-upload',

@@ -1,9 +1,8 @@
 import { head } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
-import type { NextRequest } from 'next/server'
 import { getSessionFromRequest } from './_lib/auth-utils'
 
-export async function GET(request: NextRequest) {
+export async function GET(request: Request) {
   try {
     const session = await getSessionFromRequest(request)
     if (!session) {

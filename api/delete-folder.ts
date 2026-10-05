@@ -1,9 +1,8 @@
 import { list, del } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
-import type { NextRequest } from 'next/server'
 import { getSessionFromRequest } from './_lib/auth-utils'
 
-export async function DELETE(request: NextRequest) {
+export async function DELETE(request: Request) {
   try {
     const session = await getSessionFromRequest(request)
     if (!session) {

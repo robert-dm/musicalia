@@ -1,7 +1,6 @@
-import type { NextRequest } from 'next/server'
 import { createUser, findUserByEmail, findUserByUsername, createJWT } from './_lib/auth-utils'
 
-export async function POST(request: NextRequest) {
+export async function POST(request: Request) {
   try {
     const body = await request.json()
     const { username, email, password } = body

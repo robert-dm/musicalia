@@ -16,12 +16,14 @@ import {
   deleteProjectFromCloud,
   getStorageUsage,
   migrateLegacyProjects,
+  getAuthToken,
+  hasAuth,
   type ProjectMetadata,
   type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0060b'
+const APP_VERSION = '0.0061b'
 
 interface Clip {
   player: Tone.Player
@@ -53,6 +55,10 @@ function App() {
   const [loopDragStart, setLoopDragStart] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
+  const [showYoutubeDialog, setShowYoutubeDialog] = useState(false)
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [isLoadingYoutube, setIsLoadingYoutube] = useState(false)
+  const [youtubeError, setYoutubeError] = useState<string | null>(null)
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
   const [sidebarWidth, setSidebarWidth] = useState(220)
@@ -1366,6 +1372,125 @@ function App() {
     }
   }
 
+  const handleYoutubeImport = async () => {
+    if (!youtubeUrl.trim()) {
+      setYoutubeError('Ingresa una URL de YouTube')
+      return
+    }
+
+    if (selectedTrack === null) {
+      setYoutubeError('Selecciona una pista primero')
+      return
+    }
+
+    setIsLoadingYoutube(true)
+    setYoutubeError(null)
+
+    try {
+      // Initial request to check if chunking is needed
+      const initialResponse = await fetch('/api/youtube-audio', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${getAuthToken()}`
+        },
+        body: JSON.stringify({ url: youtubeUrl })
+      })
+
+      if (!initialResponse.ok) {
+        const error = await initialResponse.json()
+        throw new Error(error.error || 'Error al obtener audio de YouTube')
+      }
+
+      const contentType = initialResponse.headers.get('Content-Type') || 'audio/mp4'
+      
+      // Check if response is JSON (chunking metadata) or binary (direct stream)
+      let audioBlob: Blob
+      let videoTitle = 'YouTube Audio'
+      
+      if (contentType.includes('application/json')) {
+        // Chunked response - fetch all chunks
+        const metadata = await initialResponse.json()
+        
+        if (!metadata.needsChunking) {
+          throw new Error('Respuesta inesperada del servidor')
+        }
+        
+        videoTitle = metadata.videoTitle
+        const chunks: Uint8Array[] = []
+        
+        console.log(`[YouTube] Fetching ${metadata.totalChunks} chunks (${(metadata.estimatedSize / 1024 / 1024).toFixed(1)}MB)`)
+        
+        // Fetch all chunks sequentially
+        for (let i = 0; i < metadata.totalChunks; i++) {
+          console.log(`[YouTube] Fetching chunk ${i + 1}/${metadata.totalChunks}`)
+          
+          const chunkResponse = await fetch('/api/youtube-audio', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${getAuthToken()}`
+            },
+            body: JSON.stringify({ url: youtubeUrl, chunkIndex: i })
+          })
+          
+          if (!chunkResponse.ok) {
+            throw new Error(`Error en chunk ${i + 1}: ${chunkResponse.statusText}`)
+          }
+          
+          const chunkData = await chunkResponse.arrayBuffer()
+          chunks.push(new Uint8Array(chunkData))
+          
+          // Optional: Update progress if we want to show it
+          // const progress = Math.round(((i + 1) / metadata.totalChunks) * 100)
+        }
+        
+        // Concatenate all chunks
+        const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0)
+        const combined = new Uint8Array(totalLength)
+        let offset = 0
+        for (const chunk of chunks) {
+          combined.set(chunk, offset)
+          offset += chunk.length
+        }
+        
+        audioBlob = new Blob([combined], { type: metadata.mimeType })
+        
+      } else {
+        // Direct streaming response (small file)
+        videoTitle = decodeURIComponent(initialResponse.headers.get('X-Video-Title') || 'YouTube Audio')
+        audioBlob = await initialResponse.blob()
+      }
+      
+      const file = new File([audioBlob], `${videoTitle}.${contentType.includes('webm') ? 'webm' : 'm4a'}`, { type: contentType })
+
+      // Close dialog
+      setShowYoutubeDialog(false)
+      setYoutubeUrl('')
+
+      // Check if stem separation is supported
+      const { supported, reason } = await isStemSeparationSupported()
+      
+      if (!supported) {
+        console.warn('Stem separation not supported:', reason)
+        alert(`Separación de stems no disponible: ${reason}\n\nCargando como pista única.`)
+        await loadSingleTrack(file, selectedTrack)
+        setSelectedTrack(null)
+        return
+      }
+
+      // Store the file and show dialog
+      pendingFileRef.current = file
+      setShowStemDialog(true)
+
+    } catch (error: any) {
+      console.error('YouTube import error:', error)
+      setYoutubeError(error.message || 'Error al importar desde YouTube')
+    } finally {
+      setIsLoadingYoutube(false)
+    }
+  }
+
   const loadSingleTrack = async (file: File, trackIndex: number) => {
     await ensureAudio()
     console.log('[DEBUG] loadSingleTrack: trackIndex=', trackIndex, 'gain exists=', !!trackGainsRef.current[trackIndex])
@@ -1811,6 +1936,26 @@ function App() {
           >
             💾 Exportar
           </button>
+          <button
+            className="header-btn"
+            onClick={() => {
+              if (!hasAuth()) {
+                setErrorMessage('Inicia sesión para importar desde YouTube')
+                setTimeout(() => setErrorMessage(null), 3000)
+                return
+              }
+              if (trackStates.some(t => t.clips.length === 0)) {
+                setSelectedTrack(trackStates.findIndex(t => t.clips.length === 0))
+                setShowYoutubeDialog(true)
+              } else {
+                setErrorMessage('Todas las pistas están ocupadas')
+                setTimeout(() => setErrorMessage(null), 3000)
+              }
+            }}
+            title="Importar desde YouTube"
+          >
+            📺 YouTube
+          </button>
         </div>
         <div className="transport-playback">
           <button
@@ -1950,6 +2095,60 @@ function App() {
         </div>
       )}
       
+      {showYoutubeDialog && (
+        <div className="drive-projects-modal">
+          <div className="modal-content">
+            <h2>Importar desde YouTube</h2>
+            <p style={{ fontSize: '13px', color: '#999', marginBottom: '16px' }}>
+              Pega la URL de un video de YouTube (máximo 10 minutos)
+            </p>
+            <input
+              type="text"
+              placeholder="https://youtube.com/watch?v=..."
+              value={youtubeUrl}
+              onChange={(e) => setYoutubeUrl(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px',
+                marginBottom: '12px',
+                fontSize: '14px',
+                borderRadius: '4px',
+                border: '1px solid #444',
+                background: '#2a2a2a',
+                color: '#fff'
+              }}
+              disabled={isLoadingYoutube}
+            />
+            {youtubeError && (
+              <div style={{ color: '#ff6b6b', fontSize: '13px', marginBottom: '12px' }}>
+                {youtubeError}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button 
+                className="modal-close" 
+                onClick={handleYoutubeImport}
+                disabled={isLoadingYoutube}
+              >
+                {isLoadingYoutube ? 'Cargando...' : 'Importar'}
+              </button>
+              <button 
+                className="modal-close" 
+                onClick={() => {
+                  setShowYoutubeDialog(false)
+                  setYoutubeUrl('')
+                  setYoutubeError(null)
+                  setSelectedTrack(null)
+                }}
+                disabled={isLoadingYoutube}
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showExportDialog && (
         <div className="drive-projects-modal">
           <div className="modal-content">

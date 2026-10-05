@@ -1,10 +1,9 @@
 import { handleUploadPresigned, type HandleUploadPresignedBody } from '@vercel/blob/client'
 import { issueSignedToken } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
-import type { NextRequest } from 'next/server'
 import { verifyJWT, type Session } from './_lib/auth-utils'
 
-export async function POST(request: NextRequest) {
+export async function POST(request: Request) {
   try {
     const body = (await request.json()) as HandleUploadPresignedBody
     

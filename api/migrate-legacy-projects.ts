@@ -53,8 +53,9 @@ export async function POST(request: Request) {
 
         migrations.push(
           copy(blob.url, newPathname, {
+            access: 'public',
             storeId,
-            token: oidcToken
+            oidcToken
           }).then(() => {
             console.log(`Migrated ${blob.pathname} to ${newPathname}`)
           })

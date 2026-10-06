@@ -465,7 +465,26 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     throw new Error('Error al descargar project.json')
   }
   
-  const projectJson = await metadataResponse.json()
+  // Validate response has content before parsing JSON
+  const contentLength = metadataResponse.headers.get('content-length')
+  if (contentLength && parseInt(contentLength) === 0) {
+    throw new Error('El proyecto está vacío o corrupto')
+  }
+  
+  let projectJson
+  try {
+    const text = await metadataResponse.text()
+    if (!text || text.trim().length === 0) {
+      throw new Error('El proyecto está vacío o corrupto')
+    }
+    projectJson = JSON.parse(text)
+  } catch (parseError: any) {
+    if (parseError.message === 'El proyecto está vacío o corrupto') {
+      throw parseError
+    }
+    console.error('JSON parse error:', parseError)
+    throw new Error('El archivo del proyecto está corrupto. Puede que la guardada falló.')
+  }
   
   const tracks = await Promise.all(projectJson.tracks.map(async (t: any) => {
     if (t.clips && Array.isArray(t.clips)) {

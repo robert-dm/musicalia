@@ -33,18 +33,91 @@ export async function GET(request: Request) {
     }
     
     // Use authenticated get() instead of head() + fetch(blob.url)
-    // This works for both public and private blobs with proper OIDC auth
-    const result = await get(pathname, {
-      access: 'public',
-      storeId,
-      oidcToken
-    })
+    // Try public access first (how files are saved), then private as fallback
+    let result
+    try {
+      result = await get(pathname, {
+        access: 'public',
+        storeId,
+        oidcToken
+      })
+    } catch (publicError: any) {
+      console.log(`Public access failed for ${pathname}, trying private:`, publicError.message)
+      try {
+        result = await get(pathname, {
+          access: 'private',
+          storeId,
+          oidcToken
+        })
+      } catch (privateError: any) {
+        console.error(`Both public and private access failed for ${pathname}`)
+        return Response.json({ error: 'Archivo no encontrado' }, { status: 404 })
+      }
+    }
     
     if (!result || !result.stream) {
       return Response.json({ error: 'Archivo no encontrado' }, { status: 404 })
     }
     
-    // Stream the blob content with authenticated access
+    // For JSON files (project.json), buffer the entire stream to ensure completeness
+    // and validate it's not empty/corrupt before sending to client
+    const isJsonFile = pathname.endsWith('.json') || result.blob.contentType?.includes('json')
+    
+    if (isJsonFile || result.blob.size < 1024 * 1024) { // Buffer files under 1MB
+      // Read the entire stream into a buffer
+      const reader = result.stream.getReader()
+      const chunks: Uint8Array[] = []
+      let totalLength = 0
+      
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) {
+            chunks.push(value)
+            totalLength += value.length
+          }
+        }
+      } catch (streamError: any) {
+        console.error(`Stream read error for ${pathname}:`, streamError)
+        return Response.json({ error: 'Error al leer el archivo' }, { status: 500 })
+      }
+      
+      // Check if file is empty
+      if (totalLength === 0) {
+        console.error(`Empty file: ${pathname}`)
+        return Response.json({ error: 'El archivo está vacío o corrupto' }, { status: 500 })
+      }
+      
+      // Concatenate chunks into single buffer
+      const fullContent = new Uint8Array(totalLength)
+      let offset = 0
+      for (const chunk of chunks) {
+        fullContent.set(chunk, offset)
+        offset += chunk.length
+      }
+      
+      // For JSON files, validate it's valid JSON
+      if (isJsonFile) {
+        try {
+          const text = new TextDecoder().decode(fullContent)
+          JSON.parse(text) // Validate JSON
+        } catch (jsonError: any) {
+          console.error(`Invalid JSON in ${pathname}:`, jsonError)
+          return Response.json({ error: 'El archivo JSON está corrupto' }, { status: 500 })
+        }
+      }
+      
+      // Return buffered content with accurate Content-Length
+      return new Response(fullContent, {
+        headers: {
+          'Content-Type': result.blob.contentType || 'application/octet-stream',
+          'Content-Length': totalLength.toString()
+        }
+      })
+    }
+    
+    // For large files (audio), stream directly but ensure Content-Length matches
     return new Response(result.stream, {
       headers: {
         'Content-Type': result.blob.contentType || 'application/octet-stream',

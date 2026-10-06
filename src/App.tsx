@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0062b'
+const APP_VERSION = '0.0063b'
 
 interface Clip {
   player: Tone.Player

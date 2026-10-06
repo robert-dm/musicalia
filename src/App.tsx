@@ -115,6 +115,7 @@ function App() {
   const [dragStartPosition, setDragStartPosition] = useState<number>(0)
   const [tempDragOffset, setTempDragOffset] = useState<number>(0)
   const [clipboard, setClipboard] = useState<{buffer: AudioBuffer, fileName: string} | null>(null)
+  const projectLoadGenRef = useRef<number>(0)
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -219,8 +220,20 @@ function App() {
   
   // Load project on mount
   useEffect(() => {
+    const loadGen = projectLoadGenRef.current
+    console.log(`[Mount] Starting local project load, gen=${loadGen}`)
+    
     loadProject().then(async (state) => {
-      if (!state) return
+      if (!state) {
+        console.log(`[Mount] No local project found`)
+        return
+      }
+      
+      // Check if a newer load has started (cloud open or new project)
+      if (projectLoadGenRef.current !== loadGen) {
+        console.log(`[Mount] Aborting stale local load (gen ${loadGen}, current ${projectLoadGenRef.current})`)
+        return
+      }
       
       await ensureAudio()
       
@@ -285,16 +298,25 @@ function App() {
         }
       }))
       
+      // Final check before applying state
+      if (projectLoadGenRef.current !== loadGen) {
+        console.log(`[Mount] Aborting stale local load before setState (gen ${loadGen}, current ${projectLoadGenRef.current})`)
+        return
+      }
+      
       setTrackStates(newTrackStates)
-      setToastMessage('Proyecto cargado')
+      setToastMessage('Proyecto local cargado')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
+      console.log(`[Mount] Local project loaded successfully`)
     })
   }, [])
   
   const handleNewProject = async () => {
     if (!confirm('¿Crear un nuevo proyecto? Se perderá el trabajo no guardado.')) return
     
+    projectLoadGenRef.current++
+    console.log(`[New Project] Starting new project, gen=${projectLoadGenRef.current}`)
     await clearProject()
     setCurrentProjectName('Proyecto sin título')
     window.location.reload()
@@ -436,6 +458,8 @@ function App() {
   const handleOpenCloudProject = async (pathname: string, name: string) => {
     try {
       setErrorMessage(null)
+      projectLoadGenRef.current++
+      console.log(`[Cloud Open] Starting cloud project load, gen=${projectLoadGenRef.current}`)
       const state = await openProjectFromCloud(pathname)
       
       console.log(`[handleOpenCloudProject] Received state with ${state.tracks.length} tracks`)

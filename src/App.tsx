@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0063b'
+const APP_VERSION = '0.0064b'
 
 interface Clip {
   player: Tone.Player
@@ -447,6 +447,14 @@ function App() {
       if (state.metronomeEnabled !== undefined) setMetronomeEnabled(state.metronomeEnabled)
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
       
+      // Ensure trackGainsRef has enough entries for all loaded tracks
+      const neededTracks = Math.max(state.tracks.length, 8)
+      while (trackGainsRef.current.length < neededTracks) {
+        const gain = new Tone.Gain(0.8).toDestination()
+        trackGainsRef.current.push(gain)
+        console.log(`Created gain node for track ${trackGainsRef.current.length - 1}`)
+      }
+      
       const newTrackStates = state.tracks.map((t: any, i: number) => {
         // Handle old format with single clip
         if (t.clip) {
@@ -462,6 +470,10 @@ function App() {
           const player = new Tone.Player()
           player.buffer = toneBuffer
           player.loop = true
+          
+          if (!trackGainsRef.current[i]) {
+            throw new Error(`Track gain ${i} no disponible. Reinicia la aplicación.`)
+          }
           player.connect(trackGainsRef.current[i])
           
           return {
@@ -472,7 +484,7 @@ function App() {
               isPlaying: false,
               buffer,
               startPosition: t.clip.startPosition,
-              offsetSeconds: t.clip.offsetSeconds || getCountInSeconds(),
+              offsetSeconds: t.clip.offsetSeconds ?? getCountInSeconds(),
               id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
             }]
           }
@@ -492,6 +504,10 @@ function App() {
           const player = new Tone.Player()
           player.buffer = toneBuffer
           player.loop = true
+          
+          if (!trackGainsRef.current[i]) {
+            throw new Error(`Track gain ${i} no disponible. Reinicia la aplicación.`)
+          }
           player.connect(trackGainsRef.current[i])
           
           return {
@@ -500,7 +516,7 @@ function App() {
             isPlaying: false,
             buffer,
             startPosition: clipData.startPosition,
-            offsetSeconds: clipData.offsetSeconds || getCountInSeconds(),
+            offsetSeconds: clipData.offsetSeconds ?? getCountInSeconds(),
             id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`
           }
         })
@@ -514,10 +530,22 @@ function App() {
       setTrackStates(newTrackStates)
       setCurrentProjectName(name)
       setShowCloudProjects(false)
-      setToastMessage('Proyecto abierto')
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
+      
+      // Verify tracks actually have audio before showing success
+      const tracksWithAudio = newTrackStates.filter((t: any) => t.clips && t.clips.length > 0)
+      const totalClips = newTrackStates.reduce((sum: number, t: any) => sum + (t.clips?.length || 0), 0)
+      
+      console.log(`Loaded project "${name}": ${tracksWithAudio.length} tracks with ${totalClips} clips`)
+      
+      if (totalClips > 0) {
+        setToastMessage(`Proyecto abierto: ${totalClips} clips en ${tracksWithAudio.length} pistas`)
+        setShowToast(true)
+        setTimeout(() => setShowToast(false), 3000)
+      } else {
+        throw new Error('El proyecto se cargó pero no tiene audio. Los archivos pueden estar corruptos.')
+      }
     } catch (err: any) {
+      console.error('Failed to open project:', err)
       setErrorMessage(err.message || 'Error al abrir proyecto')
     }
   }

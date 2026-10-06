@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0064b'
+const APP_VERSION = '0.0065b'
 
 interface Clip {
   player: Tone.Player
@@ -115,6 +115,7 @@ function App() {
   const [dragStartPosition, setDragStartPosition] = useState<number>(0)
   const [tempDragOffset, setTempDragOffset] = useState<number>(0)
   const [clipboard, setClipboard] = useState<{buffer: AudioBuffer, fileName: string} | null>(null)
+  const projectLoadGenRef = useRef<number>(0)
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -219,8 +220,20 @@ function App() {
   
   // Load project on mount
   useEffect(() => {
+    const loadGen = projectLoadGenRef.current
+    console.log(`[Mount] Starting local project load, gen=${loadGen}`)
+    
     loadProject().then(async (state) => {
-      if (!state) return
+      if (!state) {
+        console.log(`[Mount] No local project found`)
+        return
+      }
+      
+      // Check if a newer load has started (cloud open or new project)
+      if (projectLoadGenRef.current !== loadGen) {
+        console.log(`[Mount] Aborting stale local load (gen ${loadGen}, current ${projectLoadGenRef.current})`)
+        return
+      }
       
       await ensureAudio()
       
@@ -285,16 +298,25 @@ function App() {
         }
       }))
       
+      // Final check before applying state
+      if (projectLoadGenRef.current !== loadGen) {
+        console.log(`[Mount] Aborting stale local load before setState (gen ${loadGen}, current ${projectLoadGenRef.current})`)
+        return
+      }
+      
       setTrackStates(newTrackStates)
-      setToastMessage('Proyecto cargado')
+      setToastMessage('Proyecto local cargado')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
+      console.log(`[Mount] Local project loaded successfully`)
     })
   }, [])
   
   const handleNewProject = async () => {
     if (!confirm('¿Crear un nuevo proyecto? Se perderá el trabajo no guardado.')) return
     
+    projectLoadGenRef.current++
+    console.log(`[New Project] Starting new project, gen=${projectLoadGenRef.current}`)
     await clearProject()
     setCurrentProjectName('Proyecto sin título')
     window.location.reload()
@@ -436,7 +458,15 @@ function App() {
   const handleOpenCloudProject = async (pathname: string, name: string) => {
     try {
       setErrorMessage(null)
+      projectLoadGenRef.current++
+      console.log(`[Cloud Open] Starting cloud project load, gen=${projectLoadGenRef.current}`)
       const state = await openProjectFromCloud(pathname)
+      
+      console.log(`[handleOpenCloudProject] Received state with ${state.tracks.length} tracks`)
+      state.tracks.forEach((t: any, i: number) => {
+        const clipCount = t.clips?.length || (t.clip ? 1 : 0)
+        console.log(`  Track ${i} (${t.name}): ${clipCount} clips`)
+      })
       
       await ensureAudio()
       
@@ -455,7 +485,7 @@ function App() {
         console.log(`Created gain node for track ${trackGainsRef.current.length - 1}`)
       }
       
-      const newTrackStates = state.tracks.map((t: any, i: number) => {
+      const loadedTracks = state.tracks.map((t: any, i: number) => {
         // Handle old format with single clip
         if (t.clip) {
           const buffer = new AudioBuffer({
@@ -526,6 +556,24 @@ function App() {
           clips: loadedClips
         }
       })
+      
+      // Pad to 8 tracks while preserving loaded tracks at correct indices
+      const newTrackStates = Array.from({ length: 8 }, (_, i) => {
+        if (i < loadedTracks.length) {
+          return loadedTracks[i]
+        }
+        return {
+          name: `Track ${i + 1}`,
+          mute: false,
+          solo: false,
+          volume: 0.8,
+          clips: []
+        }
+      })
+      
+      console.log(`Setting ${loadedTracks.length} loaded tracks, padded to ${newTrackStates.length} total`)
+      console.log(`Track 0 clips:`, newTrackStates[0].clips.length)
+      console.log(`Track 1 clips:`, newTrackStates[1].clips.length)
       
       setTrackStates(newTrackStates)
       setCurrentProjectName(name)

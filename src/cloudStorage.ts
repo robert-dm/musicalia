@@ -256,8 +256,9 @@ export async function saveProjectToCloud(
         clientPayload: JSON.stringify({ 
           token: authToken,
           projectName 
-        })
-      })
+        }),
+        addRandomSuffix: false
+      } as any)
       
       uploadedAudioFiles[`${trackIndex}_${clipIndex}`] = fileName
       onProgress?.(45 + ((i + 1) / audioFiles.length) * 40)
@@ -316,8 +317,9 @@ export async function saveProjectToCloud(
       clientPayload: JSON.stringify({ 
         token: authToken,
         projectName 
-      })
-    })
+      }),
+      addRandomSuffix: false
+    } as any)
     
     onProgress?.(100)
   } catch (err: any) {

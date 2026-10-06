@@ -227,11 +227,15 @@ async function processSingleStem(
     console.error(`Failed to process ${stemName}:`, error)
     const errorMsg = error instanceof Error ? error.message : String(error)
     
-    if (errorMsg.includes('bad_alloc') || errorMsg.includes('memory')) {
-      throw new Error(`Memoria insuficiente para ${stemName}. Intenta cerrar otras pestañas.`)
+    if (errorMsg.includes('bad_alloc') || errorMsg.includes('memory') || errorMsg.includes('OOM')) {
+      throw new Error(`Memoria insuficiente para separar stems. Usa un ordenador con más RAM o carga el audio como pista única.`)
     }
     
-    throw new Error(`Error al procesar ${stemName}: ${errorMsg}`)
+    if (errorMsg.includes('fetch') || errorMsg.includes('network') || errorMsg.includes('load')) {
+      throw new Error(`Error al descargar modelo de ${stemName}. Verifica tu conexión a internet. Cargando como pista única...`)
+    }
+    
+    throw new Error(`Error al procesar ${stemName}. Cargando como pista única...`)
   }
 }
 
@@ -627,6 +631,14 @@ export async function separateStems(
   }
   
   try {
+    // Early mobile check with clear error
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+    const memory = (navigator as any).deviceMemory
+    
+    if (isMobile || (memory !== undefined && memory < 4)) {
+      throw new Error('Dispositivo móvil o memoria insuficiente. La separación de stems requiere al menos 4GB de RAM. Cargando como pista única...')
+    }
+    
     await initializeRuntime()
     
     if (signal?.aborted) throw new Error('Cancelado por el usuario')
@@ -800,5 +812,26 @@ export function isStemSeparationSupported(): { supported: boolean, reason?: stri
   if (typeof WebAssembly === 'undefined') {
     return { supported: false, reason: 'WebAssembly no está disponible' }
   }
+  
+  // Check for mobile device
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+  
+  // Check available memory (if API available)
+  const memory = (navigator as any).deviceMemory
+  if (memory !== undefined && memory < 4) {
+    return { 
+      supported: false, 
+      reason: 'Memoria insuficiente. Se requieren al menos 4GB de RAM para separar stems. Se cargará como pista única.' 
+    }
+  }
+  
+  // Warn mobile users but don't block
+  if (isMobile && memory === undefined) {
+    return {
+      supported: false,
+      reason: 'Dispositivo móvil detectado. La separación de stems requiere mucha memoria y puede fallar. Se recomienda usar un ordenador o cargar como pista única.'
+    }
+  }
+  
   return { supported: true }
 }

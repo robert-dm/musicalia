@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0061b'
+const APP_VERSION = '0.0062b'
 
 interface Clip {
   player: Tone.Player
@@ -106,6 +106,8 @@ function App() {
   const [exportTracks, setExportTracks] = useState<boolean[]>([])
   const [isExporting, setIsExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState('')
+  const [exportMixed, setExportMixed] = useState(false)
+  const [exportIncludeCountIn, setExportIncludeCountIn] = useState(false)
   const [isDraggingClip, setIsDraggingClip] = useState(false)
   const [draggedClipTrack, setDraggedClipTrack] = useState<number | null>(null)
   const [draggedClipId, setDraggedClipId] = useState<string | null>(null)
@@ -588,33 +590,56 @@ function App() {
         return
       }
       
+      const countInSeconds = exportIncludeCountIn ? getCountInSeconds() : 0
       const maxDuration = Math.max(...effectiveIndices.flatMap(i => 
         trackStates[i].clips.map(clip => clip.offsetSeconds + clip.buffer.duration)
       ))
+      const totalDuration = maxDuration + countInSeconds
       const sampleRate = trackStates[effectiveIndices[0]].clips[0].buffer.sampleRate
       
-      for (let idx = 0; idx < effectiveIndices.length; idx++) {
-        const i = effectiveIndices[idx]
-        const track = trackStates[i]
+      if (exportMixed) {
+        // Export all tracks mixed into one file
+        setExportProgress('Renderizando mezcla...')
         
-        setExportProgress(`Renderizando ${idx + 1}/${effectiveIndices.length}...`)
+        const offlineContext = new OfflineAudioContext(2, totalDuration * sampleRate, sampleRate)
         
-        const offlineContext = new OfflineAudioContext(2, maxDuration * sampleRate, sampleRate)
-        const gainNode = offlineContext.createGain()
-        gainNode.gain.value = track.volume
-        gainNode.connect(offlineContext.destination)
+        // Add metronome count-in if requested
+        if (exportIncludeCountIn && metronomePlayerRef.current?.buffer) {
+          const beatsPerBar = 4
+          const totalBeats = countInBars * beatsPerBar
+          const secondsPerBeat = 60 / bpm
+          
+          for (let beat = 0; beat < totalBeats; beat++) {
+            const source = offlineContext.createBufferSource()
+            source.buffer = metronomePlayerRef.current.buffer.get() as AudioBuffer
+            const gain = offlineContext.createGain()
+            gain.gain.value = 0.5
+            source.connect(gain)
+            gain.connect(offlineContext.destination)
+            source.start(beat * secondsPerBeat)
+          }
+        }
         
-        // Render all clips on this track
-        for (const clip of track.clips) {
-          const source = offlineContext.createBufferSource()
-          source.buffer = clip.buffer
-          source.connect(gainNode)
-          source.start(clip.offsetSeconds)
+        // Mix all selected tracks
+        for (const i of effectiveIndices) {
+          const track = trackStates[i]
+          if (track.mute) continue
+          
+          const gainNode = offlineContext.createGain()
+          gainNode.gain.value = track.volume
+          gainNode.connect(offlineContext.destination)
+          
+          for (const clip of track.clips) {
+            const source = offlineContext.createBufferSource()
+            source.buffer = clip.buffer
+            source.connect(gainNode)
+            source.start(clip.offsetSeconds + countInSeconds)
+          }
         }
         
         const renderedBuffer = await offlineContext.startRendering()
         
-        setExportProgress(`Codificando ${idx + 1}/${effectiveIndices.length}...`)
+        setExportProgress('Codificando mezcla...')
         
         const wavData = encodeWAV(
           [renderedBuffer.getChannelData(0), renderedBuffer.getChannelData(1)],
@@ -624,8 +649,7 @@ function App() {
         const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
         const url = URL.createObjectURL(blob)
         
-        const trackName = track.name || `Pista ${i + 1}`
-        const fileName = sanitizeFilename(`${currentProjectName} - ${trackName}.wav`)
+        const fileName = sanitizeFilename(`${currentProjectName}.wav`)
         
         const a = document.createElement('a')
         a.href = url
@@ -634,7 +658,69 @@ function App() {
         
         URL.revokeObjectURL(url)
         
-        await new Promise(resolve => setTimeout(resolve, 100))
+      } else {
+        // Export tracks separately
+        for (let idx = 0; idx < effectiveIndices.length; idx++) {
+          const i = effectiveIndices[idx]
+          const track = trackStates[i]
+          
+          setExportProgress(`Renderizando ${idx + 1}/${effectiveIndices.length}...`)
+          
+          const offlineContext = new OfflineAudioContext(2, totalDuration * sampleRate, sampleRate)
+          
+          // Add metronome count-in if requested
+          if (exportIncludeCountIn && metronomePlayerRef.current?.buffer) {
+            const beatsPerBar = 4
+            const totalBeats = countInBars * beatsPerBar
+            const secondsPerBeat = 60 / bpm
+            
+            for (let beat = 0; beat < totalBeats; beat++) {
+              const source = offlineContext.createBufferSource()
+              source.buffer = metronomePlayerRef.current.buffer.get() as AudioBuffer
+              const gain = offlineContext.createGain()
+              gain.gain.value = 0.5
+              source.connect(gain)
+              gain.connect(offlineContext.destination)
+              source.start(beat * secondsPerBeat)
+            }
+          }
+          
+          const gainNode = offlineContext.createGain()
+          gainNode.gain.value = track.volume
+          gainNode.connect(offlineContext.destination)
+          
+          // Render all clips on this track
+          for (const clip of track.clips) {
+            const source = offlineContext.createBufferSource()
+            source.buffer = clip.buffer
+            source.connect(gainNode)
+            source.start(clip.offsetSeconds + countInSeconds)
+          }
+          
+          const renderedBuffer = await offlineContext.startRendering()
+          
+          setExportProgress(`Codificando ${idx + 1}/${effectiveIndices.length}...`)
+          
+          const wavData = encodeWAV(
+            [renderedBuffer.getChannelData(0), renderedBuffer.getChannelData(1)],
+            sampleRate
+          )
+          
+          const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
+          const url = URL.createObjectURL(blob)
+          
+          const trackName = track.name || `Pista ${i + 1}`
+          const fileName = sanitizeFilename(`${currentProjectName} - ${trackName}.wav`)
+          
+          const a = document.createElement('a')
+          a.href = url
+          a.download = fileName
+          a.click()
+          
+          URL.revokeObjectURL(url)
+          
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
       }
       
       setToastMessage('Exportación completada')
@@ -1011,15 +1097,19 @@ function App() {
   }
 
   const handleStop = () => {
+    // Capture current position before stopping
+    const currentPosition = Tone.getTransport().seconds
+    
     Tone.getTransport().stop()
-    Tone.getTransport().seconds = 0
     
     if (playheadAnimationRef.current !== null) {
       cancelAnimationFrame(playheadAnimationRef.current)
       playheadAnimationRef.current = null
     }
     
-    setPlayheadPosition(0)
+    // Preserve playhead position where playback stopped
+    setPlayheadPosition(currentPosition)
+    Tone.getTransport().seconds = currentPosition
     
     setTrackStates(prev => prev.map(track => ({
       ...track,
@@ -1723,6 +1813,17 @@ function App() {
     }
   }
 
+  const handleLoopToggle = () => {
+    if (isLoopEnabled) {
+      // Turning loop off - clear the region
+      setLoopStart(null)
+      setLoopEnd(null)
+      setTempLoopStart(null)
+      setTempLoopEnd(null)
+    }
+    setIsLoopEnabled(!isLoopEnabled)
+  }
+
   const handleLoopMouseDown = (e: React.MouseEvent<HTMLDivElement>, edge?: 'start' | 'end') => {
     if (!isLoopEnabled) return
     
@@ -1998,7 +2099,7 @@ function App() {
           </button>
           <button
             className={`transport-button ${isLoopEnabled ? 'active' : ''}`}
-            onClick={() => setIsLoopEnabled(!isLoopEnabled)}
+            onClick={handleLoopToggle}
             title="Activar loop - arrastra en el timeline para marcar zona"
           >
             🔁
@@ -2154,7 +2255,33 @@ function App() {
           <div className="modal-content">
             <h2>Exportar proyecto</h2>
             <p style={{ fontSize: '13px', color: '#999', marginBottom: '16px' }}>
-              Selecciona las pistas a incluir en el archivo exportado
+              Configura las opciones de exportación
+            </p>
+            
+            <div style={{ marginBottom: '16px', padding: '12px', background: '#2a2a2a', borderRadius: '4px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', marginBottom: '8px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={exportMixed}
+                  onChange={(e) => setExportMixed(e.target.checked)}
+                  style={{ marginRight: '8px' }}
+                />
+                <span>Mezclar todo en un archivo (en vez de pistas separadas)</span>
+              </label>
+              
+              <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={exportIncludeCountIn}
+                  onChange={(e) => setExportIncludeCountIn(e.target.checked)}
+                  style={{ marginRight: '8px' }}
+                />
+                <span>Incluir metrónomo de entrada (2 compases)</span>
+              </label>
+            </div>
+            
+            <p style={{ fontSize: '13px', color: '#999', marginBottom: '12px' }}>
+              Selecciona las pistas a incluir
             </p>
             <div className="export-tracks-list">
               {trackStates.map((track, i) => (

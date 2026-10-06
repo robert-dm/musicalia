@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0064b'
+const APP_VERSION = '0.0065b'
 
 interface Clip {
   player: Tone.Player
@@ -438,6 +438,12 @@ function App() {
       setErrorMessage(null)
       const state = await openProjectFromCloud(pathname)
       
+      console.log(`[handleOpenCloudProject] Received state with ${state.tracks.length} tracks`)
+      state.tracks.forEach((t: any, i: number) => {
+        const clipCount = t.clips?.length || (t.clip ? 1 : 0)
+        console.log(`  Track ${i} (${t.name}): ${clipCount} clips`)
+      })
+      
       await ensureAudio()
       
       setBpm(state.bpm)
@@ -455,7 +461,7 @@ function App() {
         console.log(`Created gain node for track ${trackGainsRef.current.length - 1}`)
       }
       
-      const newTrackStates = state.tracks.map((t: any, i: number) => {
+      const loadedTracks = state.tracks.map((t: any, i: number) => {
         // Handle old format with single clip
         if (t.clip) {
           const buffer = new AudioBuffer({
@@ -526,6 +532,24 @@ function App() {
           clips: loadedClips
         }
       })
+      
+      // Pad to 8 tracks while preserving loaded tracks at correct indices
+      const newTrackStates = Array.from({ length: 8 }, (_, i) => {
+        if (i < loadedTracks.length) {
+          return loadedTracks[i]
+        }
+        return {
+          name: `Track ${i + 1}`,
+          mute: false,
+          solo: false,
+          volume: 0.8,
+          clips: []
+        }
+      })
+      
+      console.log(`Setting ${loadedTracks.length} loaded tracks, padded to ${newTrackStates.length} total`)
+      console.log(`Track 0 clips:`, newTrackStates[0].clips.length)
+      console.log(`Track 1 clips:`, newTrackStates[1].clips.length)
       
       setTrackStates(newTrackStates)
       setCurrentProjectName(name)

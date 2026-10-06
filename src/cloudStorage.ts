@@ -491,24 +491,61 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
       console.log(`Loading ${t.clips.length} clips for track ${trackIndex} (${t.name})`)
       
       const loadedClips = await Promise.all(t.clips.map(async (clip: any, clipIndex: number) => {
+        let audioBlob
+        
         if (!clip.audioFile) {
-          console.warn(`Clip ${clipIndex} on track ${trackIndex} has no audioFile, skipping`)
-          return null
-        }
-        
-        console.log(`Looking for audio file: ${clip.audioFile}`)
-        console.log(`Available blobs:`, blobs.map((b: any) => b.pathname))
-        
-        const audioBlob = blobs.find((b: any) => 
-          b.pathname.endsWith(`/${clip.audioFile}`) || 
-          b.pathname.endsWith(clip.audioFile) ||
-          b.pathname.includes(`/${clip.audioFile}`)
-        )
-        
-        if (!audioBlob) {
-          console.error(`Audio blob not found for ${t.name} clip ${clipIndex}: ${clip.audioFile}`)
-          console.error(`Searched in ${blobs.length} blobs`)
-          throw new Error(`Audio no encontrado: ${clip.audioFile}`)
+          console.warn(`Clip ${clipIndex} on track ${trackIndex} has no audioFile, trying to recover...`)
+          
+          // Try to find blob matching audio_{trackIndex}_{clipIndex}*.wav pattern
+          const expectedBasename = `audio_${trackIndex}_${clipIndex}`
+          audioBlob = blobs.find((b: any) => {
+            const filename = b.pathname.split('/').pop()
+            return filename && (
+              filename === `${expectedBasename}.wav` ||
+              filename.startsWith(`${expectedBasename}-`) ||
+              filename.startsWith(`${expectedBasename}_`)
+            )
+          })
+          
+          if (audioBlob) {
+            console.log(`✅ RECOVERED: Found blob for track ${trackIndex} clip ${clipIndex}: ${audioBlob.pathname}`)
+          } else {
+            console.warn(`❌ Could not recover clip ${clipIndex} on track ${trackIndex}, no matching blob found`)
+            return null
+          }
+        } else {
+          console.log(`Looking for audio file: ${clip.audioFile}`)
+          
+          // Try exact match first
+          audioBlob = blobs.find((b: any) => 
+            b.pathname.endsWith(`/${clip.audioFile}`) || 
+            b.pathname.endsWith(clip.audioFile)
+          )
+          
+          // If not found, try with suffix (handles renamed files like audio_0_0-abc123.wav)
+          if (!audioBlob && clip.audioFile) {
+            const basenameWithoutExt = clip.audioFile.replace(/\.[^.]+$/, '')
+            console.log(`Exact match failed, trying basename: ${basenameWithoutExt}`)
+            
+            audioBlob = blobs.find((b: any) => {
+              const filename = b.pathname.split('/').pop()
+              return filename && (
+                filename === clip.audioFile ||
+                filename.startsWith(`${basenameWithoutExt}-`) ||
+                filename.startsWith(`${basenameWithoutExt}_`)
+              )
+            })
+            
+            if (audioBlob) {
+              console.log(`✅ MATCHED with suffix: ${clip.audioFile} → ${audioBlob.pathname}`)
+            }
+          }
+          
+          if (!audioBlob) {
+            console.error(`Audio blob not found for ${t.name} clip ${clipIndex}: ${clip.audioFile}`)
+            console.error(`Available blobs:`, blobs.map((b: any) => b.pathname))
+            throw new Error(`Audio no encontrado: ${clip.audioFile}`)
+          }
         }
         
         console.log(`Downloading audio from: ${audioBlob.pathname}`)
@@ -565,22 +602,60 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     } else if (t.clip) {
       console.log(`Loading single clip for track ${trackIndex} (${t.name}, old format)`)
       
+      let audioBlob
+      
       if (!t.clip.audioFile) {
-        console.warn(`Track ${trackIndex} has no audioFile in clip, skipping`)
-        return { ...t, clips: [] }
-      }
-      
-      console.log(`Looking for audio file: ${t.clip.audioFile}`)
-      
-      const audioBlob = blobs.find((b: any) => 
-        b.pathname.endsWith(`/${t.clip.audioFile}`) || 
-        b.pathname.endsWith(t.clip.audioFile) ||
-        b.pathname.includes(`/${t.clip.audioFile}`)
-      )
-      
-      if (!audioBlob) {
-        console.error(`Audio blob not found for ${t.name}: ${t.clip.audioFile}`)
-        throw new Error(`Audio no encontrado: ${t.clip.audioFile}`)
+        console.warn(`Track ${trackIndex} has no audioFile in clip, trying to recover...`)
+        
+        // Try to find blob matching audio_{trackIndex}_0*.wav pattern
+        const expectedBasename = `audio_${trackIndex}_0`
+        audioBlob = blobs.find((b: any) => {
+          const filename = b.pathname.split('/').pop()
+          return filename && (
+            filename === `${expectedBasename}.wav` ||
+            filename.startsWith(`${expectedBasename}-`) ||
+            filename.startsWith(`${expectedBasename}_`)
+          )
+        })
+        
+        if (audioBlob) {
+          console.log(`✅ RECOVERED: Found blob for track ${trackIndex}: ${audioBlob.pathname}`)
+        } else {
+          console.warn(`❌ Could not recover track ${trackIndex}, returning empty`)
+          return { ...t, clips: [] }
+        }
+      } else {
+        console.log(`Looking for audio file: ${t.clip.audioFile}`)
+        
+        // Try exact match first
+        audioBlob = blobs.find((b: any) => 
+          b.pathname.endsWith(`/${t.clip.audioFile}`) || 
+          b.pathname.endsWith(t.clip.audioFile)
+        )
+        
+        // If not found, try with suffix
+        if (!audioBlob && t.clip.audioFile) {
+          const basenameWithoutExt = t.clip.audioFile.replace(/\.[^.]+$/, '')
+          console.log(`Exact match failed, trying basename: ${basenameWithoutExt}`)
+          
+          audioBlob = blobs.find((b: any) => {
+            const filename = b.pathname.split('/').pop()
+            return filename && (
+              filename === t.clip.audioFile ||
+              filename.startsWith(`${basenameWithoutExt}-`) ||
+              filename.startsWith(`${basenameWithoutExt}_`)
+            )
+          })
+          
+          if (audioBlob) {
+            console.log(`✅ MATCHED with suffix: ${t.clip.audioFile} → ${audioBlob.pathname}`)
+          }
+        }
+        
+        if (!audioBlob) {
+          console.error(`Audio blob not found for ${t.name}: ${t.clip.audioFile}`)
+          throw new Error(`Audio no encontrado: ${t.clip.audioFile}`)
+        }
       }
       
       console.log(`Downloading audio from: ${audioBlob.pathname}`)

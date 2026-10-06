@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0066b'
+const APP_VERSION = '0.0067b'
 
 interface Clip {
   player: Tone.Player
@@ -2608,10 +2608,11 @@ function App() {
           <div className="bar-ruler">
             {rulerBars}
           </div>
-          {trackStates.map((trackState, trackIndex) => {
-            const hasClips = trackState.clips.length > 0
-            const isAnyClipPlaying = trackState.clips.some(c => c.isPlaying)
+          {(() => {
             const maxDur = getMaxDuration() || 100
+            return trackStates.map((trackState, trackIndex) => {
+              const hasClips = trackState.clips.length > 0
+              const isAnyClipPlaying = trackState.clips.some(c => c.isPlaying)
             
             return (
             <div 
@@ -2717,7 +2718,8 @@ function App() {
               )}
             </div>
             )
-          })}
+            })
+          })()}
         </div>
       </div>
     </div>

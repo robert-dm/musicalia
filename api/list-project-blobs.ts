@@ -16,12 +16,8 @@ export async function GET(request: Request) {
       return Response.json({ error: 'Prefix requerido' }, { status: 400 })
     }
 
-    // Validate that prefix is for this user's projects
-    // Allow both musicalia-projects/{userId}/ and legacy musicalia-projects/ paths
-    const isUserPath = prefix.startsWith(`musicalia-projects/${session.userId}/`)
-    const isLegacyPath = prefix.startsWith('musicalia-projects/') && !prefix.includes(session.userId)
-    
-    if (!isUserPath && !isLegacyPath) {
+    // Validate that prefix is for this user's projects only
+    if (!prefix.startsWith(`musicalia-projects/${session.userId}/`)) {
       console.error(`Access denied: prefix="${prefix}", userId="${session.userId}"`)
       return Response.json({ error: 'Acceso denegado' }, { status: 403 })
     }

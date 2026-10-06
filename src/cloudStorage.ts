@@ -407,39 +407,40 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     })
   }
   
-  // For folder-based projects, try current user-scoped path first, then legacy path
-  let listResponse = await fetch(`/api/list-project-blobs?prefix=${encodeURIComponent(pathname)}`, {
+  // For folder-based projects, list blobs with the project prefix
+  const listResponse = await fetch(`/api/list-project-blobs?prefix=${encodeURIComponent(pathname)}`, {
     headers: { 'Authorization': `Bearer ${authToken}` }
   })
   
-  let blobs = []
-  if (listResponse.ok) {
-    blobs = await listResponse.json()
+  if (!listResponse.ok) {
+    // Surface the actual API error instead of swallowing it
+    const contentType = listResponse.headers.get('content-type')
+    if (contentType?.includes('application/json')) {
+      try {
+        const errorData = await listResponse.json()
+        throw new Error(errorData.error || 'Error al buscar archivos del proyecto')
+      } catch (e) {
+        if (e instanceof Error && e.message !== 'Error al buscar archivos del proyecto') {
+          throw e
+        }
+      }
+    }
+    throw new Error('Error al buscar archivos del proyecto')
   }
   
-  // If no blobs found and pathname looks like it might be legacy (no userId in second position),
-  // this shouldn't happen since list API already filters by userId
+  const blobs = await listResponse.json()
   
   // Find the project.json blob (may have suffix like project-abc.json)
-  let projectJsonBlob = blobs.find((b: any) => 
+  const projectJsonBlob = blobs.find((b: any) => 
     b.pathname.endsWith('/project.json') || b.pathname.match(/\/project[^/]*\.json$/)
   )
   
   if (!projectJsonBlob) {
-    // Try looking for project.json without trailing slash (edge case)
-    projectJsonBlob = blobs.find((b: any) => 
-      b.pathname === `${pathname}/project.json` || 
-      b.pathname.startsWith(`${pathname}/`) && b.pathname.match(/\/project[^/]*\.json$/)
-    )
-  }
-  
-  if (!projectJsonBlob && blobs.length > 0) {
-    // Debug: log what blobs were found to help diagnose the issue
-    console.error('No project.json found. Blobs:', blobs.map((b: any) => b.pathname))
-    throw new Error('Proyecto encontrado pero sin project.json. Puede estar corrupto.')
-  }
-  
-  if (!projectJsonBlob) {
+    if (blobs.length > 0) {
+      // Project folder exists but no project.json
+      console.error('No project.json found. Blobs:', blobs.map((b: any) => b.pathname))
+      throw new Error('Proyecto encontrado pero sin project.json. Puede estar corrupto.')
+    }
     throw new Error('El proyecto no existe en la nube')
   }
   
@@ -449,11 +450,19 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
   })
   
   if (!metadataResponse.ok) {
-    const text = await metadataResponse.text()
-    if (text.includes('does not exist') || text.includes('not found')) {
-      throw new Error('Archivo no encontrado')
+    // Surface the real API error from download endpoint
+    const contentType = metadataResponse.headers.get('content-type')
+    if (contentType?.includes('application/json')) {
+      try {
+        const errorData = await metadataResponse.json()
+        throw new Error(errorData.error || 'Error al descargar project.json')
+      } catch (e) {
+        if (e instanceof Error && e.message !== 'Error al descargar project.json') {
+          throw e
+        }
+      }
     }
-    throw new Error('El proyecto no existe en la nube')
+    throw new Error('Error al descargar project.json')
   }
   
   const projectJson = await metadataResponse.json()

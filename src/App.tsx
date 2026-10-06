@@ -943,8 +943,8 @@ function App() {
     
     const countInSeconds = getCountInSeconds()
     // When loop is enabled and marked, always start from loop start
-    // Otherwise, resume from playhead if paused, or start from beginning
-    const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : (isPaused ? playheadPosition : 0)
+    // Otherwise, start from current playhead position (clicked or paused)
+    const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : playheadPosition
     
     // Configure Transport loop
     if (isLoopEnabled && loopStart !== null && loopEnd !== null) {

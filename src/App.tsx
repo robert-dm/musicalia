@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0065b'
+const APP_VERSION = '0.0066b'
 
 interface Clip {
   player: Tone.Player
@@ -1483,14 +1483,21 @@ function App() {
     } catch (error) {
       console.error('Stem separation failed:', error)
       const errorMessage = error instanceof Error ? error.message : 'Error desconocido'
-      alert(`Error al separar stems: ${errorMessage}\n\nCargando como una sola pista.`)
+      
+      // Show error message via toast/error system instead of alert
+      setErrorMessage(`⚠️ Separación de stems no disponible: ${errorMessage}`)
+      setTimeout(() => setErrorMessage(null), 5000)
       
       // Fall back to single track import
       try {
         await loadSingleTrack(file, track)
+        setToastMessage('Audio cargado como pista única')
+        setShowToast(true)
+        setTimeout(() => setShowToast(false), 3000)
       } catch (loadError) {
         console.error('Failed to load single track:', loadError)
-        alert('Error al cargar el archivo de audio.')
+        setErrorMessage('Error al cargar el archivo de audio.')
+        setTimeout(() => setErrorMessage(null), 5000)
       }
     } finally {
       setIsProcessingStems(false)

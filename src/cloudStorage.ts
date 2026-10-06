@@ -413,6 +413,18 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
   })
   
   if (!listResponse.ok) {
+    // Surface the actual API error instead of swallowing it
+    const contentType = listResponse.headers.get('content-type')
+    if (contentType?.includes('application/json')) {
+      try {
+        const errorData = await listResponse.json()
+        throw new Error(errorData.error || 'Error al buscar archivos del proyecto')
+      } catch (e) {
+        if (e instanceof Error && e.message !== 'Error al buscar archivos del proyecto') {
+          throw e
+        }
+      }
+    }
     throw new Error('Error al buscar archivos del proyecto')
   }
   
@@ -424,6 +436,11 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
   )
   
   if (!projectJsonBlob) {
+    if (blobs.length > 0) {
+      // Project folder exists but no project.json
+      console.error('No project.json found. Blobs:', blobs.map((b: any) => b.pathname))
+      throw new Error('Proyecto encontrado pero sin project.json. Puede estar corrupto.')
+    }
     throw new Error('El proyecto no existe en la nube')
   }
   
@@ -433,11 +450,19 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
   })
   
   if (!metadataResponse.ok) {
-    const text = await metadataResponse.text()
-    if (text.includes('does not exist') || text.includes('not found')) {
-      throw new Error('Archivo no encontrado')
+    // Surface the real API error from download endpoint
+    const contentType = metadataResponse.headers.get('content-type')
+    if (contentType?.includes('application/json')) {
+      try {
+        const errorData = await metadataResponse.json()
+        throw new Error(errorData.error || 'Error al descargar project.json')
+      } catch (e) {
+        if (e instanceof Error && e.message !== 'Error al descargar project.json') {
+          throw e
+        }
+      }
     }
-    throw new Error('El proyecto no existe en la nube')
+    throw new Error('Error al descargar project.json')
   }
   
   const projectJson = await metadataResponse.json()

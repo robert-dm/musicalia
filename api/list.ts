@@ -88,6 +88,9 @@ export async function GET(request: Request) {
         uploadedAt: project.uploadedAt
       }))
     
+    console.log(`list: Found ${projects.length} projects for user ${session.userId}`)
+    projects.forEach(p => console.log(`  - ${p.name}: ${p.pathname}`))
+    
     return Response.json(projects)
   } catch (error: any) {
     console.error('List error:', error)

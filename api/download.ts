@@ -1,4 +1,4 @@
-import { head } from '@vercel/blob'
+import { get } from '@vercel/blob'
 import { getVercelOidcToken } from '@vercel/oidc'
 import { getSessionFromRequest } from './_lib/auth-utils.js'
 
@@ -32,22 +32,23 @@ export async function GET(request: Request) {
       }, { status: 500 })
     }
     
-    const blob = await head(pathname, { storeId, oidcToken })
+    // Use authenticated get() instead of head() + fetch(blob.url)
+    // This works for both public and private blobs with proper OIDC auth
+    const result = await get(pathname, {
+      access: 'public',
+      storeId,
+      oidcToken
+    })
     
-    if (!blob) {
+    if (!result || !result.stream) {
       return Response.json({ error: 'Archivo no encontrado' }, { status: 404 })
     }
     
-    const response = await fetch(blob.url)
-    
-    if (!response.ok) {
-      return Response.json({ error: 'Error al descargar archivo' }, { status: 500 })
-    }
-    
-    return new Response(response.body, {
+    // Stream the blob content with authenticated access
+    return new Response(result.stream, {
       headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': blob.size.toString()
+        'Content-Type': result.blob.contentType || 'application/octet-stream',
+        'Content-Length': result.blob.size.toString()
       }
     })
   } catch (error: any) {

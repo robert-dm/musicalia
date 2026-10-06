@@ -16,7 +16,9 @@ export async function GET(request: Request) {
       return Response.json({ error: 'Prefix requerido' }, { status: 400 })
     }
 
+    // Validate that prefix is for this user's projects only
     if (!prefix.startsWith(`musicalia-projects/${session.userId}/`)) {
+      console.error(`Access denied: prefix="${prefix}", userId="${session.userId}"`)
       return Response.json({ error: 'Acceso denegado' }, { status: 403 })
     }
     
@@ -33,18 +35,13 @@ export async function GET(request: Request) {
     }
     
     // Call list() with the prefix and return the blobs array
-    // Example blob shape from list() result:
-    // {
-    //   pathname: "musicalia/MyProject/project.json",
-    //   url: "https://...",
-    //   size: 1234,
-    //   uploadedAt: Date
-    // }
     const { blobs } = await list({ 
       prefix: prefix.endsWith('/') ? prefix : `${prefix}/`,
       storeId,
       oidcToken
     })
+    
+    console.log(`list-project-blobs: prefix="${prefix}", found ${blobs.length} blobs`)
     
     return Response.json(blobs)
   } catch (error: any) {

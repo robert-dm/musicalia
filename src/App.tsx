@@ -1758,6 +1758,7 @@ function App() {
     })
     
     const newTrackStates = [...trackStates]
+    const stemOffset = getCountInSeconds()
 
     for (let i = 0; i < stemBuffers.length; i++) {
       const targetTrackIndex = startTrackIndex + i
@@ -1777,7 +1778,7 @@ function App() {
         isPlaying: false,
         buffer: stemBuffers[i],
         startPosition: 0,
-        offsetSeconds: getCountInSeconds(),
+        offsetSeconds: stemOffset,
         id: `clip-${Date.now()}-${i}-${Math.random()}`
       }
 
@@ -2542,6 +2543,7 @@ function App() {
 
       <div className="arrangement-view">
         <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
+          <div className="ruler-spacer" style={{ height: '32px', flexShrink: 0, borderBottom: '1px solid #333' }} />
           {trackStates.map((trackState, trackIndex) => (
             <div key={trackIndex} className="track-header" style={{ height: `${88 * verticalZoom}px` }}>
               <div className="track-name">{trackState.name || `Track ${trackIndex + 1}`}</div>

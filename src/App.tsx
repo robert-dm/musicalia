@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0063b'
+const APP_VERSION = '0.0064b'
 
 interface Clip {
   player: Tone.Player
@@ -514,10 +514,22 @@ function App() {
       setTrackStates(newTrackStates)
       setCurrentProjectName(name)
       setShowCloudProjects(false)
-      setToastMessage('Proyecto abierto')
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
+      
+      // Verify tracks actually have audio before showing success
+      const tracksWithAudio = newTrackStates.filter((t: any) => t.clips && t.clips.length > 0)
+      const totalClips = newTrackStates.reduce((sum: number, t: any) => sum + (t.clips?.length || 0), 0)
+      
+      console.log(`Loaded project "${name}": ${tracksWithAudio.length} tracks with ${totalClips} clips`)
+      
+      if (totalClips > 0) {
+        setToastMessage(`Proyecto abierto: ${totalClips} clips en ${tracksWithAudio.length} pistas`)
+        setShowToast(true)
+        setTimeout(() => setShowToast(false), 3000)
+      } else {
+        throw new Error('El proyecto se cargó pero no tiene audio. Los archivos pueden estar corruptos.')
+      }
     } catch (err: any) {
+      console.error('Failed to open project:', err)
       setErrorMessage(err.message || 'Error al abrir proyecto')
     }
   }

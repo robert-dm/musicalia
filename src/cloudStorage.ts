@@ -486,34 +486,55 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     throw new Error('El archivo del proyecto está corrupto. Puede que la guardada falló.')
   }
   
-  const tracks = await Promise.all(projectJson.tracks.map(async (t: any) => {
+  const tracks = await Promise.all(projectJson.tracks.map(async (t: any, trackIndex: number) => {
     if (t.clips && Array.isArray(t.clips)) {
-      const loadedClips = await Promise.all(t.clips.map(async (clip: any) => {
-        if (!clip.audioFile) return null
+      console.log(`Loading ${t.clips.length} clips for track ${trackIndex} (${t.name})`)
+      
+      const loadedClips = await Promise.all(t.clips.map(async (clip: any, clipIndex: number) => {
+        if (!clip.audioFile) {
+          console.warn(`Clip ${clipIndex} on track ${trackIndex} has no audioFile, skipping`)
+          return null
+        }
+        
+        console.log(`Looking for audio file: ${clip.audioFile}`)
+        console.log(`Available blobs:`, blobs.map((b: any) => b.pathname))
         
         const audioBlob = blobs.find((b: any) => 
-          b.pathname.endsWith(`/${clip.audioFile}`) || b.pathname.endsWith(clip.audioFile)
+          b.pathname.endsWith(`/${clip.audioFile}`) || 
+          b.pathname.endsWith(clip.audioFile) ||
+          b.pathname.includes(`/${clip.audioFile}`)
         )
         
         if (!audioBlob) {
-          console.error(`Audio no encontrado para ${t.name}: ${clip.audioFile}`)
-          throw new Error(`Audio no encontrado para ${t.name}`)
+          console.error(`Audio blob not found for ${t.name} clip ${clipIndex}: ${clip.audioFile}`)
+          console.error(`Searched in ${blobs.length} blobs`)
+          throw new Error(`Audio no encontrado: ${clip.audioFile}`)
         }
+        
+        console.log(`Downloading audio from: ${audioBlob.pathname}`)
         
         const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioBlob.pathname)}`, {
           headers: { 'Authorization': `Bearer ${authToken!}` }
         })
         
         if (!audioResponse.ok) {
-          const text = await audioResponse.text()
-          if (text.includes('does not exist') || text.includes('not found')) {
-            throw new Error(`Audio no encontrado para ${t.name}`)
+          const contentType = audioResponse.headers.get('content-type')
+          if (contentType?.includes('application/json')) {
+            try {
+              const errorData = await audioResponse.json()
+              throw new Error(errorData.error || `Error al descargar ${clip.audioFile}`)
+            } catch (e) {
+              if (e instanceof Error && !e.message.includes('Error al descargar')) {
+                throw e
+              }
+            }
           }
-          console.error(`Audio no encontrado para ${t.name} en ${audioBlob.pathname}`)
-          throw new Error(`Audio no encontrado para ${t.name}`)
+          throw new Error(`Error al descargar ${clip.audioFile}`)
         }
         
+        console.log(`Decoding audio for ${clip.audioFile}`)
         const audioBuffer = await new AudioContext().decodeAudioData(await audioResponse.arrayBuffer())
+        console.log(`Successfully loaded ${clip.audioFile}: ${audioBuffer.duration}s`)
         
         return {
           fileName: clip.fileName,
@@ -528,41 +549,64 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
         }
       }))
       
+      const validClips = loadedClips.filter(c => c !== null)
+      
+      if (t.clips.length > 0 && validClips.length === 0) {
+        throw new Error(`Todas los clips de ${t.name} faltan archivos de audio. El proyecto puede estar corrupto.`)
+      }
+      
       return {
         name: t.name,
         mute: t.mute,
         solo: t.solo,
         volume: t.volume,
-        clips: loadedClips.filter(c => c !== null)
+        clips: validClips
       }
     } else if (t.clip) {
+      console.log(`Loading single clip for track ${trackIndex} (${t.name}, old format)`)
+      
       if (!t.clip.audioFile) {
+        console.warn(`Track ${trackIndex} has no audioFile in clip, skipping`)
         return { ...t, clips: [] }
       }
       
+      console.log(`Looking for audio file: ${t.clip.audioFile}`)
+      
       const audioBlob = blobs.find((b: any) => 
-        b.pathname.endsWith(`/${t.clip.audioFile}`) || b.pathname.endsWith(t.clip.audioFile)
+        b.pathname.endsWith(`/${t.clip.audioFile}`) || 
+        b.pathname.endsWith(t.clip.audioFile) ||
+        b.pathname.includes(`/${t.clip.audioFile}`)
       )
       
       if (!audioBlob) {
-        console.error(`Audio no encontrado para ${t.name}: ${t.clip.audioFile}`)
-        throw new Error(`Audio no encontrado para ${t.name}`)
+        console.error(`Audio blob not found for ${t.name}: ${t.clip.audioFile}`)
+        throw new Error(`Audio no encontrado: ${t.clip.audioFile}`)
       }
+      
+      console.log(`Downloading audio from: ${audioBlob.pathname}`)
       
       const audioResponse = await fetch(`/api/download?path=${encodeURIComponent(audioBlob.pathname)}`, {
         headers: { 'Authorization': `Bearer ${authToken!}` }
       })
       
       if (!audioResponse.ok) {
-        const text = await audioResponse.text()
-        if (text.includes('does not exist') || text.includes('not found')) {
-          throw new Error(`Audio no encontrado para ${t.name}`)
+        const contentType = audioResponse.headers.get('content-type')
+        if (contentType?.includes('application/json')) {
+          try {
+            const errorData = await audioResponse.json()
+            throw new Error(errorData.error || `Error al descargar ${t.clip.audioFile}`)
+          } catch (e) {
+            if (e instanceof Error && !e.message.includes('Error al descargar')) {
+              throw e
+            }
+          }
         }
-        console.error(`Audio no encontrado para ${t.name} en ${audioBlob.pathname}`)
-        throw new Error(`Audio no encontrado para ${t.name}`)
+        throw new Error(`Error al descargar ${t.clip.audioFile}`)
       }
       
+      console.log(`Decoding audio for ${t.clip.audioFile}`)
       const audioBuffer = await new AudioContext().decodeAudioData(await audioResponse.arrayBuffer())
+      console.log(`Successfully loaded ${t.clip.audioFile}: ${audioBuffer.duration}s`)
       
       return {
         name: t.name,
@@ -582,6 +626,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
         }]
       }
     } else {
+      console.log(`Track ${trackIndex} (${t.name}) has no clips`)
       return {
         name: t.name,
         mute: t.mute,
@@ -592,11 +637,23 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     }
   }))
   
+  // Validate that at least some tracks have audio
+  const tracksWithAudio = tracks.filter(t => t.clips && t.clips.length > 0)
+  const totalClips = tracks.reduce((sum, t) => sum + (t.clips?.length || 0), 0)
+  
+  console.log(`Loaded ${tracksWithAudio.length} tracks with audio, ${totalClips} total clips`)
+  
+  if (totalClips === 0) {
+    throw new Error('El proyecto no tiene audio. Los archivos pueden haber sido eliminados o la guardada falló.')
+  }
+  
   return {
     bpm: projectJson.bpm,
     loopStart: projectJson.loopStart,
     loopEnd: projectJson.loopEnd,
     playheadPosition: projectJson.playheadPosition,
+    metronomeEnabled: projectJson.metronomeEnabled,
+    isLoopEnabled: projectJson.isLoopEnabled,
     tracks
   }
 }

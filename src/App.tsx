@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0067b'
+const APP_VERSION = '0.0068b'
 
 interface Clip {
   player: Tone.Player
@@ -102,6 +102,7 @@ function App() {
   const [storageUsage, setStorageUsage] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string>('')
+  const [isSaving, setIsSaving] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [exportTracks, setExportTracks] = useState<boolean[]>([])
   const [isExporting, setIsExporting] = useState(false)
@@ -367,6 +368,13 @@ function App() {
   }
   
   const handleSaveToCloud = async () => {
+    // Prevent concurrent saves
+    if (isSaving) {
+      setErrorMessage('Ya hay una guardada en progreso. Espera a que termine.')
+      setTimeout(() => setErrorMessage(null), 3000)
+      return
+    }
+    
     if (!currentUser) {
       setShowAuth(true)
       setAuthMode('login')
@@ -374,8 +382,25 @@ function App() {
       return
     }
     
+    // Validate that project has at least one clip with audio
+    const hasAnyAudio = trackStates.some(t => t.clips.length > 0)
+    if (!hasAnyAudio) {
+      setErrorMessage('No hay audio para guardar. Importa al menos un archivo de audio.')
+      setTimeout(() => setErrorMessage(null), 5000)
+      return
+    }
+    
     const name = prompt('Nombre del proyecto:', currentProjectName)
-    if (!name) return
+    if (!name) {
+      // User cancelled - no error needed
+      return
+    }
+    
+    if (!name.trim()) {
+      setErrorMessage('El nombre del proyecto no puede estar vacío')
+      setTimeout(() => setErrorMessage(null), 3000)
+      return
+    }
     
     const projectData = {
       name,
@@ -403,18 +428,27 @@ function App() {
       }))
     }
     
+    setIsSaving(true)
+    
     try {
       setUploadProgress(0)
       setErrorMessage(null)
+      console.log(`[Save] Starting save for project "${name}"`)
       await saveProjectToCloud(projectData, name, setUploadProgress)
+      console.log(`[Save] Save completed successfully`)
       setCurrentProjectName(name)
       setToastMessage('Proyecto guardado en la nube')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
-      setErrorMessage(err.message || 'Error al guardar proyecto')
+      console.error('[Save] Save failed:', err)
+      const errorMsg = err.message || 'Error al guardar proyecto'
+      setErrorMessage(errorMsg)
+      // Keep error visible longer for debugging
+      setTimeout(() => setErrorMessage(null), 8000)
     } finally {
       setUploadProgress(0)
+      setIsSaving(false)
     }
   }
   

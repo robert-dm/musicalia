@@ -29,7 +29,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  flex: 1 1 480px;
+  min-width: 0;
 }
 
 .transport-playback {
@@ -405,6 +407,10 @@
   height: 32px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-end;
+  padding: 0 8px 4px;
+  box-sizing: border-box;
 }
 
 .add-track-button {
@@ -1266,7 +1272,7 @@
     display: none;
   }
 
-  .header-btn {
+  .header-btn:not(.has-label) {
     width: var(--control-h);
     padding: 0;
   }
@@ -1533,4 +1539,118 @@
 .auto-lane-point.selected {
   fill: var(--accent);
   stroke: #fff;
+}
+
+.practice-button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.isolate-button {
+  width: auto;
+  min-width: 26px;
+  padding: 0 4px;
+  font-size: 9px;
+}
+
+.isolate-button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.practice-transport,
+.pitch-tempo-controls,
+.harmony-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.pt-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 650;
+}
+
+.pt-field input[type='range'] {
+  width: 72px;
+}
+
+.pt-value {
+  min-width: 34px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.bpm-effective {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.key-badge {
+  height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-pill);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.harmony-source {
+  height: 28px;
+  max-width: 120px;
+  padding: 0 6px;
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+}
+
+.chord-ruler {
+  position: relative;
+  height: 22px;
+  background: #14161c;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.chord-key {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.chord-label {
+  position: absolute;
+  top: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 0 4px #000;
 }

@@ -11,6 +11,8 @@ export interface TrackHeaderDataProps {
   recordArmed?: boolean
   fxOpen?: boolean
   autoOpen?: boolean
+  practiceActive?: boolean
+  isolated?: boolean
 }
 
 export interface TrackLaneDataProps {
@@ -44,6 +46,8 @@ export function trackHeaderDataEqual(prev: TrackHeaderDataProps, next: TrackHead
     prev.recordArmed === next.recordArmed &&
     prev.fxOpen === next.fxOpen &&
     prev.autoOpen === next.autoOpen &&
+    prev.practiceActive === next.practiceActive &&
+    prev.isolated === next.isolated &&
     (!next.isRenaming || prev.renameDraft === next.renameDraft)
   )
 }

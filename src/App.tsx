@@ -21,6 +21,17 @@ import { TrackLane } from './TrackLane'
 import { FxRack } from './FxRack'
 import { AutomationLaneView } from './AutomationLaneView'
 import { applyTrackFxChain, createTrackFxChain, disposeTrackFxChain, type TrackFxChain } from './trackFxChain'
+import {
+  applyClipPlayback,
+  clampPitchSemitones,
+  clampTempoRate,
+  createClipPlayer,
+  effectiveBpm,
+  songTimeFromWall,
+  wallDelayForSong
+} from './clipPlayer'
+import { resolvePracticeTrack, toggleAislar, togglePractice } from './practiceMode'
+import { analyzeHarmony, hydrateHarmony, serializeHarmony, type HarmonyResult } from './harmony'
 import { laneForParam, setLanePoints, type AutomationLane } from './automation'
 import {
   AUTOMATION_PARAMS,
@@ -139,7 +150,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0076b'
+const APP_VERSION = '0.0077b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -160,7 +171,7 @@ interface ContextMenuState {
 }
 
 interface Clip {
-  player: Tone.Player
+  player: Tone.GrainPlayer
   fileName: string
   isPlaying: boolean
   buffer: AudioBuffer
@@ -193,6 +204,17 @@ function App() {
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([])
   const [micDeviceId, setMicDeviceId] = useState<string | null>(() => readStoredMicDeviceId())
   const [bpm, setBpm] = useState(120)
+  const [pitchSemitones, setPitchSemitones] = useState(0)
+  const [tempoRate, setTempoRate] = useState(1)
+  const [practiceIndex, setPracticeIndex] = useState<number | null>(null)
+  const [harmony, setHarmony] = useState<HarmonyResult | null>(null)
+  const [harmonySource, setHarmonySource] = useState<'mix' | number>('mix')
+  const [harmonyBusy, setHarmonyBusy] = useState(false)
+  const pitchRef = useRef(0)
+  const tempoRateRef = useRef(1)
+  const practiceIndexRef = useRef<number | null>(null)
+  const playOriginSongRef = useRef(0)
+  const playOriginWallRef = useRef(0)
   const [metronomeEnabled, setMetronomeEnabled] = useState(true)
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
   const [countInBars, _setCountInBars] = useState(2)
@@ -319,6 +341,7 @@ function App() {
   const renamingTrackRef = useRef<number | null>(null)
   const trackStatesRef = useRef(trackStates)
   trackStatesRef.current = trackStates
+  practiceIndexRef.current = practiceIndex
   const selectedClipIdsRef = useRef(selectedClipIds)
   selectedClipIdsRef.current = selectedClipIds
   const appCommitCountRef = useRef(0)
@@ -467,7 +490,7 @@ function App() {
             selected: clipData.selected
           }
         } else {
-          const player = new Tone.Player()
+          const player = makeClipPlayer()
           player.buffer = new Tone.ToneAudioBuffer(clipData.buffer)
           player.loop = false
           if (trackGainsRef.current[trackIdx]) {
@@ -538,12 +561,68 @@ function App() {
 
   const applyAllTrackAudio = (time?: number) => {
     const tracks = trackStatesRef.current
-    const t = Number.isFinite(time) ? (time as number) : Tone.getTransport().seconds
+    const t = Number.isFinite(time) ? (time as number) : getSongTime()
     const anySolo = tracks.some(tr => tr.solo)
     const ramp = isPlayingRef.current ? 0.05 : 0.02
     tracks.forEach((track, i) => {
       const chain = trackChainsRef.current[i]
       if (chain) applyTrackFxChain(chain, track, t, anySolo, ramp)
+    })
+  }
+
+  const getSongTime = () => {
+    if (!isPlayingRef.current) return playheadPositionRef.current
+    return songTimeFromWall(
+      playOriginSongRef.current,
+      playOriginWallRef.current,
+      Tone.now(),
+      tempoRateRef.current
+    )
+  }
+
+  const applyAllClipPlayback = (tracks = trackStatesRef.current) => {
+    const rate = tempoRateRef.current
+    const pitch = pitchRef.current
+    tracks.forEach((track) => {
+      track.clips.forEach((clip) => applyClipPlayback(clip.player, rate, pitch))
+    })
+  }
+
+  const makeClipPlayer = (buffer?: AudioBuffer | Tone.ToneAudioBuffer) => {
+    const player = createClipPlayer(buffer)
+    applyClipPlayback(player, tempoRateRef.current, pitchRef.current)
+    return player
+  }
+
+  const startClipAtSongTime = (clip: Clip, songTime: number): boolean => {
+    applyClipPlayback(clip.player, tempoRateRef.current, pitchRef.current)
+    const clipStart = clip.offsetSeconds
+    const clipEnd = clip.offsetSeconds + clip.duration
+    if (songTime >= clipEnd) return false
+    let when = Tone.now()
+    let offset = clip.sourceStart
+    if (songTime < clipStart) {
+      when = Tone.now() + wallDelayForSong(clipStart - songTime, tempoRateRef.current)
+      offset = clip.sourceStart
+    } else {
+      offset = clip.sourceStart + (songTime - clipStart)
+    }
+    const remaining = clip.duration - (offset - clip.sourceStart)
+    if (offset < clip.buffer.duration && remaining > 0.02) {
+      clip.player.loop = false
+      // GrainPlayer duration is wall-clock; convert remaining song seconds through tempoRate.
+      clip.player.start(when, offset, wallDelayForSong(remaining, tempoRateRef.current))
+      return true
+    }
+    return false
+  }
+
+  const retargetPlayingClips = (songTime: number) => {
+    trackStatesRef.current.forEach((track) => {
+      track.clips.forEach((clip) => {
+        try { clip.player.stop() } catch { /* already stopped */ }
+        clip.isPlaying = startClipAtSongTime(clip, songTime)
+      })
     })
   }
 
@@ -553,10 +632,10 @@ function App() {
     const chain = trackChainsRef.current[trackIndex]
     if (!track || !chain) return
     const anySolo = tracks.some(tr => tr.solo)
-    applyTrackFxChain(
+      applyTrackFxChain(
       chain,
       { ...track, ...patch },
-      Tone.getTransport().seconds,
+      getSongTime(),
       anySolo,
       isPlayingRef.current ? 0.05 : 0.02
     )
@@ -628,6 +707,9 @@ function App() {
       
       const state = {
         bpm,
+        pitchSemitones,
+        tempoRate,
+        harmony: serializeHarmony(harmony),
         loopStart,
         loopEnd,
         playheadPosition,
@@ -641,7 +723,7 @@ function App() {
     
     const timer = window.setTimeout(() => { void saveState() }, 1000)
     return () => window.clearTimeout(timer)
-  }, [bpm, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled])
+  }, [bpm, pitchSemitones, tempoRate, harmony, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled])
 
   useEffect(() => {
     const handleGlobalMouseUp = (e: MouseEvent) => {
@@ -674,17 +756,8 @@ function App() {
     }
   }, [])
 
-  // Update Transport loop when loop settings change during playback
   useEffect(() => {
-    if (isPlaying) {
-      if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
-        Tone.getTransport().loop = true
-        Tone.getTransport().loopStart = loopStart
-        Tone.getTransport().loopEnd = loopEnd
-      } else {
-        Tone.getTransport().loop = false
-      }
-    }
+    Tone.getTransport().loop = false
   }, [isPlaying, isLoopEnabled, loopStart, loopEnd])
   
   // Load project on mount
@@ -708,6 +781,17 @@ function App() {
       ensureTrackGains(state.tracks.length)
       
       setBpm(state.bpm)
+      const loadedPitch = clampPitchSemitones(Number((state as { pitchSemitones?: unknown }).pitchSemitones) || 0)
+      const loadedRate = clampTempoRate(Number((state as { tempoRate?: unknown }).tempoRate) || 1)
+      pitchRef.current = loadedPitch
+      tempoRateRef.current = loadedRate
+      setPitchSemitones(loadedPitch)
+      setTempoRate(loadedRate)
+      {
+        const loadedHarmony = hydrateHarmony((state as { harmony?: unknown }).harmony)
+        setHarmony(loadedHarmony)
+        if (loadedHarmony) setHarmonySource(loadedHarmony.source)
+      }
       setLoopStart(state.loopStart)
       setLoopEnd(state.loopEnd)
       commitPlayhead(state.playheadPosition)
@@ -730,9 +814,9 @@ function App() {
           }
           
           const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-          const player = new Tone.Player()
+          const player = makeClipPlayer()
           player.buffer = toneBuffer
-          player.loop = true
+          player.loop = false
           player.connect(trackGainsRef.current[i])
           
           return {
@@ -761,9 +845,9 @@ function App() {
           if (!buffer) return null
           
           const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-          const player = new Tone.Player()
+          const player = makeClipPlayer()
           player.buffer = toneBuffer
-          player.loop = true
+          player.loop = false
           player.connect(trackGainsRef.current[i])
           
           return {
@@ -922,6 +1006,9 @@ function App() {
         version: APP_VERSION,
         name: projectName,
         bpm,
+        pitchSemitones,
+        tempoRate,
+        harmony: serializeHarmony(harmony),
         loopStart,
         loopEnd,
         playheadPosition,
@@ -1018,6 +1105,9 @@ function App() {
         version: APP_VERSION,
         name: currentProjectName,
         bpm,
+        pitchSemitones,
+        tempoRate,
+        harmony: serializeHarmony(harmony),
         loopStart,
         loopEnd,
         playheadPosition,
@@ -1162,7 +1252,7 @@ function App() {
             return null
           }
           
-          const player = new Tone.Player()
+          const player = makeClipPlayer()
           player.buffer = new Tone.ToneAudioBuffer(audioBuffer)
           player.loop = false
           
@@ -1201,7 +1291,18 @@ function App() {
       }
       
       setBpm(projectData.bpm || 120)
-      Tone.getTransport().bpm.value = projectData.bpm || 120
+      const loadedPitch = clampPitchSemitones(Number(projectData.pitchSemitones) || 0)
+      const loadedRate = clampTempoRate(Number(projectData.tempoRate) || 1)
+      Tone.getTransport().bpm.value = effectiveBpm(projectData.bpm || 120, loadedRate)
+      pitchRef.current = loadedPitch
+      tempoRateRef.current = loadedRate
+      setPitchSemitones(loadedPitch)
+      setTempoRate(loadedRate)
+      {
+        const loadedHarmony = hydrateHarmony(projectData.harmony)
+        setHarmony(loadedHarmony)
+        if (loadedHarmony) setHarmonySource(loadedHarmony.source)
+      }
       setLoopStart(projectData.loopStart ?? null)
       setLoopEnd(projectData.loopEnd ?? null)
       commitPlayhead(projectData.playheadPosition || 0)
@@ -1578,35 +1679,30 @@ function App() {
     console.log('[DEBUG] handlePlay: audio initialized, gains:', trackGainsRef.current.length)
     console.log('[DEBUG] trackStates with clips:', trackStates.filter(t => t.clips.length > 0).length)
     
-    Tone.getTransport().bpm.value = bpm
+    Tone.getTransport().bpm.value = effectiveBpm(bpm, tempoRateRef.current)
     
     const countInSeconds = getCountInSeconds()
     // When loop is enabled and marked, always start from loop start
     // Otherwise, start from current playhead position (clicked or paused)
     const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : playheadPositionRef.current
     
-    // Configure Transport loop
-    if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
-      Tone.getTransport().loop = true
-      Tone.getTransport().loopStart = loopStart
-      Tone.getTransport().loopEnd = loopEnd
-    } else {
-      Tone.getTransport().loop = false
-    }
-    
+    Tone.getTransport().loop = false
     Tone.getTransport().seconds = startTime
     Tone.getTransport().start()
+    playOriginSongRef.current = startTime
+    playOriginWallRef.current = Tone.now()
+    applyAllClipPlayback()
     
     const startingInsideGap = startTime < countInSeconds
     
     if (metronomeEnabled && startingInsideGap && metronomePlayerRef.current) {
       const beatsPerBar = 4
       const totalBeats = countInBars * beatsPerBar
-      const secondsPerBeat = 60 / bpm
-      const clicksNeeded = Math.ceil((countInSeconds - startTime) / secondsPerBeat)
+      const secondsPerBeatWall = 60 / Math.max(1, bpm * tempoRateRef.current)
+      const clicksNeeded = Math.ceil((countInSeconds - startTime) / (60 / Math.max(1, bpm)))
       
       for (let beat = 0; beat < Math.min(clicksNeeded, totalBeats); beat++) {
-        const time = Tone.now() + beat * secondsPerBeat
+        const time = Tone.now() + beat * secondsPerBeatWall
         metronomePlayerRef.current.start(time)
       }
     }
@@ -1620,30 +1716,8 @@ function App() {
         return { ...track, clips: track.clips.map(clip => ({ ...clip, isPlaying: false })) }
       }
       const updatedClips = track.clips.map(clip => {
-        if (!clip.isPlaying && startTime < clip.offsetSeconds + clip.duration) {
-          clip.player.loop = false
-          
-          const clipStartTime = clip.offsetSeconds
-          const clipEndTime = clip.offsetSeconds + clip.duration
-          
-          let when = Tone.now()
-          let offset = 0
-          
-          if (startTime < clipStartTime) {
-            when = Tone.now() + (clipStartTime - startTime)
-            offset = clip.sourceStart
-          } else if (startTime >= clipStartTime && startTime < clipEndTime) {
-            when = Tone.now()
-            offset = clip.sourceStart + (startTime - clipStartTime)
-          }
-          
-          if (when >= Tone.now() && offset < clip.buffer.duration) {
-            const duration = clip.duration - (offset - clip.sourceStart)
-            clip.player.start(when, offset, duration)
-            return { ...clip, isPlaying: true }
-          }
-        }
-        return clip
+        const started = startClipAtSongTime(clip, startTime)
+        return { ...clip, isPlaying: started }
       })
       return { ...track, clips: updatedClips }
     })
@@ -1654,11 +1728,10 @@ function App() {
     setIsPaused(false)
     
     let lastUpdateTime = 0
-    let lastLoopCheck = startTime
     isPlayingRef.current = true
     const updatePlayhead = (timestamp: number) => {
       if (Tone.getTransport().state === 'started') {
-        const currentTime = Tone.getTransport().seconds
+        let currentTime = getSongTime()
         applyAllTrackAudio(currentTime)
         if (timestamp - lastUpdateTime < 50) {
           playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
@@ -1666,50 +1739,20 @@ function App() {
         }
         lastUpdateTime = timestamp
 
-        
-        // Detect loop: if current time jumped backwards, restart players
-        if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
-          if (currentTime < lastLoopCheck && lastLoopCheck > loopStart) {
-            trackStates.forEach(track => {
-              track.clips.forEach(clip => {
-                if (clip.player.state === 'started') {
-                  clip.player.stop()
-                }
-                
-                if (loopStart < clip.offsetSeconds + clip.duration) {
-                  let when = Tone.now()
-                  let offset = clip.sourceStart
-                  
-                  if (loopStart < clip.offsetSeconds) {
-                    when = Tone.now() + (clip.offsetSeconds - loopStart)
-                    offset = clip.sourceStart
-                  } else if (loopStart >= clip.offsetSeconds) {
-                    when = Tone.now()
-                    offset = clip.sourceStart + (loopStart - clip.offsetSeconds)
-                  }
-                  
-                  if (offset < clip.buffer.duration) {
-                    const duration = clip.duration - (offset - clip.sourceStart)
-                    clip.player.start(when, offset, duration)
-                  }
-                }
-              })
-            })
-          }
+        if (isLoopEnabled && loopStart !== null && loopEnd !== null && currentTime >= loopEnd) {
+          const span = Math.max(0.05, loopEnd - loopStart)
+          currentTime = loopStart + ((currentTime - loopStart) % span)
+          playOriginSongRef.current = currentTime
+          playOriginWallRef.current = Tone.now()
+          retargetPlayingClips(currentTime)
         } else if (!isLoopEnabled && !recordLiveRef.current && maxDuration > 0 && currentTime >= maxDuration) {
+          currentTime = 0
+          playOriginSongRef.current = 0
+          playOriginWallRef.current = Tone.now()
           Tone.getTransport().seconds = 0
-          trackStates.forEach(track => {
-            track.clips.forEach(clip => {
-              if (clip.player.state === 'started') {
-                clip.player.stop()
-              }
-              const when = Tone.now() + clip.offsetSeconds
-              clip.player.start(when, clip.sourceStart, clip.duration)
-            })
-          })
+          retargetPlayingClips(0)
         }
         
-        lastLoopCheck = currentTime
         syncPlayheadDom(currentTime)
         updateRecordingPreview(currentTime)
         playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
@@ -1730,7 +1773,10 @@ function App() {
       playheadAnimationRef.current = null
     }
     
-    commitPlayhead(Tone.getTransport().seconds)
+    const pausedAt = getSongTime()
+    isPlayingRef.current = false
+    commitPlayhead(pausedAt)
+    Tone.getTransport().seconds = pausedAt
     
     setTrackStates(prev => prev.map(track => ({
       ...track,
@@ -1755,8 +1801,8 @@ function App() {
       void stopRecording({ then: 'stop' })
       return
     }
-    // Capture current position before stopping
-    const currentPosition = Tone.getTransport().seconds
+    const currentPosition = getSongTime()
+    isPlayingRef.current = false
     
     Tone.getTransport().stop()
     
@@ -1820,7 +1866,7 @@ function App() {
           ensureTrackGains(trackStatesRef.current.length)
           const latency = recordLatencySeconds(ctx)
           const offset = compensatedRecordOffset(live.startOffset, latency)
-          const player = new Tone.Player()
+          const player = makeClipPlayer()
           player.loop = false
           player.buffer = new Tone.ToneAudioBuffer(buffer)
           const gain = trackGainsRef.current[live.trackIndex]
@@ -2010,12 +2056,12 @@ function App() {
     
     const splitOffset = splitTime - clipToSplit.offsetSeconds
     
-    const firstPlayer = new Tone.Player()
+    const firstPlayer = makeClipPlayer()
     firstPlayer.buffer = clipToSplit.player.buffer
     firstPlayer.loop = false
     firstPlayer.connect(trackGainsRef.current[trackIndex])
     
-    const secondPlayer = new Tone.Player()
+    const secondPlayer = makeClipPlayer()
     secondPlayer.buffer = clipToSplit.player.buffer
     secondPlayer.loop = false
     secondPlayer.connect(trackGainsRef.current[trackIndex])
@@ -2081,12 +2127,12 @@ function App() {
     
     const splitOffset = splitTime - clipToSplit.offsetSeconds
     
-    const firstPlayer = new Tone.Player()
+    const firstPlayer = makeClipPlayer()
     firstPlayer.buffer = clipToSplit.player.buffer
     firstPlayer.loop = false
     firstPlayer.connect(trackGainsRef.current[trackIndex])
     
-    const secondPlayer = new Tone.Player()
+    const secondPlayer = makeClipPlayer()
     secondPlayer.buffer = clipToSplit.player.buffer
     secondPlayer.loop = false
     secondPlayer.connect(trackGainsRef.current[trackIndex])
@@ -2207,7 +2253,7 @@ function App() {
 
     clipboard.forEach((item, i) => {
       const place = pastePlacement(item.relTime, item.relTrack, originTime, trackIndex, trackStates.length)
-      const player = new Tone.Player()
+      const player = makeClipPlayer()
       player.buffer = new Tone.ToneAudioBuffer(item.buffer)
       player.loop = false
       player.connect(trackGainsRef.current[place.trackIndex])
@@ -2263,7 +2309,7 @@ function App() {
 
   const duplicateClipOnTrack = (trackIndex: number, clip: Clip) => {
     saveUndo()
-    const player = new Tone.Player()
+    const player = makeClipPlayer()
     player.buffer = clip.player.buffer
     player.loop = false
     player.connect(trackGainsRef.current[trackIndex])
@@ -2572,7 +2618,7 @@ function App() {
           for (let ti = 0; ti < currentTracks.length; ti++) {
             const sourceClip = currentTracks[ti].clips.find(c => c.id === id)
             if (!sourceClip) continue
-            const player = new Tone.Player()
+            const player = makeClipPlayer()
             player.buffer = sourceClip.player.buffer
             player.loop = false
             player.connect(trackGainsRef.current[ti])
@@ -2738,7 +2784,7 @@ function App() {
       for (let ti = 0; ti < trackStates.length; ti++) {
         const sourceClip = trackStates[ti].clips.find(c => c.id === id)
         if (sourceClip) {
-          const player = new Tone.Player()
+          const player = makeClipPlayer()
           player.buffer = sourceClip.player.buffer
           player.loop = false
           player.connect(trackGainsRef.current[ti])
@@ -2903,7 +2949,7 @@ function App() {
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
     setBpm(newBpm)
-    Tone.getTransport().bpm.value = newBpm
+    Tone.getTransport().bpm.value = effectiveBpm(newBpm, tempoRateRef.current)
   }
 
   const handleLaneClick = async (trackIndex: number) => {
@@ -3143,21 +3189,22 @@ function App() {
     const trackGain = trackGainsRef.current[trackIndex]
     if (!trackGain) return
     
-    const player = new Tone.Player()
-    player.loop = false
-    player.connect(trackGain)
-    
+    const loader = new Tone.Player()
     console.log('[DEBUG] Before load')
-    await player.load(url)
-    console.log('[DEBUG] After load: player.loaded=', player.loaded, 'duration=', player.buffer.duration)
-
-    const buffer = player.buffer.get() as AudioBuffer
+    await loader.load(url)
+    console.log('[DEBUG] After load: player.loaded=', loader.loaded, 'duration=', loader.buffer.duration)
+    const buffer = loader.buffer.get() as AudioBuffer
+    const player = makeClipPlayer(loader.buffer)
+    player.loop = false
+    applyClipPlayback(player, tempoRateRef.current, pitchRef.current)
+    player.connect(trackGain)
+    loader.dispose()
 
     const bpmResult = await detectBPM(buffer)
     if (bpmResult.bpm) {
       console.log('[BPM] Detected:', bpmResult.bpm)
       setBpm(bpmResult.bpm)
-      Tone.getTransport().bpm.value = bpmResult.bpm
+      Tone.getTransport().bpm.value = effectiveBpm(bpmResult.bpm, tempoRateRef.current)
       setErrorMessage(`Tempo: ${bpmResult.bpm}`)
       setTimeout(() => setErrorMessage(null), 3000)
     } else {
@@ -3205,7 +3252,7 @@ function App() {
     if (bpmResult.bpm) {
       console.log('[BPM] Detected:', bpmResult.bpm)
       setBpm(bpmResult.bpm)
-      Tone.getTransport().bpm.value = bpmResult.bpm
+      Tone.getTransport().bpm.value = effectiveBpm(bpmResult.bpm, tempoRateRef.current)
       setErrorMessage(`Tempo: ${bpmResult.bpm}`)
       setTimeout(() => setErrorMessage(null), 3000)
     } else {
@@ -3248,7 +3295,7 @@ function App() {
     for (let i = 0; i < stemBuffers.length; i++) {
       const targetTrackIndex = startTrackIndex + i
 
-      const player = new Tone.Player()
+      const player = makeClipPlayer()
       player.loop = false
       
       const toneBuffer = new Tone.ToneAudioBuffer(stemBuffers[i])
@@ -3300,6 +3347,100 @@ function App() {
       return newStates
     })
   }, [])
+
+  const handlePractice = (trackIndex: number) => {
+    const next = togglePractice(trackStatesRef.current, trackIndex, practiceIndexRef.current)
+    practiceIndexRef.current = next.practiceIndex
+    setPracticeIndex(next.practiceIndex)
+    setTrackStates(next.tracks)
+    const name = resolveTrackName(next.tracks[trackIndex]?.name, trackIndex)
+    showClipToast(next.practiceIndex === trackIndex ? `Practicar encima de ${name}` : 'Práctica desactivada')
+  }
+
+  const handleAislar = (trackIndex: number) => {
+    const next = toggleAislar(trackStatesRef.current, trackIndex)
+    practiceIndexRef.current = next.practiceIndex
+    setPracticeIndex(next.practiceIndex)
+    setTrackStates(next.tracks)
+    const name = resolveTrackName(next.tracks[trackIndex]?.name, trackIndex)
+    showClipToast(next.tracks[trackIndex]?.solo ? `Aislar ${name}` : 'Aislar desactivado')
+  }
+
+  const handlePracticeFromTransport = () => {
+    const idx = resolvePracticeTrack(selectedTrack, recordArmedIndex, trackStatesRef.current.length)
+    if (idx == null) {
+      showClipToast('Elegí una pista para practicar')
+      return
+    }
+    setSelectedTrack(idx)
+    handlePractice(idx)
+  }
+
+  const handleAislarFromTransport = () => {
+    const idx = resolvePracticeTrack(selectedTrack, recordArmedIndex, trackStatesRef.current.length)
+    if (idx == null) {
+      showClipToast('Elegí una pista para aislar')
+      return
+    }
+    setSelectedTrack(idx)
+    handleAislar(idx)
+  }
+
+  const liveRetempo = (nextRate: number, nextPitch: number) => {
+    tempoRateRef.current = clampTempoRate(nextRate)
+    pitchRef.current = clampPitchSemitones(nextPitch)
+    Tone.getTransport().bpm.value = effectiveBpm(bpm, tempoRateRef.current)
+    applyAllClipPlayback()
+    if (isPlayingRef.current) {
+      const song = getSongTime()
+      playOriginSongRef.current = song
+      playOriginWallRef.current = Tone.now()
+      retargetPlayingClips(song)
+    }
+  }
+
+  const handleTempoRate = (raw: number) => {
+    const next = clampTempoRate(raw)
+    liveRetempo(next, pitchRef.current)
+    setTempoRate(next)
+  }
+
+  const handlePitch = (raw: number) => {
+    const next = clampPitchSemitones(raw)
+    liveRetempo(tempoRateRef.current, next)
+    setPitchSemitones(next)
+  }
+
+  const handleDetectHarmony = () => {
+    const tracks = trackStatesRef.current
+    const clips = tracks.flatMap((track, i) => {
+      if (harmonySource !== 'mix' && i !== harmonySource) return []
+      return track.clips.map((clip) => ({
+        buffer: clip.buffer,
+        offsetSeconds: clip.offsetSeconds,
+        sourceStart: clip.sourceStart,
+        duration: clip.duration
+      }))
+    })
+    if (!clips.length) {
+      showClipToast('No hay audio para analizar')
+      return
+    }
+    setHarmonyBusy(true)
+    window.setTimeout(() => {
+      try {
+        const result = analyzeHarmony(clips, harmonySource)
+        setHarmony(result)
+        showClipToast(result ? `Tonalidad: ${result.key.label}` : 'No se detectó tonalidad')
+      } catch (err) {
+        console.error(err)
+        setErrorMessage('No se pudieron detectar acordes')
+        setTimeout(() => setErrorMessage(null), 4000)
+      } finally {
+        setHarmonyBusy(false)
+      }
+    }, 20)
+  }
 
   const handleVolumeLive = useCallback((trackIndex: number, volume: number) => {
     applyTrackAudioNow(trackIndex, { volume })
@@ -3423,6 +3564,11 @@ function App() {
     })
     reconnectAllClips(planned.tracks)
     setTrackStates(planned.tracks)
+    setPracticeIndex((prev) => {
+      const next = prev == null ? prev : prev === trackIndex ? null : prev > trackIndex ? prev - 1 : prev
+      practiceIndexRef.current = next
+      return next
+    })
     setFxOpenTracks(prev => shiftOpenIndices(prev, trackIndex))
     setAutoOpenTracks(prev => shiftOpenIndices(prev, trackIndex))
     setAutoParamByTrack(prev => {
@@ -3527,30 +3673,9 @@ function App() {
     const clampedSeconds = applySeekSnap(seconds, layoutMax, snapEnabled, shiftKey, snapToGrid)
     commitPlayhead(clampedSeconds)
     Tone.getTransport().seconds = clampedSeconds
-    
-    trackStates.forEach(track => {
-      track.clips.forEach(clip => {
-        const wasPlaying = clip.isPlaying
-        if (wasPlaying) {
-          clip.player.stop()
-        }
-        if (isPlaying) {
-          const clipStartTime = clip.offsetSeconds
-          const clipEndTime = clip.offsetSeconds + clip.duration
-          
-          if (clampedSeconds >= clipStartTime && clampedSeconds < clipEndTime) {
-            const offset = clip.sourceStart + (clampedSeconds - clipStartTime)
-            const duration = clip.duration - (clampedSeconds - clipStartTime)
-            clip.player.start(Tone.now(), offset, duration)
-            clip.isPlaying = true
-          } else if (clampedSeconds < clipStartTime) {
-            const when = Tone.now() + (clipStartTime - clampedSeconds)
-            clip.player.start(when, clip.sourceStart, clip.duration)
-            clip.isPlaying = true
-          }
-        }
-      })
-    })
+    playOriginSongRef.current = clampedSeconds
+    playOriginWallRef.current = Tone.now()
+    if (isPlayingRef.current) retargetPlayingClips(clampedSeconds)
   }
   seekToPositionRef.current = seekToPosition
 
@@ -4115,6 +4240,56 @@ function App() {
               title={`Zoom vertical: ${(verticalZoom * 100).toFixed(0)}%`}
             />
           </div>
+          <div className="practice-transport">
+            <button
+              type="button"
+              className={`header-btn has-label ${practiceIndex != null ? 'active' : ''}`}
+              data-testid="practice-transport"
+              onClick={handlePracticeFromTransport}
+              title="Practicar encima de la pista seleccionada (silencia ese stem)"
+            >
+              Practicar encima
+            </button>
+            <button
+              type="button"
+              className={`header-btn has-label ${
+                trackStates.filter((t) => t.solo).length === 1 ? 'active' : ''
+              }`}
+              data-testid="aislar-transport"
+              onClick={handleAislarFromTransport}
+              title="Aislar la pista seleccionada"
+            >
+              Aislar
+            </button>
+          </div>
+          <div className="pitch-tempo-controls">
+            <label className="pt-field" title="Tono global, ±12 semitonos">
+              <span>Tono</span>
+              <input
+                type="range"
+                min={-12}
+                max={12}
+                step={1}
+                value={pitchSemitones}
+                onChange={(e) => handlePitch(parseInt(e.target.value, 10))}
+                aria-label="Tono en semitonos"
+              />
+              <span className="pt-value">{pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones}</span>
+            </label>
+            <label className="pt-field" title="Velocidad 0.5x–1.5x (GrainPlayer)">
+              <span>Vel.</span>
+              <input
+                type="range"
+                min={0.5}
+                max={1.5}
+                step={0.05}
+                value={tempoRate}
+                onChange={(e) => handleTempoRate(parseFloat(e.target.value))}
+                aria-label="Velocidad de reproducción"
+              />
+              <span className="pt-value">{tempoRate.toFixed(2)}x</span>
+            </label>
+          </div>
           <div className="bpm-control">
             <span className="bpm-label">BPM</span>
             <input
@@ -4125,6 +4300,40 @@ function App() {
               min="20"
               max="300"
             />
+            {Math.abs(tempoRate - 1) > 0.001 && (
+              <span className="bpm-effective" title="BPM que suena con la velocidad actual">
+                → {effectiveBpm(bpm, tempoRate)}
+              </span>
+            )}
+          </div>
+          <div className="harmony-controls">
+            {harmony?.key.label && (
+              <span className="key-badge" title="Tonalidad detectada">{harmony.key.label}</span>
+            )}
+            <select
+              className="harmony-source"
+              value={harmonySource === 'mix' ? 'mix' : String(harmonySource)}
+              onChange={(e) => {
+                const v = e.target.value
+                setHarmonySource(v === 'mix' ? 'mix' : parseInt(v, 10))
+              }}
+              aria-label="Fuente de análisis de acordes"
+            >
+              <option value="mix">Mezcla</option>
+              {trackStates.map((track, i) => (
+                <option key={i} value={i}>{resolveTrackName(track.name, i)}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="header-btn has-label"
+              data-testid="detect-harmony"
+              disabled={harmonyBusy}
+              onClick={handleDetectHarmony}
+              title="Detectar tonalidad y acordes (chroma, en el navegador)"
+            >
+              {harmonyBusy ? 'Analizando…' : 'Detectar acordes'}
+            </button>
           </div>
         </div>
         <div className="header-info">
@@ -4354,7 +4563,9 @@ function App() {
             ref={sidebarScrollRef}
             onScroll={() => syncVerticalScroll('sidebar')}
           >
-            <div className="ruler-spacer" />
+            <div className="ruler-spacer" style={{ height: harmony ? 54 : 32 }}>
+              {harmony && <span className="chord-key">{harmony.key.label}</span>}
+            </div>
             {trackStates.map((trackState, trackIndex) => (
               <div className="track-stack" key={trackIndex}>
                 <TrackHeader
@@ -4383,6 +4594,10 @@ function App() {
                   autoOpen={autoOpenTracks.includes(trackIndex)}
                   onToggleFx={toggleFxPanel}
                   onToggleAuto={toggleAutoPanel}
+                  practiceActive={practiceIndex === trackIndex}
+                  isolated={trackState.solo && trackStates.every((t, i) => i === trackIndex ? t.solo : !t.solo)}
+                  onPractice={handlePractice}
+                  onAislar={handleAislar}
                 />
                 {fxOpenTracks.includes(trackIndex) && (
                   <div className="fx-side" style={{ height: `${FX_RACK_HEIGHT}px` }}>
@@ -4475,6 +4690,19 @@ function App() {
             />
           )}
           <div className="lanes-scroll-inner" style={{ minWidth: `${100 * horizontalZoom}%` }}>
+          {harmony && (
+            <div className="chord-ruler" aria-label="Acordes">
+              {harmony.chords.map((chord, i) => (
+                <span
+                  key={`${chord.t}-${i}`}
+                  className="chord-label"
+                  style={{ left: `${(chord.t / Math.max(getLayoutMax(), 0.001)) * 100}%` }}
+                >
+                  {chord.label}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="bar-ruler" onMouseDown={handleRulerMouseDown}>
             {rulerBars}
           </div>
@@ -4686,8 +4914,17 @@ function App() {
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
                 <li>• <strong>Zoom vertical</strong> - La forma de onda queda centrada en el clip a cualquier altura (también al mínimo del slider)</li>
                 <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
+                <li>• <strong>P (Practicar encima)</strong> - Silencia ese stem y deja el resto sonando para tocar o cantar encima. El botón del transporte usa la pista seleccionada</li>
+                <li>• <strong>Ais (Aislar)</strong> - Solo ese stem (exclusivo). Volvé a pulsar para salir</li>
                 <li>• <strong>Botón FX</strong> - Abre el rack de efectos de esa pista (EQ, compresor, filtro, delay, reverb y pan). Cada módulo tiene knobs y bypass On/Off</li>
                 <li>• <strong>Botón A (curva)</strong> - Muestra la pista de automatización. Elegí el parámetro (volumen, pan o un knob de efecto) y dibujá la curva</li>
+              </ul>
+
+              <h3>Tono, tempo y práctica</h3>
+              <ul>
+                <li>• <strong>Tono</strong> - ±12 semitonos en todo el proyecto (GrainPlayer, independiente de la velocidad)</li>
+                <li>• <strong>Velocidad</strong> - 0.5x a 1.5x. El BPM que suena aparece al lado del BPM del proyecto (p. ej. 120 → 90)</li>
+                <li>• <strong>Detectar acordes</strong> - Analiza la mezcla o una pista con chroma espectral en el navegador. Muestra la tonalidad (p. ej. La menor) y etiquetas sobre la regla. Pulsá de nuevo para recalcular. Es una heurística: en temas densos o con distorsión puede equivocarse</li>
               </ul>
 
               <h3>Efectos y automatización</h3>

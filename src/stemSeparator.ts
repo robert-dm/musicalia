@@ -461,7 +461,8 @@ async function applyMaskAndReconstruct(
       }
     }
     
-    // Create stereo AudioBuffer (no AudioContext to avoid suspending Tone)
+    // Stem models reconstruct a mono waveform; duplicate into stereo so
+    // downstream playback/export never call getChannelData(1) on a 1-channel buffer.
     const buffer = new AudioBuffer({
       numberOfChannels: 2,
       length: output.length,
@@ -565,9 +566,11 @@ function stitchChunks(
   sampleRate: number
 ): AudioBuffer {
   
+  const numberOfChannels = chunks[0]?.numberOfChannels ?? 2
+
   // Create output buffer (no AudioContext to avoid suspending Tone)
   const output = new AudioBuffer({
-    numberOfChannels: 2,
+    numberOfChannels,
     length: totalSamples,
     sampleRate
   })
@@ -584,8 +587,9 @@ function stitchChunks(
     const copyLength = endSample - startSample
     
     // Copy with crossfade in overlap regions
-    for (let ch = 0; ch < 2; ch++) {
-      const chunkData = chunk.getChannelData(ch)
+    for (let ch = 0; ch < numberOfChannels; ch++) {
+      const sourceChannel = Math.min(ch, chunk.numberOfChannels - 1)
+      const chunkData = chunk.getChannelData(sourceChannel)
       const outputData = output.getChannelData(ch)
       
       for (let j = 0; j < copyLength; j++) {
@@ -648,7 +652,7 @@ export async function separateStems(
     const duration = audioBuffer.length / audioBuffer.sampleRate
     const sampleRate = audioBuffer.sampleRate
     
-    // Convert to mono
+    // Convert to mono (duplicate a missing right channel instead of reading past numberOfChannels)
     const mono = new Float32Array(audioBuffer.length)
     const left = audioBuffer.getChannelData(0)
     const right = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : left

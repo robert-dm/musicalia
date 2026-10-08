@@ -1,5 +1,6 @@
 import { unzip } from 'fflate'
 import { uploadPresigned } from '@vercel/blob/client'
+import { encodeWAV, serializeAudioBuffer, channelsFromSerialized } from './wav'
 
 export interface ProjectMetadata {
   name: string
@@ -102,14 +103,14 @@ export async function verifyAuth(): Promise<User | null> {
   }
 }
 
-async function compressAudio(left: Float32Array, right: Float32Array, sampleRate: number): Promise<Uint8Array> {
+async function compressAudio(channelData: Float32Array[], sampleRate: number): Promise<Uint8Array> {
   // Try WebCodecs Opus
   if ('AudioEncoder' in window && 'AudioData' in window) {
     try {
       const config = {
         codec: 'opus',
         sampleRate,
-        numberOfChannels: 2,
+        numberOfChannels: channelData.length,
         bitrate: 96000
       }
       
@@ -124,45 +125,7 @@ async function compressAudio(left: Float32Array, right: Float32Array, sampleRate
   }
   
   // Fallback: 16-bit WAV
-  return encodeWAV([left, right], sampleRate)
-}
-
-function encodeWAV(channelData: Float32Array[], sampleRate: number): Uint8Array {
-  const numChannels = channelData.length
-  const length = channelData[0].length
-  const buffer = new ArrayBuffer(44 + length * numChannels * 2)
-  const view = new DataView(buffer)
-  
-  const writeString = (offset: number, string: string) => {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i))
-    }
-  }
-  
-  writeString(0, 'RIFF')
-  view.setUint32(4, 36 + length * numChannels * 2, true)
-  writeString(8, 'WAVE')
-  writeString(12, 'fmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, numChannels, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate * numChannels * 2, true)
-  view.setUint16(32, numChannels * 2, true)
-  view.setUint16(34, 16, true)
-  writeString(36, 'data')
-  view.setUint32(40, length * numChannels * 2, true)
-  
-  let offset = 44
-  for (let i = 0; i < length; i++) {
-    for (let ch = 0; ch < numChannels; ch++) {
-      const sample = Math.max(-1, Math.min(1, channelData[ch][i]))
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true)
-      offset += 2
-    }
-  }
-  
-  return new Uint8Array(buffer)
+  return encodeWAV(channelData, sampleRate)
 }
 
 async function probeUploadEndpoint(fileName: string, projectName: string, userId: string): Promise<void> {
@@ -220,16 +183,18 @@ export async function saveProjectToCloud(
       for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
         const clip = track.clips[clipIdx]
         if (clip.audioData) {
-          const left = new Float32Array(clip.audioData.left)
-          const right = new Float32Array(clip.audioData.right)
-          const wavData = await compressAudio(left, right, clip.audioData.sampleRate)
+          const wavData = await compressAudio(
+            channelsFromSerialized(clip.audioData),
+            clip.audioData.sampleRate
+          )
           audioFiles.push({ trackIndex: i, clipIndex: clipIdx, wavData })
         }
       }
     } else if (track.clip?.audioData) {
-      const left = new Float32Array(track.clip.audioData.left)
-      const right = new Float32Array(track.clip.audioData.right)
-      const wavData = await compressAudio(left, right, track.clip.audioData.sampleRate)
+      const wavData = await compressAudio(
+        channelsFromSerialized(track.clip.audioData),
+        track.clip.audioData.sampleRate
+      )
       audioFiles.push({ trackIndex: i, clipIndex: 0, wavData })
     }
     
@@ -387,11 +352,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
             clip: {
               fileName: t.clip.fileName,
               startPosition: t.clip.startPosition,
-              audioData: {
-                left: Array.from(audioBuffer.getChannelData(0)),
-                right: Array.from(audioBuffer.getChannelData(1)),
-                sampleRate: audioBuffer.sampleRate
-              }
+              audioData: serializeAudioBuffer(audioBuffer)
             }
           }
         }))
@@ -578,11 +539,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
           startPosition: clip.startPosition,
           offsetSeconds: clip.offsetSeconds,
           id: clip.id,
-          audioData: {
-            left: Array.from(audioBuffer.getChannelData(0)),
-            right: Array.from(audioBuffer.getChannelData(1)),
-            sampleRate: audioBuffer.sampleRate
-          }
+          audioData: serializeAudioBuffer(audioBuffer)
         }
       }))
       
@@ -693,11 +650,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
           startPosition: t.clip.startPosition,
           offsetSeconds: t.clip.offsetSeconds || 0,
           id: t.clip.id || `clip-${Date.now()}`,
-          audioData: {
-            left: Array.from(audioBuffer.getChannelData(0)),
-            right: Array.from(audioBuffer.getChannelData(1)),
-            sampleRate: audioBuffer.sampleRate
-          }
+          audioData: serializeAudioBuffer(audioBuffer)
         }]
       }
     } else {

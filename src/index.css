@@ -1,9 +1,38 @@
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  --bg-app: #111318;
+  --bg-surface: #181b21;
+  --bg-raised: #21252d;
+  --bg-hover: #2a2f39;
+  --bg-overlay: rgba(8, 10, 14, 0.72);
+  --border: #2e3440;
+  --border-strong: #3c4452;
+  --text: #e8eaee;
+  --text-muted: #9aa3b2;
+  --accent: #3dd68c;
+  --accent-hover: #58e09c;
+  --accent-ink: #08140e;
+  --accent-dim: rgba(61, 214, 140, 0.16);
+  --danger: #e85d5d;
+  --danger-hover: #f07070;
+  --danger-dim: rgba(232, 93, 93, 0.16);
+  --mute: #e07070;
+  --playhead: #ff5a5a;
+  --loop: #f0b27a;
+  --radius: 7px;
+  --radius-sm: 6px;
+  --radius-pill: 999px;
+  --control-h: 34px;
+  --icon: 16px;
+  --gap: 8px;
+  --transition: 120ms ease;
+  --shadow-menu: 0 10px 28px rgba(0, 0, 0, 0.42);
+  --font: Inter, system-ui, -apple-system, 'Segoe UI', Avenir, Helvetica, Arial, sans-serif;
+
+  font-family: var(--font);
   line-height: 1.5;
   font-weight: 400;
-  color: #e0e0e0;
-  background-color: #1a1a1a;
+  color: var(--text);
+  background-color: var(--bg-app);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -27,4 +56,20 @@ body {
 #root {
   width: 100%;
   height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

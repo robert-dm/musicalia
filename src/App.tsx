@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react'
+import { flushSync } from 'react-dom'
 import * as Tone from 'tone'
 import JSZip from 'jszip'
 import './App.css'
@@ -11,27 +12,121 @@ import {
   login,
   verifyAuth,
   clearAuth,
-  listCloudProjects,
-  openProjectFromCloud,
-  deleteProjectFromCloud,
-  getStorageUsage,
-  migrateLegacyProjects,
-  getAuthToken,
-  hasAuth,
-  type ProjectMetadata,
   type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
-import { encodeAudioBufferWAV, audioBufferFromSerialized } from './wav'
-import { ClipWaveform } from './ClipWaveform'
+import { encodeAudioBufferWAV } from './wav'
+import { TrackHeader } from './TrackHeader'
+import { TrackLane } from './TrackLane'
+import { effectiveTrackGain, rampTrackGain } from './trackGain'
+import { clipBufferSignature } from './trackRenderMemo'
+import {
+  applyClipTrim,
+  applyTrimPreviewStyles,
+  deltaTimeFromLanePx,
+  trimStatesEqual,
+  type ClipTrimEdge,
+  type ClipTrimState
+} from './clipTrim'
+import {
+  DEFAULT_TRACK_VOLUME,
+  appendEmptyTrack,
+  createEmptyTrack,
+  initialEmptyTracks,
+  nextPistaName
+} from './trackList'
+import {
+  applySeekSnap,
+  clickTimeFromX,
+  isClickGesture,
+  persistSnapEnabled,
+  readStoredSnapEnabled,
+  snapActiveDuringDrag
+} from './playheadSeek'
+import {
+  dataTransferHasFiles,
+  dropTimeOnLane,
+  ignoredAudioToast,
+  partitionDroppedFiles,
+  resolveDropPlacement,
+  trackIndexFromPoint
+} from './audioImport'
+import {
+  armedIndexAfterDelete,
+  compensatedRecordOffset,
+  drawRecordingPeaks,
+  listAudioInputDevices,
+  micErrorMessage,
+  nativeAudioContext,
+  nextGrabacionName,
+  pcmChunksToAudioBuffer,
+  persistMicDeviceId,
+  readStoredMicDeviceId,
+  recordLatencySeconds,
+  requestMicStream,
+  resolveRecordTrack,
+  startPcmCapture,
+  type PcmCapture
+} from './audioRecord'
+import {
+  clearMediaSessionHandlers,
+  isSpaceKey,
+  modalHasTextField,
+  pageHasPlaybackFocus,
+  spacePlaybackDecision,
+  spaceToggleAction
+} from './spacePlayback'
+import {
+  ContextMenuItem,
+  IconCircleHelp,
+  IconClipboardPaste,
+  IconCopy,
+  IconCopyPlus,
+  IconDownload,
+  IconFilePlus,
+  IconFolderOpen,
+  IconLogIn,
+  IconLogOut,
+  IconMagnet,
+  IconMetronome,
+  IconMoveHorizontal,
+  IconMoveVertical,
+  IconPause,
+  IconPencil,
+  IconPlay,
+  IconPlus,
+  IconRecord,
+  IconRepeat,
+  IconSave,
+  IconScissors,
+  IconSkipBack,
+  IconSplit,
+  IconStop,
+  IconTrash,
+  IconVolume2
+} from './uiIcons'
+import {
+  clampGroupTimeDelta,
+  clampGroupTrackDelta,
+  clientRectsIntersect,
+  commitEditedTrackName,
+  deleteTrackFromList,
+  marqueeClientRect,
+  mergeSelection,
+  packClipboard,
+  pastePlacement,
+  resolveTrackName
+} from './clipSelection'
 
-const APP_VERSION = '0.0073b'
+const APP_VERSION = '0.0074b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
   fileName: string
   sourceStart: number
   duration: number
+  relTime: number
+  relTrack: number
 }
 
 interface ContextMenuState {
@@ -40,6 +135,7 @@ interface ContextMenuState {
   trackIndex: number
   clipId: string | null
   time: number
+  kind?: 'header' | 'timeline' | 'empty'
 }
 
 interface Clip {
@@ -66,6 +162,12 @@ interface TrackState {
 function App() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordingTrackIndex, setRecordingTrackIndex] = useState<number | null>(null)
+  const [recordArmedIndex, setRecordArmedIndex] = useState<number | null>(null)
+  const [recordLayoutTick, setRecordLayoutTick] = useState(0)
+  const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([])
+  const [micDeviceId, setMicDeviceId] = useState<string | null>(() => readStoredMicDeviceId())
   const [bpm, setBpm] = useState(120)
   const [metronomeEnabled, setMetronomeEnabled] = useState(true)
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
@@ -76,10 +178,7 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const localFileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
-  const [showYoutubeDialog, setShowYoutubeDialog] = useState(false)
-  const [youtubeUrl, setYoutubeUrl] = useState('')
-  const [isLoadingYoutube, setIsLoadingYoutube] = useState(false)
-  const [youtubeError, setYoutubeError] = useState<string | null>(null)
+  const [fileDragActive, setFileDragActive] = useState(false)
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
   const [sidebarWidth, setSidebarWidth] = useState(220)
@@ -95,8 +194,26 @@ function App() {
     tempOffset: 0,
     tempTrack: null as number | null,
     threshold: false,
-    distance: 0
+    distance: 0,
+    timeDelta: 0,
+    trackDelta: 0,
+    minOffset: 0,
+    minTrack: 0,
+    maxTrack: 0
   })
+  const seekToPositionRef = useRef<(seconds: number, shiftKey?: boolean) => void>(() => {})
+  const loopGestureRef = useRef({ x: 0, y: 0, distance: 0 })
+  const marqueeLiveRef = useRef({
+    active: false,
+    didDrag: false,
+    x0: 0,
+    y0: 0,
+    x1: 0,
+    y1: 0,
+    additive: false,
+    toggle: false
+  })
+  const [marqueeBox, setMarqueeBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const dragRafRef = useRef<number | null>(null)
   const resizeRafRef = useRef<number | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -112,15 +229,29 @@ function App() {
   const [isProcessingStems, setIsProcessingStems] = useState(false)
   const stemAbortControllerRef = useRef<AbortController | null>(null)
   const pendingFileRef = useRef<File | null>(null)
+  const pendingOffsetRef = useRef(0)
+  const importQueueRef = useRef<Array<{ file: File; trackIndex: number; createNew: boolean; offsetSeconds: number }>>([])
+  const importUndoSavedRef = useRef(false)
+  const fileDragDepthRef = useRef(0)
+  const highlightedDropTrackRef = useRef<number | null>(null)
+  const recordLiveRef = useRef<{
+    trackIndex: number
+    startOffset: number
+    capture: PcmCapture
+    stream: MediaStream
+    el: HTMLElement | null
+    canvas: HTMLCanvasElement | null
+    startedPlayback: boolean
+  } | null>(null)
+  const recordElapsedRef = useRef<HTMLSpanElement>(null)
+  const isRecordingRef = useRef(false)
+  const lastRecordLayoutRef = useRef(0)
+  const stopRecordingRef = useRef<(opts?: { then?: 'stop' | 'pause' | 'keep'; commit?: boolean }) => Promise<void>>(async () => {})
+  const handlePlayRef = useRef<() => void | Promise<void>>(async () => {})
+  const handlePauseRef = useRef<() => void>(() => {})
   const metronomePlayerRef = useRef<Tone.Player | null>(null)
-  const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
-    Array.from({ length: 8 }, (_, i) => ({
-      mute: false,
-      solo: false,
-      volume: 0.8,
-      clips: [],
-      name: `Track ${i + 1}`
-    }))
+  const [trackStates, setTrackStates] = useState<TrackState[]>(() =>
+    initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] }))
   )
   const meterRef = useRef<Tone.Meter | null>(null)
   const [showToast, setShowToast] = useState(false)
@@ -128,11 +259,8 @@ function App() {
   const [showAuth, setShowAuth] = useState(false)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [authLoading, setAuthLoading] = useState(false)
-  const [showCloudProjects, setShowCloudProjects] = useState(false)
-  const [cloudProjects, setCloudProjects] = useState<ProjectMetadata[]>([])
   const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
   const [uploadProgress, setUploadProgress] = useState(0)
-  const [storageUsage, setStorageUsage] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string>('')
   const [showExportDialog, setShowExportDialog] = useState(false)
@@ -141,26 +269,45 @@ function App() {
   const [exportProgress, setExportProgress] = useState('')
   const [exportMixed, setExportMixed] = useState(false)
   const [exportIncludeCountIn, setExportIncludeCountIn] = useState(false)
-  const [isDraggingClip, setIsDraggingClip] = useState(false)
-  const [draggedClipTrack, setDraggedClipTrack] = useState<number | null>(null)
-  const [draggedClipId, setDraggedClipId] = useState<string | null>(null)
-  const [dragStartX, setDragStartX] = useState<number>(0)
-  const [dragStartPosition, setDragStartPosition] = useState<number>(0)
-  const [tempDragOffset, setTempDragOffset] = useState<number>(0)
-  const [clipboard, setClipboard] = useState<ClipboardClip | null>(null)
+  const isDraggingClipRef = useRef(false)
+  const [clipboard, setClipboard] = useState<ClipboardClip[] | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const projectLoadGenRef = useRef<number>(0)
   const [selectedClipIds, setSelectedClipIds] = useState<Set<string>>(new Set())
-  const [resizingClip, setResizingClip] = useState<{trackIndex: number, clipId: string, edge: 'left' | 'right'} | null>(null)
-  const [resizeStartX, setResizeStartX] = useState<number>(0)
-  const [resizeStartValue, setResizeStartValue] = useState<number>(0)
-  const [snapEnabled, setSnapEnabled] = useState(true)
-  const [dragStartY, setDragStartY] = useState<number>(0)
-  const [tempDragTrack, setTempDragTrack] = useState<number | null>(null)
+  const [snapEnabled, setSnapEnabled] = useState(() => readStoredSnapEnabled())
   const [undoStack, setUndoStack] = useState<any[]>([])
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
   const [currentFileHandle, setCurrentFileHandle] = useState<any>(null)
+  const [trackDeleteConfirm, setTrackDeleteConfirm] = useState<{
+    trackIndex: number
+    name: string
+    clipCount: number
+  } | null>(null)
+  const [renamingTrack, setRenamingTrack] = useState<number | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const renamingTrackRef = useRef<number | null>(null)
+  const trackStatesRef = useRef(trackStates)
+  trackStatesRef.current = trackStates
+  const selectedClipIdsRef = useRef(selectedClipIds)
+  selectedClipIdsRef.current = selectedClipIds
+  const appCommitCountRef = useRef(0)
+  appCommitCountRef.current += 1
+  const trimLiveRef = useRef<{
+    active: boolean
+    trackIndex: number
+    clipId: string
+    edge: ClipTrimEdge
+    startX: number
+    orig: ClipTrimState & { bufferDuration: number }
+    next: ClipTrimState
+    wrapper: HTMLElement | null
+    waveform: HTMLElement | null
+  } | null>(null)
+  const lastClipBufferSigRef = useRef<string | null>(null)
+  const sidebarScrollRef = useRef<HTMLDivElement>(null)
+  const lanesScrollRef = useRef<HTMLDivElement>(null)
+  const syncingVerticalScroll = useRef(false)
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -168,8 +315,7 @@ function App() {
     return countInBars * beatsPerBar * secondsPerBeat
   }
 
-  const snapToGrid = (timeSeconds: number, forceSnap?: boolean): number => {
-    if (!snapEnabled && !forceSnap) return timeSeconds
+  const snapToGrid = (timeSeconds: number): number => {
     const secondsPerBeat = 60 / bpm
     const snapInterval = secondsPerBeat / 4
     return Math.round(timeSeconds / snapInterval) * snapInterval
@@ -203,6 +349,9 @@ function App() {
   }
 
   const handleUndo = () => {
+    if (isRecordingRef.current) {
+      void stopRecordingRef.current({ then: 'keep', commit: false })
+    }
     if (undoStack.length === 0) return
     const currentState = {
       trackStates: JSON.parse(JSON.stringify(trackStates.map(t => ({
@@ -228,6 +377,9 @@ function App() {
   }
 
   const handleRedo = () => {
+    if (isRecordingRef.current) {
+      void stopRecordingRef.current({ then: 'keep', commit: false })
+    }
     if (redoStack.length === 0) return
     const currentState = {
       trackStates: JSON.parse(JSON.stringify(trackStates.map(t => ({
@@ -258,6 +410,12 @@ function App() {
       t.clips.forEach(c => currentClipMap.set(c.id, c))
     })
     
+    for (let extra = state.trackStates.length; extra < trackStates.length; extra++) {
+      trackStates[extra].clips.forEach(c => {
+        try { c.player.dispose() } catch { /* already disposed */ }
+      })
+    }
+
     const newTrackStates = await Promise.all(state.trackStates.map(async (t: any, trackIdx: number) => {
       const clips = await Promise.all(t.clips.map(async (clipData: any) => {
         const existingClip = currentClipMap.get(clipData.id)
@@ -303,10 +461,34 @@ function App() {
         clips: clips.filter(c => c !== null)
       }
     }))
+    reconnectAllClips(newTrackStates as TrackState[])
     setTrackStates(newTrackStates as any)
     commitPlayhead(state.playheadPosition)
     setLoopStart(state.loopStart)
     setLoopEnd(state.loopEnd)
+  }
+
+  const ensureTrackGains = (count: number) => {
+    while (trackGainsRef.current.length < count) {
+      trackGainsRef.current.push(new Tone.Gain(DEFAULT_TRACK_VOLUME).toDestination())
+    }
+  }
+
+  const reconnectAllClips = (tracks: TrackState[]) => {
+    ensureTrackGains(tracks.length)
+    tracks.forEach((track, i) => {
+      const gain = trackGainsRef.current[i]
+      if (!gain) return
+      track.clips.forEach(clip => {
+        try { clip.player.disconnect() } catch { /* already disconnected */ }
+        clip.player.connect(gain)
+      })
+    })
+    while (trackGainsRef.current.length > tracks.length) {
+      const gain = trackGainsRef.current.pop()
+      try { gain?.disconnect() } catch { /* already disconnected */ }
+      gain?.dispose()
+    }
   }
 
   // Verify authentication on mount
@@ -320,13 +502,19 @@ function App() {
     checkAuth()
   }, [])
   
-  // Autosave on state changes (excluding playheadPosition to avoid copying audio on every tick)
+  // Autosave on state changes (excluding playheadPosition to avoid copying audio on every tick).
+  // Debounced so per-track sliders can commit without encoding WAV buffers on every input.
+  // Volume/mute/solo/name-only updates skip re-encoding clip buffers.
   useEffect(() => {
     const saveState = async () => {
+      const sig = clipBufferSignature(trackStates)
+      const writeBuffers = sig !== lastClipBufferSigRef.current
       const tracks = await Promise.all(trackStates.map(async (t, i) => {
         const savedClips = await Promise.all(t.clips.map(async (clip, clipIdx) => {
           const bufferKey = `audio-buffer-${i}-${clipIdx}`
-          await saveAudioBuffer(bufferKey, clip.buffer)
+          if (writeBuffers) {
+            await saveAudioBuffer(bufferKey, clip.buffer)
+          }
           return {
             fileName: clip.fileName,
             startPosition: clip.startPosition,
@@ -339,7 +527,7 @@ function App() {
         }))
         
         return {
-          name: t.name || '',
+          name: resolveTrackName(t.name, i),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
@@ -357,15 +545,17 @@ function App() {
         isLoopEnabled
       }
       autosaveProject(state)
+      lastClipBufferSigRef.current = sig
     }
     
-    saveState()
+    const timer = window.setTimeout(() => { void saveState() }, 1000)
+    return () => window.clearTimeout(timer)
   }, [bpm, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled])
 
   useEffect(() => {
-    const handleGlobalMouseUp = () => {
+    const handleGlobalMouseUp = (e: MouseEvent) => {
       if (isDraggingLoop || isDraggingLoopEdge) {
-        handleLoopMouseUp()
+        handleLoopMouseUp(e)
       }
     }
     
@@ -424,6 +614,7 @@ function App() {
       }
       
       await ensureAudio()
+      ensureTrackGains(state.tracks.length)
       
       setBpm(state.bpm)
       setLoopStart(state.loopStart)
@@ -436,7 +627,7 @@ function App() {
         // Handle old format with single clip
         if (t.clip) {
           const buffer = await loadAudioBuffer(t.clip.audioBufferKey)
-          if (!buffer) return { ...t, clips: [] }
+          if (!buffer) return { ...t, name: resolveTrackName(t.name, i), clips: [] }
           
           const toneBuffer = new Tone.ToneAudioBuffer(buffer)
           const player = new Tone.Player()
@@ -446,6 +637,7 @@ function App() {
           
           return {
             ...t,
+            name: resolveTrackName(t.name, i),
             clips: [{
               player,
               fileName: t.clip.fileName,
@@ -486,6 +678,7 @@ function App() {
         
         return {
           ...t,
+          name: resolveTrackName(t.name, i),
           clips: loadedClips.filter(c => c !== null) as Clip[]
         }
       }))
@@ -556,23 +749,6 @@ function App() {
     setToastMessage('Sesión cerrada')
     setShowToast(true)
     setTimeout(() => setShowToast(false), 3000)
-  }
-  
-  const handleMigrateLegacyProjects = async () => {
-    try {
-      const result = await migrateLegacyProjects()
-      setToastMessage(result.message)
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
-      
-      // Refresh project list after migration
-      const projects = await listCloudProjects()
-      setCloudProjects(projects)
-      const usage = await getStorageUsage()
-      setStorageUsage(usage)
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Error al migrar proyectos')
-    }
   }
 
   const handleSaveToLocal = async (saveAs = false) => {
@@ -646,7 +822,7 @@ function App() {
         metronomeEnabled,
         countInBars,
         tracks: trackStates.map((t, trackIdx) => ({
-          name: t.name,
+          name: resolveTrackName(t.name, trackIdx),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
@@ -741,7 +917,7 @@ function App() {
         metronomeEnabled,
         countInBars,
         tracks: trackStates.map((t, trackIdx) => ({
-          name: t.name,
+          name: resolveTrackName(t.name, trackIdx),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
@@ -845,6 +1021,7 @@ function App() {
       setExportProgress('Cargando audio...')
       
       await ensureAudio()
+      ensureTrackGains((projectData.tracks || []).length)
       
       projectLoadGenRef.current++
       const loadGen = projectLoadGenRef.current
@@ -901,7 +1078,7 @@ function App() {
         }))
         
         return {
-          name: t.name,
+          name: resolveTrackName(t.name, trackIdx),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
@@ -935,191 +1112,6 @@ function App() {
     } finally {
       setUploadProgress(0)
       setExportProgress('')
-    }
-  }
-
-  const handleShowCloudProjects = async () => {
-    if (!currentUser) {
-      setShowAuth(true)
-      setAuthMode('login')
-      setErrorMessage('Inicia sesión para ver tus proyectos')
-      return
-    }
-    
-    try {
-      setErrorMessage(null)
-      const projects = await listCloudProjects()
-      setCloudProjects(projects)
-      const usage = await getStorageUsage()
-      setStorageUsage(usage)
-      setShowCloudProjects(true)
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Error al listar proyectos')
-    }
-  }
-  
-  const handleOpenCloudProject = async (pathname: string, name: string) => {
-    try {
-      setErrorMessage(null)
-      projectLoadGenRef.current++
-      console.log(`[Cloud Open] Starting cloud project load, gen=${projectLoadGenRef.current}`)
-      const state = await openProjectFromCloud(pathname)
-      
-      console.log(`[handleOpenCloudProject] Received state with ${state.tracks.length} tracks`)
-      state.tracks.forEach((t: any, i: number) => {
-        const clipCount = t.clips?.length || (t.clip ? 1 : 0)
-        console.log(`  Track ${i} (${t.name}): ${clipCount} clips`)
-      })
-      
-      await ensureAudio()
-      
-      setBpm(state.bpm)
-      setLoopStart(state.loopStart)
-      setLoopEnd(state.loopEnd)
-      commitPlayhead(state.playheadPosition)
-      if (state.metronomeEnabled !== undefined) setMetronomeEnabled(state.metronomeEnabled)
-      if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
-      
-      // Ensure trackGainsRef has enough entries for all loaded tracks
-      const neededTracks = Math.max(state.tracks.length, 8)
-      while (trackGainsRef.current.length < neededTracks) {
-        const gain = new Tone.Gain(0.8).toDestination()
-        trackGainsRef.current.push(gain)
-        console.log(`Created gain node for track ${trackGainsRef.current.length - 1}`)
-      }
-      
-      const loadedTracks = state.tracks.map((t: any, i: number) => {
-        // Handle old format with single clip
-        if (t.clip) {
-          const buffer = audioBufferFromSerialized(t.clip.audioData)
-          
-          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-          const player = new Tone.Player()
-          player.buffer = toneBuffer
-          player.loop = true
-          
-          if (!trackGainsRef.current[i]) {
-            throw new Error(`Track gain ${i} no disponible. Reinicia la aplicación.`)
-          }
-          player.connect(trackGainsRef.current[i])
-          
-          return {
-            ...t,
-            clips: [{
-              player,
-              fileName: t.clip.fileName,
-              isPlaying: false,
-              buffer,
-              startPosition: t.clip.startPosition,
-              offsetSeconds: t.clip.offsetSeconds ?? getCountInSeconds(),
-              id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`,
-              sourceStart: (t.clip as any).sourceStart ?? 0,
-              duration: (t.clip as any).duration ?? buffer.duration
-            }]
-          }
-        }
-        
-        // Handle new format with clips array
-        const loadedClips = (t.clips || []).map((clipData: any) => {
-          const buffer = audioBufferFromSerialized(clipData.audioData)
-          
-          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-          const player = new Tone.Player()
-          player.buffer = toneBuffer
-          player.loop = true
-          
-          if (!trackGainsRef.current[i]) {
-            throw new Error(`Track gain ${i} no disponible. Reinicia la aplicación.`)
-          }
-          player.connect(trackGainsRef.current[i])
-          
-          return {
-            player,
-            fileName: clipData.fileName,
-            isPlaying: false,
-            buffer,
-            startPosition: clipData.startPosition,
-            offsetSeconds: clipData.offsetSeconds ?? getCountInSeconds(),
-            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`,
-            sourceStart: clipData.sourceStart ?? 0,
-            duration: clipData.duration ?? buffer.duration
-          }
-        })
-        
-        return {
-          ...t,
-          clips: loadedClips
-        }
-      })
-      
-      // Pad to 8 tracks while preserving loaded tracks at correct indices
-      const newTrackStates = Array.from({ length: 8 }, (_, i) => {
-        if (i < loadedTracks.length) {
-          return loadedTracks[i]
-        }
-        return {
-          name: `Track ${i + 1}`,
-          mute: false,
-          solo: false,
-          volume: 0.8,
-          clips: []
-        }
-      })
-      
-      console.log(`Setting ${loadedTracks.length} loaded tracks, padded to ${newTrackStates.length} total`)
-      console.log(`Track 0 clips:`, newTrackStates[0].clips.length)
-      console.log(`Track 1 clips:`, newTrackStates[1].clips.length)
-      
-      setTrackStates(newTrackStates)
-      setCurrentProjectName(name)
-      setShowCloudProjects(false)
-      
-      // Verify tracks actually have audio before showing success
-      const tracksWithAudio = newTrackStates.filter((t: any) => t.clips && t.clips.length > 0)
-      const totalClips = newTrackStates.reduce((sum: number, t: any) => sum + (t.clips?.length || 0), 0)
-      
-      console.log(`Loaded project "${name}": ${tracksWithAudio.length} tracks with ${totalClips} clips`)
-      
-      if (totalClips > 0) {
-        setToastMessage(`Proyecto abierto: ${totalClips} clips en ${tracksWithAudio.length} pistas`)
-        setShowToast(true)
-        setTimeout(() => setShowToast(false), 3000)
-      } else {
-        throw new Error('El proyecto se cargó pero no tiene audio. Los archivos pueden estar corruptos.')
-      }
-    } catch (err: any) {
-      console.error('Failed to open project:', err)
-      setErrorMessage(err.message || 'Error al abrir proyecto')
-    }
-  }
-  
-  const handleDeleteCloudProject = async (pathname: string, name: string) => {
-    if (!currentUser) {
-      setErrorMessage('Inicia sesión para eliminar proyectos')
-      return
-    }
-
-    if (!confirm(`¿Eliminar permanentemente "${name}"?`)) return
-    
-    try {
-      setErrorMessage(null)
-      await deleteProjectFromCloud(pathname)
-      
-      if (currentProjectName === name) {
-        await clearProject()
-        setCurrentProjectName('Proyecto sin título')
-      }
-      
-      const projects = await listCloudProjects()
-      setCloudProjects(projects)
-      const usage = await getStorageUsage()
-      setStorageUsage(usage)
-      
-      setToastMessage('Proyecto eliminado')
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Error al eliminar proyecto')
     }
   }
 
@@ -1306,9 +1298,12 @@ function App() {
       await Tone.start()
       
       if (trackGainsRef.current.length === 0) {
-        trackGainsRef.current = Array.from({ length: 8 }, () => 
-          new Tone.Gain(0.8).toDestination()
+        const n = Math.max(trackStatesRef.current.length, 1)
+        trackGainsRef.current = Array.from({ length: n }, () =>
+          new Tone.Gain(DEFAULT_TRACK_VOLUME).toDestination()
         )
+      } else {
+        ensureTrackGains(trackStatesRef.current.length)
       }
       
       if (!metronomePlayerRef.current) {
@@ -1380,13 +1375,22 @@ function App() {
 
   const getMaxDuration = (): number => {
     let maxDuration = 0
-    trackStates.forEach(track => {
+    trackStatesRef.current.forEach(track => {
       track.clips.forEach(clip => {
-        const clipEnd = clip.offsetSeconds + clip.buffer.duration
+        const clipEnd = clip.offsetSeconds + clip.duration
         maxDuration = Math.max(maxDuration, clipEnd)
       })
     })
     return maxDuration > 0 ? maxDuration : 0
+  }
+
+  const getLayoutMax = (): number => {
+    const clipMax = getMaxDuration()
+    const live = recordLiveRef.current
+    if (!live) return clipMax > 0 ? clipMax : 100
+    const elapsed = Math.max(0, playheadPositionRef.current - live.startOffset)
+    const liveEnd = live.startOffset + elapsed + 12
+    return Math.max(clipMax, liveEnd, 100)
   }
 
   const syncPlayheadDom = (seconds: number) => {
@@ -1407,9 +1411,13 @@ function App() {
   }
 
   useLayoutEffect(() => {
-    timelineMaxRef.current = getMaxDuration()
+    timelineMaxRef.current = getLayoutMax()
     syncPlayheadDom(playheadPositionRef.current)
-  }, [trackStates, horizontalZoom])
+  }, [trackStates, horizontalZoom, isRecording, recordLayoutTick, recordingTrackIndex])
+
+  useLayoutEffect(() => {
+    syncPlayheadDom(playheadPosition)
+  }, [playheadPosition])
 
   useEffect(() => {
     const anySolo = trackStates.some(ts => ts.solo)
@@ -1418,17 +1426,48 @@ function App() {
       const gainNode = trackGainsRef.current[index]
       if (!gainNode) return
       
-      let gain = trackState.volume
-      
-      if (trackState.mute) {
-        gain = 0
-      } else if (anySolo && !trackState.solo) {
-        gain = 0
-      }
-      
-      gainNode.gain.value = gain
+      rampTrackGain(
+        gainNode,
+        effectiveTrackGain(trackState.volume, trackState.mute, trackState.solo, anySolo)
+      )
     })
   }, [trackStates])
+
+  const bindRecordingPreview = (trackIndex: number) => {
+    const el = document.querySelector(
+      `.track-content[data-track-index="${trackIndex}"] [data-recording-clip]`
+    ) as HTMLElement | null
+    const canvas = el?.querySelector('canvas') as HTMLCanvasElement | null
+    return { el, canvas }
+  }
+
+  const updateRecordingPreview = (currentTime: number) => {
+    const live = recordLiveRef.current
+    if (!live) return
+    const elapsed = Math.max(0, currentTime - live.startOffset)
+    if (recordElapsedRef.current) {
+      recordElapsedRef.current.textContent = formatTime(elapsed)
+    }
+    const needed = Math.max(timelineMaxRef.current, live.startOffset + elapsed + 12, 100)
+    if (needed > timelineMaxRef.current + 2) {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      if (now - lastRecordLayoutRef.current > 400) {
+        lastRecordLayoutRef.current = now
+        setRecordLayoutTick((tick) => tick + 1)
+      }
+    }
+    const layoutMax = timelineMaxRef.current || 100
+    if (live.el) {
+      live.el.style.left = `${(live.startOffset / layoutMax) * 100}%`
+      live.el.style.width = `${(Math.max(0.05, elapsed) / layoutMax) * 100}%`
+    }
+    if (live.canvas && live.capture.peaks.length) {
+      const width = Math.max(40, Math.floor(live.el?.getBoundingClientRect().width || 40))
+      if (live.canvas.width !== width) live.canvas.width = width
+      if (live.canvas.height !== 64) live.canvas.height = 64
+      drawRecordingPeaks(live.canvas, live.capture.peaks)
+    }
+  }
 
   const handlePlay = async () => {
     await Tone.start()
@@ -1448,7 +1487,7 @@ function App() {
     const countInSeconds = getCountInSeconds()
     // When loop is enabled and marked, always start from loop start
     // Otherwise, start from current playhead position (clicked or paused)
-    const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : playheadPosition
+    const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : playheadPositionRef.current
     
     // Configure Transport loop
     if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
@@ -1478,7 +1517,12 @@ function App() {
     
     const maxDuration = getMaxDuration()
     
-    const updatedStates = trackStates.map(track => {
+    const skipRecordTrack = recordLiveRef.current?.trackIndex
+    const sourceTracks = trackStatesRef.current
+    const updatedStates = sourceTracks.map((track, trackIndex) => {
+      if (trackIndex === skipRecordTrack) {
+        return { ...track, clips: track.clips.map(clip => ({ ...clip, isPlaying: false })) }
+      }
       const updatedClips = track.clips.map(clip => {
         if (!clip.isPlaying && startTime < clip.offsetSeconds + clip.duration) {
           clip.player.loop = false
@@ -1553,7 +1597,7 @@ function App() {
               })
             })
           }
-        } else if (!isLoopEnabled && maxDuration > 0 && currentTime >= maxDuration) {
+        } else if (!isLoopEnabled && !recordLiveRef.current && maxDuration > 0 && currentTime >= maxDuration) {
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
             track.clips.forEach(clip => {
@@ -1568,6 +1612,7 @@ function App() {
         
         lastLoopCheck = currentTime
         syncPlayheadDom(currentTime)
+        updateRecordingPreview(currentTime)
         playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
       }
     }
@@ -1575,6 +1620,10 @@ function App() {
   }
 
   const handlePause = () => {
+    if (isRecordingRef.current) {
+      void stopRecording({ then: 'pause' })
+      return
+    }
     Tone.getTransport().pause()
     
     if (playheadAnimationRef.current !== null) {
@@ -1597,8 +1646,14 @@ function App() {
     setIsPlaying(false)
     setIsPaused(true)
   }
+  handlePlayRef.current = handlePlay
+  handlePauseRef.current = handlePause
 
   const handleStop = () => {
+    if (isRecordingRef.current) {
+      void stopRecording({ then: 'stop' })
+      return
+    }
     // Capture current position before stopping
     const currentPosition = Tone.getTransport().seconds
     
@@ -1634,6 +1689,202 @@ function App() {
       Tone.getTransport().seconds = 0
     }
   }
+
+  const stopRecording = async (opts?: { then?: 'stop' | 'pause' | 'keep'; commit?: boolean }) => {
+    const live = recordLiveRef.current
+    if (!live) return
+    isRecordingRef.current = false
+    setIsRecording(false)
+    setRecordingTrackIndex(null)
+    const after = opts?.then ?? 'stop'
+    const commit = opts?.commit !== false
+    let captured: { chunks: Float32Array[][]; sampleRate: number } | null = null
+    try {
+      captured = live.capture.stop()
+    } catch (err) {
+      console.error('record stop failed', err)
+    }
+    live.stream.getTracks().forEach((track) => track.stop())
+    recordLiveRef.current = null
+    if (recordElapsedRef.current) recordElapsedRef.current.textContent = ''
+
+    const ctx = nativeAudioContext(Tone.getContext().rawContext)
+    if (commit && captured && captured.chunks.length > 0) {
+      try {
+        const buffer = pcmChunksToAudioBuffer(ctx, captured.chunks, captured.sampleRate)
+        if (buffer.duration >= 0.05) {
+          await ensureAudio()
+          ensureTrackGains(trackStatesRef.current.length)
+          const latency = recordLatencySeconds(ctx)
+          const offset = compensatedRecordOffset(live.startOffset, latency)
+          const player = new Tone.Player()
+          player.loop = false
+          player.buffer = new Tone.ToneAudioBuffer(buffer)
+          const gain = trackGainsRef.current[live.trackIndex]
+          if (gain) player.connect(gain)
+          const newClip: Clip = {
+            player,
+            fileName: 'Grabación',
+            isPlaying: false,
+            buffer,
+            startPosition: 0,
+            offsetSeconds: offset,
+            id: `clip-${Date.now()}-${Math.random()}`,
+            sourceStart: 0,
+            duration: buffer.duration
+          }
+          const next = [...trackStatesRef.current]
+          if (next[live.trackIndex]) {
+            next[live.trackIndex] = {
+              ...next[live.trackIndex],
+              clips: [...next[live.trackIndex].clips, newClip]
+            }
+            trackStatesRef.current = next
+            setTrackStates(next)
+            showClipToast('Grabación lista')
+          }
+        } else {
+          setErrorMessage('Grabación demasiado corta')
+          setTimeout(() => setErrorMessage(null), 3000)
+        }
+      } catch (err) {
+        console.error(err)
+        setErrorMessage('No se pudo procesar la grabación')
+        setTimeout(() => setErrorMessage(null), 4000)
+      }
+    }
+
+    if (after === 'pause') handlePause()
+    else if (after === 'stop') handleStop()
+  }
+  stopRecordingRef.current = stopRecording
+
+  const handleRecordArm = (trackIndex: number) => {
+    setRecordArmedIndex((prev) => (prev === trackIndex ? null : trackIndex))
+  }
+
+  const handleMicDeviceChange = (deviceId: string) => {
+    setMicDeviceId(deviceId)
+    persistMicDeviceId(deviceId)
+  }
+
+  const handleRecord = async () => {
+    if (isRecordingRef.current) {
+      await stopRecording({ then: 'stop' })
+      return
+    }
+    await ensureAudio()
+    const tracks = trackStatesRef.current
+    const placement = resolveRecordTrack(recordArmedIndex, selectedTrack, tracks.length)
+    let trackIndex = placement.trackIndex
+    let stream: MediaStream
+    try {
+      stream = await requestMicStream(micDeviceId)
+    } catch (err) {
+      setErrorMessage(micErrorMessage(err))
+      setTimeout(() => setErrorMessage(null), 4000)
+      return
+    }
+    try {
+      const devices = await listAudioInputDevices()
+      setAudioInputs(devices)
+      const selected = stream.getAudioTracks()[0]?.getSettings().deviceId
+      if (typeof selected === 'string' && selected.length > 0 && selected !== micDeviceId) {
+        setMicDeviceId(selected)
+        persistMicDeviceId(selected)
+      }
+    } catch {
+      // ignore enumerate failures
+    }
+
+    projectLoadGenRef.current++
+    saveUndo()
+    let nextTracks = tracks
+    if (placement.createNew) {
+      const name = nextGrabacionName(tracks.map((t) => t.name), tracks.length)
+      nextTracks = [...tracks, { ...createEmptyTrack(name), clips: [] as Clip[] }]
+      ensureTrackGains(nextTracks.length)
+      trackIndex = nextTracks.length - 1
+      trackStatesRef.current = nextTracks
+    }
+
+    const startOffset = playheadPositionRef.current
+    const ctx = Tone.getContext().rawContext as AudioContext
+    let capture: PcmCapture
+    try {
+      capture = startPcmCapture(ctx, stream)
+    } catch (err) {
+      console.error('[record] capture failed', err)
+      stream.getTracks().forEach((track) => track.stop())
+      setErrorMessage('No se pudo iniciar la captura de audio')
+      setTimeout(() => setErrorMessage(null), 4000)
+      return
+    }
+
+    recordLiveRef.current = {
+      trackIndex,
+      startOffset,
+      capture,
+      stream,
+      el: null,
+      canvas: null,
+      startedPlayback: Tone.getTransport().state !== 'started'
+    }
+    isRecordingRef.current = true
+    flushSync(() => {
+      if (placement.createNew) {
+        setTrackStates(nextTracks)
+        setRecordArmedIndex(trackIndex)
+        setSelectedTrack(trackIndex)
+      }
+      setRecordingTrackIndex(trackIndex)
+      setIsRecording(true)
+    })
+    const preview = bindRecordingPreview(trackIndex)
+    if (recordLiveRef.current) {
+      recordLiveRef.current.el = preview.el
+      recordLiveRef.current.canvas = preview.canvas
+    }
+
+    if (Tone.getTransport().state !== 'started') {
+      await handlePlay()
+    } else {
+      const armed = trackStatesRef.current[trackIndex]
+      armed?.clips.forEach((clip) => {
+        if (clip.player.state === 'started') clip.player.stop()
+        clip.isPlaying = false
+      })
+    }
+    if (recordLiveRef.current && !trackStatesRef.current[trackIndex] && nextTracks[trackIndex]) {
+      const restored = [...trackStatesRef.current, nextTracks[trackIndex]]
+      ensureTrackGains(restored.length)
+      trackStatesRef.current = restored
+      setTrackStates(restored)
+    }
+  }
+
+  useLayoutEffect(() => {
+    const live = recordLiveRef.current
+    if (!live || !isRecording) return
+    if (!live.el || !live.el.isConnected) {
+      const preview = bindRecordingPreview(live.trackIndex)
+      live.el = preview.el
+      live.canvas = preview.canvas
+    }
+  }, [isRecording, recordingTrackIndex, trackStates])
+
+  useEffect(() => {
+    const refreshInputs = () => {
+      void listAudioInputDevices()
+        .then(setAudioInputs)
+        .catch(() => {})
+    }
+    refreshInputs()
+    const media = navigator.mediaDevices
+    if (!media?.addEventListener) return
+    media.addEventListener('devicechange', refreshInputs)
+    return () => media.removeEventListener('devicechange', refreshInputs)
+  }, [])
 
   const handleSplitClip = async (trackIndex: number) => {
     const track = trackStates[trackIndex]
@@ -1783,13 +2034,53 @@ function App() {
     return true
   }
 
-  const copyClipToClipboard = (clip: Clip) => {
-    setClipboard({
+  const collectSelectedClips = () => {
+    const items: { clip: Clip; trackIndex: number }[] = []
+    trackStates.forEach((track, trackIndex) => {
+      track.clips.forEach(clip => {
+        if (selectedClipIds.has(clip.id)) items.push({ clip, trackIndex })
+      })
+    })
+    return items
+  }
+
+  const copySelectedClips = () => {
+    const items = collectSelectedClips()
+    if (items.length === 0) return 0
+    setClipboard(packClipboard(items.map(({ clip, trackIndex }) => ({
       buffer: clip.buffer,
       fileName: clip.fileName,
       sourceStart: clip.sourceStart,
-      duration: clip.duration
-    })
+      duration: clip.duration,
+      offsetSeconds: clip.offsetSeconds,
+      trackIndex
+    }))).map(({ buffer, fileName, sourceStart, duration, relTime, relTrack }) => ({
+      buffer,
+      fileName,
+      sourceStart,
+      duration,
+      relTime,
+      relTrack
+    })))
+    return items.length
+  }
+
+  const copyClipToClipboard = (clip: Clip, trackIndex = 0) => {
+    setClipboard(packClipboard([{
+      buffer: clip.buffer,
+      fileName: clip.fileName,
+      sourceStart: clip.sourceStart,
+      duration: clip.duration,
+      offsetSeconds: clip.offsetSeconds,
+      trackIndex
+    }]).map(({ buffer, fileName, sourceStart, duration, relTime, relTrack }) => ({
+      buffer,
+      fileName,
+      sourceStart,
+      duration,
+      relTime,
+      relTrack
+    })))
   }
 
   const showClipToast = (message: string) => {
@@ -1799,7 +2090,7 @@ function App() {
   }
 
   const pasteClipAt = async (trackIndex: number, timeSeconds: number) => {
-    if (!clipboard) {
+    if (!clipboard || clipboard.length === 0) {
       setErrorMessage('No hay clip copiado')
       setTimeout(() => setErrorMessage(null), 2000)
       return
@@ -1807,32 +2098,34 @@ function App() {
     
     await ensureAudio()
     saveUndo()
-    
-    const player = new Tone.Player()
-    player.buffer = new Tone.ToneAudioBuffer(clipboard.buffer)
-    player.loop = false
-    player.connect(trackGainsRef.current[trackIndex])
-    
-    const newClip: Clip = {
-      player,
-      fileName: clipboard.fileName,
-      isPlaying: false,
-      buffer: clipboard.buffer,
-      startPosition: 0,
-      offsetSeconds: Math.max(0, snapToGrid(timeSeconds)),
-      id: `clip-${Date.now()}-${Math.random()}`,
-      sourceStart: clipboard.sourceStart,
-      duration: clipboard.duration
-    }
-    
-    const newTrackStates = [...trackStates]
-    newTrackStates[trackIndex] = {
-      ...newTrackStates[trackIndex],
-      clips: [...newTrackStates[trackIndex].clips, newClip]
-    }
+    const originTime = snapEnabled ? snapToGrid(timeSeconds) : timeSeconds
+    const newTrackStates = trackStates.map(track => ({ ...track, clips: [...track.clips] }))
+    const newIds = new Set<string>()
+
+    clipboard.forEach((item, i) => {
+      const place = pastePlacement(item.relTime, item.relTrack, originTime, trackIndex, trackStates.length)
+      const player = new Tone.Player()
+      player.buffer = new Tone.ToneAudioBuffer(item.buffer)
+      player.loop = false
+      player.connect(trackGainsRef.current[place.trackIndex])
+      const newClip: Clip = {
+        player,
+        fileName: item.fileName,
+        isPlaying: false,
+        buffer: item.buffer,
+        startPosition: 0,
+        offsetSeconds: place.offsetSeconds,
+        id: `clip-${Date.now()}-${i}-${Math.random()}`,
+        sourceStart: item.sourceStart,
+        duration: item.duration
+      }
+      newTrackStates[place.trackIndex].clips.push(newClip)
+      newIds.add(newClip.id)
+    })
+
     setTrackStates(newTrackStates)
-    setSelectedClipIds(new Set([newClip.id]))
-    showClipToast('Clip pegado')
+    setSelectedClipIds(newIds)
+    showClipToast(clipboard.length > 1 ? `${clipboard.length} clips pegados` : 'Clip pegado')
   }
 
   const handlePasteClip = async (trackIndex: number) => {
@@ -1904,7 +2197,7 @@ function App() {
     const percentage = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0
     const maxDur = getMaxDuration() || 100
     const time = Math.max(0, percentage * maxDur)
-    if (clipId) {
+    if (clipId && !selectedClipIds.has(clipId)) {
       setSelectedClipIds(new Set([clipId]))
     }
     setContextMenu({
@@ -1912,7 +2205,8 @@ function App() {
       y: e.clientY,
       trackIndex,
       clipId,
-      time
+      time,
+      kind: 'timeline'
     })
   }
 
@@ -1928,33 +2222,57 @@ function App() {
       await pasteClipAt(trackIndex, time)
       return
     }
+    if (action === 'cut') {
+      const n = selectedClipIds.size || (clip ? 1 : 0)
+      if (selectedClipIds.size > 0) {
+        copySelectedClips()
+        handleDeleteSelected(`${n > 1 ? n + ' clips cortados' : 'Clip cortado'}`)
+      } else if (clip) {
+        cutClip(clip)
+      }
+      return
+    }
+    if (action === 'copy') {
+      const n = selectedClipIds.size > 0 ? copySelectedClips() : 0
+      if (n === 0 && clip) {
+        copyClipToClipboard(clip, trackIndex)
+        showClipToast('Clip copiado')
+      } else if (n > 0) {
+        showClipToast(n > 1 ? `${n} clips copiados` : 'Clip copiado')
+      }
+      return
+    }
+    if (action === 'duplicate') {
+      if (selectedClipIds.size > 0) handleDuplicateSelected()
+      else if (clip) duplicateClipOnTrack(trackIndex, clip)
+      return
+    }
+    if (action === 'delete') {
+      if (selectedClipIds.size > 0) handleDeleteSelected()
+      else if (clip) {
+        deleteClipById(clip.id)
+        showClipToast('Clip eliminado')
+      }
+      return
+    }
     if (!clip) return
 
-    if (action === 'cut') {
-      cutClip(clip)
-    } else if (action === 'copy') {
-      copyClipToClipboard(clip)
-      showClipToast('Clip copiado')
-    } else if (action === 'split') {
-      const splitTime = snapToGrid(time)
+    if (action === 'split') {
+      const splitTime = snapEnabled ? snapToGrid(time) : time
       if (splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration) {
         await splitClipAt(trackIndex, splitTime)
       }
-    } else if (action === 'duplicate') {
-      duplicateClipOnTrack(trackIndex, clip)
-    } else if (action === 'delete') {
-      deleteClipById(clip.id)
-      showClipToast('Clip eliminado')
     }
   }
 
   const handleClipClick = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
+    if (!isClickGesture(dragLiveRef.current.distance)) return
     
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
     if (!clip) return
     
-    if (e.altKey && !e.shiftKey) {
+    if (e.altKey && !e.shiftKey && !(e.ctrlKey || e.metaKey)) {
       const rect = e.currentTarget.getBoundingClientRect()
       const clickX = e.clientX - rect.left
       const percentage = clickX / rect.width
@@ -1966,64 +2284,329 @@ function App() {
       }
       return
     }
-    
-    if (e.shiftKey) {
-      setSelectedClipIds(prev => {
-        const newSet = new Set(prev)
-        if (newSet.has(clipId)) {
-          newSet.delete(clipId)
-        } else {
-          newSet.add(clipId)
-        }
-        return newSet
-      })
+
+    const cmd = e.ctrlKey || e.metaKey
+    if (cmd) {
+      setSelectedClipIds(prev => mergeSelection(prev, [clipId], 'toggle'))
+    } else if (e.shiftKey) {
+      setSelectedClipIds(prev => mergeSelection(prev, [clipId], 'add'))
     } else {
       setSelectedClipIds(new Set([clipId]))
+      if (!(e.target as HTMLElement).closest('.clip-trim-handle')) {
+        const lane = (e.currentTarget as HTMLElement).closest('.track-content') as HTMLElement | null
+        if (lane) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, false)
+        }
+      }
     }
+    isDraggingClipRef.current = false
   }
 
   const handleClipDragStart = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
     if (e.button !== 0) return
-    
-    if (!selectedClipIds.has(clipId)) {
-      setSelectedClipIds(new Set([clipId]))
-    }
-    
-    const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
+    if (trimLiveRef.current?.active) return
+
+    const tracks = trackStatesRef.current
+    const clip = tracks[trackIndex]?.clips.find(c => c.id === clipId)
     if (!clip) return
-    
-    setIsDraggingClip(true)
-    setDraggedClipTrack(trackIndex)
-    setDraggedClipId(clipId)
-    setDragStartX(e.clientX)
-    setDragStartY(e.clientY)
-    setDragStartPosition(clip.offsetSeconds)
-    setTempDragOffset(clip.offsetSeconds)
-    setTempDragTrack(trackIndex)
+
+    let selected = selectedClipIdsRef.current
+    if (!selected.has(clipId)) {
+      const cmd = e.ctrlKey || e.metaKey
+      selected = (e.shiftKey || cmd) ? new Set(selected).add(clipId) : new Set([clipId])
+      setSelectedClipIds(selected)
+    }
+
+    const startX = e.clientX
+    const startY = e.clientY
+    const startOffset = clip.offsetSeconds
+    const startTrack = trackIndex
+    const startedWithAlt = e.altKey
+    const zoom = verticalZoom
+    const snapOn = snapEnabled
+
+    let minOffset = Infinity
+    let minTrack = Infinity
+    let maxTrack = -Infinity
+    tracks.forEach((track, ti) => {
+      track.clips.forEach(c => {
+        if (!selected.has(c.id)) return
+        minOffset = Math.min(minOffset, c.offsetSeconds)
+        minTrack = Math.min(minTrack, ti)
+        maxTrack = Math.max(maxTrack, ti)
+      })
+    })
+    if (minOffset === Infinity) minOffset = startOffset
+    if (minTrack === Infinity) minTrack = startTrack
+    if (maxTrack === -Infinity) maxTrack = startTrack
+
+    isDraggingClipRef.current = true
     dragLiveRef.current = {
-      tempOffset: clip.offsetSeconds,
-      tempTrack: trackIndex,
-      threshold: e.altKey,
-      distance: 0
+      tempOffset: startOffset,
+      tempTrack: startTrack,
+      threshold: startedWithAlt,
+      distance: 0,
+      timeDelta: 0,
+      trackDelta: 0,
+      minOffset,
+      minTrack,
+      maxTrack
     }
+
+    const clearGroupDragPreview = () => {
+      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
+        const el = node as HTMLElement
+        el.style.transform = ''
+        el.style.zIndex = ''
+        el.style.willChange = ''
+      })
+      document.querySelectorAll('.track-content').forEach(node => {
+        const el = node as HTMLElement
+        el.style.zIndex = ''
+        el.style.overflow = ''
+      })
+    }
+
+    const applyGroupDragPreview = (timeDelta: number, trackDelta: number) => {
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      const laneWidth = (lanes[0] as HTMLElement).getBoundingClientRect().width
+      const layoutMax = timelineMaxRef.current || 100
+      const trackHeight = 88 * zoom
+      const dx = (timeDelta / layoutMax) * laneWidth
+      const dy = trackDelta * trackHeight
+      const selectedTracks = new Set<number>()
+      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
+        const el = node as HTMLElement
+        const id = el.dataset.clipId
+        if (!id || !selected.has(id)) return
+        el.style.willChange = 'transform'
+        el.style.transform = `translate(${dx}px, ${dy}px)`
+        el.style.zIndex = '20'
+        const lane = el.closest('.track-content')
+        if (lane) {
+          const idx = Array.prototype.indexOf.call(lanes, lane)
+          if (idx >= 0) selectedTracks.add(idx)
+        }
+      })
+      lanes.forEach((node, i) => {
+        const el = node as HTMLElement
+        el.style.overflow = 'visible'
+        el.style.zIndex = selectedTracks.has(i) ? String(25 + i) : '1'
+      })
+    }
+
+    const onMove = (ev: MouseEvent) => {
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      const deltaX = ev.clientX - startX
+      const deltaY = ev.clientY - startY
+      const distance = Math.hypot(deltaX, deltaY)
+      const live = dragLiveRef.current
+      live.distance = distance
+      if (isClickGesture(distance)) return
+      if (live.threshold && distance < 5) return
+
+      const firstLane = lanes[0] as HTMLElement
+      const rect = firstLane.getBoundingClientRect()
+      const deltaTime = deltaTimeFromLanePx(deltaX, rect.width, timelineMaxRef.current || 100)
+      const rawOffset = startOffset + deltaTime
+      const newOffset = snapActiveDuringDrag(snapOn, ev.shiftKey) ? snapToGrid(rawOffset) : rawOffset
+      let timeDelta = clampGroupTimeDelta(live.minOffset, newOffset - startOffset)
+      const trackHeight = 88 * zoom
+      const rawTrackDelta = Math.round(deltaY / trackHeight)
+      const trackDelta = clampGroupTrackDelta(live.minTrack, live.maxTrack, rawTrackDelta, trackStatesRef.current.length)
+      live.tempOffset = startOffset + timeDelta
+      live.tempTrack = startTrack + trackDelta
+      live.timeDelta = timeDelta
+      live.trackDelta = trackDelta
+
+      if (dragRafRef.current == null) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = null
+          applyGroupDragPreview(dragLiveRef.current.timeDelta, dragLiveRef.current.trackDelta)
+        })
+      }
+    }
+
+    const onUp = (ev: MouseEvent) => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      if (dragRafRef.current != null) {
+        cancelAnimationFrame(dragRafRef.current)
+        dragRafRef.current = null
+      }
+      const live = dragLiveRef.current
+      isDraggingClipRef.current = false
+      if (isClickGesture(live.distance) || (live.threshold && live.distance < 5)) {
+        clearGroupDragPreview()
+        const lane = (ev.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
+          ?? (document.querySelector('.track-content') as HTMLElement | null)
+        if (lane && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey && isClickGesture(live.distance)) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(ev.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, false)
+        }
+        return
+      }
+
+      const timeDelta = live.timeDelta
+      const trackDelta = live.trackDelta
+      const currentTracks = trackStatesRef.current
+      saveUndo()
+
+      let working = currentTracks
+      let workingSelected = selected
+      if (startedWithAlt && live.distance >= 5) {
+        working = currentTracks.map(track => ({ ...track, clips: [...track.clips] }))
+        workingSelected = new Set(selected)
+        selected.forEach(id => {
+          for (let ti = 0; ti < currentTracks.length; ti++) {
+            const sourceClip = currentTracks[ti].clips.find(c => c.id === id)
+            if (!sourceClip) continue
+            const player = new Tone.Player()
+            player.buffer = sourceClip.player.buffer
+            player.loop = false
+            player.connect(trackGainsRef.current[ti])
+            const newClip: Clip = {
+              player,
+              fileName: sourceClip.fileName,
+              isPlaying: false,
+              buffer: sourceClip.buffer,
+              startPosition: sourceClip.startPosition,
+              offsetSeconds: sourceClip.offsetSeconds + 0.001,
+              id: `clip-${Date.now()}-${Math.random()}`,
+              sourceStart: sourceClip.sourceStart,
+              duration: sourceClip.duration,
+              selected: true
+            }
+            working[ti].clips.push(newClip)
+            workingSelected.add(newClip.id)
+          }
+        })
+        setSelectedClipIds(workingSelected)
+      }
+
+      const moved: { to: number; clip: Clip }[] = []
+      working.forEach((track, ti) => {
+        track.clips.forEach(c => {
+          if (!workingSelected.has(c.id)) return
+          moved.push({
+            to: ti + trackDelta,
+            clip: { ...c, offsetSeconds: Math.max(0, c.offsetSeconds + timeDelta) }
+          })
+        })
+      })
+      const nextTracks = working.map(track => ({
+        ...track,
+        clips: track.clips.filter(c => !workingSelected.has(c.id))
+      }))
+      moved.forEach(({ to, clip }) => {
+        nextTracks[to].clips.push(clip)
+      })
+      clearGroupDragPreview()
+      setTrackStates(nextTracks)
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'move'
   }
 
-  const handleResizeStart = (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => {
+  const handleResizeStart = (e: React.MouseEvent, trackIndex: number, clipId: string, edge: ClipTrimEdge) => {
     e.stopPropagation()
+    e.preventDefault()
     if (e.button !== 0) return
-    
-    const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
+
+    const clip = trackStatesRef.current[trackIndex]?.clips.find(c => c.id === clipId)
     if (!clip) return
-    
-    saveUndo()
-    setResizingClip({ trackIndex, clipId, edge })
-    setResizeStartX(e.clientX)
-    setResizeStartValue(edge === 'left' ? clip.sourceStart : clip.duration)
+
+    const wrapper = (e.currentTarget as HTMLElement).closest('.clip-wrapper') as HTMLElement | null
+    const waveform = wrapper?.querySelector('[data-waveform-full]') as HTMLElement | null
+    const orig: ClipTrimState & { bufferDuration: number } = {
+      sourceStart: clip.sourceStart,
+      duration: clip.duration,
+      offsetSeconds: clip.offsetSeconds,
+      bufferDuration: clip.buffer.duration
+    }
+    trimLiveRef.current = {
+      active: true,
+      trackIndex,
+      clipId,
+      edge,
+      startX: e.clientX,
+      orig,
+      next: { sourceStart: orig.sourceStart, duration: orig.duration, offsetSeconds: orig.offsetSeconds },
+      wrapper,
+      waveform
+    }
+    dragLiveRef.current.distance = 0
+
+    const onMove = (ev: MouseEvent) => {
+      const live = trimLiveRef.current
+      if (!live?.active) return
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      const laneWidth = (lanes[0] as HTMLElement).getBoundingClientRect().width
+      const deltaTime = deltaTimeFromLanePx(ev.clientX - live.startX, laneWidth, timelineMaxRef.current || 100)
+      dragLiveRef.current.distance = Math.max(dragLiveRef.current.distance, Math.abs(ev.clientX - live.startX))
+      const next = applyClipTrim(live.edge, deltaTime, live.orig)
+      live.next = next
+      if (resizeRafRef.current == null) {
+        resizeRafRef.current = requestAnimationFrame(() => {
+          resizeRafRef.current = null
+          const current = trimLiveRef.current
+          if (!current?.active || !current.wrapper) return
+          applyTrimPreviewStyles(
+            current.wrapper,
+            current.waveform,
+            current.next,
+            current.orig.bufferDuration,
+            timelineMaxRef.current || 100
+          )
+        })
+      }
+    }
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      if (resizeRafRef.current != null) {
+        cancelAnimationFrame(resizeRafRef.current)
+        resizeRafRef.current = null
+      }
+      const live = trimLiveRef.current
+      trimLiveRef.current = null
+      if (!live) return
+      if (trimStatesEqual(live.orig, live.next)) return
+      saveUndo()
+      const { trackIndex: ti, clipId: id, next } = live
+      setTrackStates(prev => prev.map((track, i) => {
+        if (i !== ti) return track
+        return {
+          ...track,
+          clips: track.clips.map(c => c.id !== id ? c : { ...c, ...next })
+        }
+      }))
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'ew-resize'
   }
 
-  const handleDeleteSelected = () => {
+  const handleDeleteSelected = (toast?: string) => {
     if (selectedClipIds.size === 0) return
+    const n = selectedClipIds.size
     
     saveUndo()
     const newTrackStates = trackStates.map(track => ({
@@ -2038,9 +2621,7 @@ function App() {
     }))
     setTrackStates(newTrackStates)
     setSelectedClipIds(new Set())
-    setToastMessage('Clip eliminado')
-    setShowToast(true)
-    setTimeout(() => setShowToast(false), 2000)
+    showClipToast(toast ?? (n > 1 ? `${n} clips eliminados` : 'Clip eliminado'))
   }
 
   const handleDuplicateSelected = () => {
@@ -2078,244 +2659,27 @@ function App() {
     
     setTrackStates(newTrackStates)
     setSelectedClipIds(newSelectedIds)
-    setToastMessage('Clip duplicado')
-    setShowToast(true)
-    setTimeout(() => setShowToast(false), 2000)
+    showClipToast(newSelectedIds.size > 1 ? `${newSelectedIds.size} clips duplicados` : 'Clip duplicado')
   }
 
-  useEffect(() => {
-    if (!isDraggingClip || draggedClipTrack === null || draggedClipId === null) return
 
-    const handleMouseMove = (e: MouseEvent) => {
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      
-      const deltaX = e.clientX - dragStartX
-      const deltaY = e.clientY - dragStartY
-      const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
-      const live = dragLiveRef.current
-      
-      if (live.threshold && distance < 5) {
-        live.distance = distance
-        return
-      }
-      
-      if (live.threshold && distance >= 5) {
-        saveUndo()
-        const newTrackStates = [...trackStates]
-        selectedClipIds.forEach(id => {
-          for (let ti = 0; ti < trackStates.length; ti++) {
-            const sourceClip = trackStates[ti].clips.find(c => c.id === id)
-            if (sourceClip) {
-              const player = new Tone.Player()
-              player.buffer = sourceClip.player.buffer
-              player.loop = false
-              player.connect(trackGainsRef.current[ti])
-              
-              const newClip: Clip = {
-                player,
-                fileName: sourceClip.fileName,
-                isPlaying: false,
-                buffer: sourceClip.buffer,
-                startPosition: sourceClip.startPosition,
-                offsetSeconds: sourceClip.offsetSeconds + 0.001,
-                id: `clip-${Date.now()}-${Math.random()}`,
-                sourceStart: sourceClip.sourceStart,
-                duration: sourceClip.duration,
-                selected: true
-              }
-              newTrackStates[ti].clips.push(newClip)
-              setSelectedClipIds(prev => {
-                const newSet = new Set(prev)
-                newSet.add(newClip.id)
-                return newSet
-              })
-            }
-          }
-        })
-        setTrackStates(newTrackStates)
-        live.threshold = false
-      }
-      
-      const firstLane = lanes[0] as HTMLElement
-      const rect = firstLane.getBoundingClientRect()
-      const deltaPercentage = deltaX / rect.width
-      const maxDuration = timelineMaxRef.current || 100
-      const deltaTime = deltaPercentage * maxDuration
-      
-      const rawOffset = Math.max(0, dragStartPosition + deltaTime)
-      const newOffset = snapEnabled && !e.shiftKey ? snapToGrid(rawOffset) : rawOffset
-      const trackHeight = 88 * verticalZoom
-      const trackDelta = Math.round(deltaY / trackHeight)
-      const newTrack = Math.max(0, Math.min(trackStates.length - 1, draggedClipTrack + trackDelta))
-      
-      live.tempOffset = newOffset
-      live.tempTrack = newTrack
-      live.distance = distance
-      
-      if (dragRafRef.current == null) {
-        dragRafRef.current = requestAnimationFrame(() => {
-          dragRafRef.current = null
-          setTempDragOffset(dragLiveRef.current.tempOffset)
-          setTempDragTrack(dragLiveRef.current.tempTrack)
-        })
-      }
-    }
-
-    const handleMouseUp = () => {
-      if (dragRafRef.current != null) {
-        cancelAnimationFrame(dragRafRef.current)
-        dragRafRef.current = null
-      }
-      const live = dragLiveRef.current
-      if (live.threshold && live.distance < 5) {
-        setIsDraggingClip(false)
-        setDraggedClipTrack(null)
-        setDraggedClipId(null)
-        setTempDragTrack(null)
-        return
-      }
-      
-      const newTrackStates = [...trackStates]
-      const targetTrack = live.tempTrack ?? draggedClipTrack
-      
-      if (!live.threshold) {
-        saveUndo()
-      }
-      
-      selectedClipIds.forEach(id => {
-        for (let ti = 0; ti < trackStates.length; ti++) {
-          const clipIndex = trackStates[ti].clips.findIndex(c => c.id === id)
-          if (clipIndex !== -1) {
-            const clip = trackStates[ti].clips[clipIndex]
-            const timeDelta = live.tempOffset - dragStartPosition
-            const trackDelta = targetTrack - draggedClipTrack
-            
-            if (ti === draggedClipTrack && trackDelta !== 0) {
-              const movedClip = { ...clip, offsetSeconds: clip.offsetSeconds + timeDelta }
-              newTrackStates[ti].clips.splice(clipIndex, 1)
-              newTrackStates[targetTrack].clips.push(movedClip)
-            } else if (id === draggedClipId || ti !== draggedClipTrack) {
-              newTrackStates[ti].clips[clipIndex] = {
-                ...clip,
-                offsetSeconds: clip.offsetSeconds + timeDelta
-              }
-            }
-          }
-        }
-      })
-      
-      setTrackStates(newTrackStates)
-      setIsDraggingClip(false)
-      setDraggedClipTrack(null)
-      setDraggedClipId(null)
-      setTempDragTrack(null)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'move'
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-      if (dragRafRef.current != null) {
-        cancelAnimationFrame(dragRafRef.current)
-        dragRafRef.current = null
-      }
-    }
-  }, [isDraggingClip, draggedClipTrack, draggedClipId, dragStartX, dragStartY, dragStartPosition, selectedClipIds, snapEnabled, verticalZoom, trackStates])
-
-  useEffect(() => {
-    if (!resizingClip) return
-
-    const applyResize = (clientX: number) => {
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      
-      const firstLane = lanes[0] as HTMLElement
-      const rect = firstLane.getBoundingClientRect()
-      const deltaX = clientX - resizeStartX
-      const deltaPercentage = deltaX / rect.width
-      const maxDuration = timelineMaxRef.current || 100
-      const deltaTime = deltaPercentage * maxDuration
-      
-      const newTrackStates = trackStates.map((track, i) => {
-        if (i !== resizingClip.trackIndex) return track
-        return {
-          ...track,
-          clips: track.clips.map(c => {
-            if (c.id !== resizingClip.clipId) return c
-            if (resizingClip.edge === 'left') {
-              const newSourceStart = Math.max(0, Math.min(c.buffer.duration - 0.1, resizeStartValue + deltaTime))
-              const sourceDelta = newSourceStart - c.sourceStart
-              return {
-                ...c,
-                sourceStart: newSourceStart,
-                duration: Math.max(0.1, c.duration - sourceDelta),
-                offsetSeconds: Math.max(0, c.offsetSeconds + sourceDelta)
-              }
-            }
-            return {
-              ...c,
-              duration: Math.max(0.1, Math.min(c.buffer.duration - c.sourceStart, resizeStartValue + deltaTime))
-            }
-          })
-        }
-      })
-      setTrackStates(newTrackStates)
-    }
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const x = e.clientX
-      if (resizeRafRef.current == null) {
-        resizeRafRef.current = requestAnimationFrame(() => {
-          resizeRafRef.current = null
-          applyResize(x)
-        })
-      }
-    }
-
-    const handleMouseUp = () => {
-      if (resizeRafRef.current != null) {
-        cancelAnimationFrame(resizeRafRef.current)
-        resizeRafRef.current = null
-      }
-      setResizingClip(null)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'ew-resize'
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-      if (resizeRafRef.current != null) {
-        cancelAnimationFrame(resizeRafRef.current)
-        resizeRafRef.current = null
-      }
-    }
-  }, [resizingClip, resizeStartX, resizeStartValue])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return
       
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
       const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey
       
       if (e.key === 'Escape') {
-        if (contextMenu) {
-          e.preventDefault()
+        e.preventDefault()
+        if (trackDeleteConfirm) {
+          setTrackDeleteConfirm(null)
+        } else if (contextMenu) {
           closeContextMenu()
+        } else if (selectedClipIds.size > 0) {
+          setSelectedClipIds(new Set())
         }
         return
       }
@@ -2348,20 +2712,14 @@ function App() {
         }
       } else if (e.key === 'x' && cmdOrCtrl && selectedClipIds.size > 0) {
         e.preventDefault()
-        const clipToCut = trackStates.flatMap(t => t.clips).find(c => selectedClipIds.has(c.id))
-        if (clipToCut) {
-          copyClipToClipboard(clipToCut)
-          handleDeleteSelected()
-          showClipToast('Clip cortado')
-        }
+        const n = selectedClipIds.size
+        copySelectedClips()
+        handleDeleteSelected(n > 1 ? `${n} clips cortados` : 'Clip cortado')
       } else if (e.key === 'c' && cmdOrCtrl && selectedClipIds.size > 0) {
         e.preventDefault()
-        const clipToCopy = trackStates.flatMap(t => t.clips).find(c => selectedClipIds.has(c.id))
-        if (clipToCopy) {
-          copyClipToClipboard(clipToCopy)
-          showClipToast('Clip copiado')
-        }
-      } else if (e.key === 'v' && cmdOrCtrl && clipboard) {
+        const n = copySelectedClips()
+        showClipToast(n > 1 ? `${n} clips copiados` : 'Clip copiado')
+      } else if (e.key === 'v' && cmdOrCtrl && clipboard && clipboard.length > 0) {
         e.preventDefault()
         const targetTrack = trackStates.findIndex(t => t.clips.some(c => selectedClipIds.has(c.id)))
         if (targetTrack !== -1) {
@@ -2387,7 +2745,44 @@ function App() {
     
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu])
+  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm])
+
+  useEffect(() => {
+    const mediaSession = typeof navigator !== 'undefined' ? navigator.mediaSession : null
+    clearMediaSessionHandlers(mediaSession)
+    const onSpace = (e: KeyboardEvent) => {
+      if (!isSpaceKey(e)) return
+      const decision = spacePlaybackDecision(e, {
+        modalHasTextField: modalHasTextField(document),
+        pageHasFocus: pageHasPlaybackFocus(document)
+      })
+      if (decision === 'ignore') return
+      e.preventDefault()
+      if (typeof e.stopPropagation === 'function') e.stopPropagation()
+      if (e.type !== 'keydown' || decision !== 'toggle') return
+      const action = spaceToggleAction(
+        isRecordingRef.current,
+        Tone.getTransport().state === 'started'
+      )
+      if (action === 'stop-record') void stopRecordingRef.current({ then: 'stop' })
+      else if (action === 'pause') handlePauseRef.current()
+      else void handlePlayRef.current()
+    }
+    const blurButtons = (e: MouseEvent) => {
+      const target = e.target
+      if (!(target instanceof Element)) return
+      const button = target.closest('button')
+      if (button instanceof HTMLButtonElement) button.blur()
+    }
+    document.addEventListener('keydown', onSpace, true)
+    document.addEventListener('keyup', onSpace, true)
+    document.addEventListener('mouseup', blurButtons, true)
+    return () => {
+      document.removeEventListener('keydown', onSpace, true)
+      document.removeEventListener('keyup', onSpace, true)
+      document.removeEventListener('mouseup', blurButtons, true)
+    }
+  }, [])
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
@@ -2407,27 +2802,109 @@ function App() {
     }
   }
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file || selectedTrack === null) return
+  const highlightDropTrack = (index: number | null) => {
+    if (highlightedDropTrackRef.current === index) return
+    document.querySelectorAll('.track-content.drop-target').forEach((el) => {
+      el.classList.remove('drop-target')
+    })
+    if (index != null) {
+      document.querySelector(`.track-content[data-track-index="${index}"]`)?.classList.add('drop-target')
+    }
+    highlightedDropTrackRef.current = index
+  }
 
-    // Check if stem separation is supported
-    const { supported, reason } = isStemSeparationSupported()
-    
-    if (!supported) {
-      console.warn('Stem separation not supported:', reason)
-      alert(`Separación de stems no disponible: ${reason}\n\nCargando como pista única.`)
-      await loadSingleTrack(file, selectedTrack)
-      setSelectedTrack(null)
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
+  const clearFileDrag = () => {
+    fileDragDepthRef.current = 0
+    setFileDragActive(false)
+    highlightDropTrack(null)
+  }
+
+  const beginImportUndo = () => {
+    if (importUndoSavedRef.current) return
+    saveUndo()
+    importUndoSavedRef.current = true
+  }
+
+  const finishImportBatchIfIdle = () => {
+    if (importQueueRef.current.length === 0 && !pendingFileRef.current) {
+      importUndoSavedRef.current = false
+    }
+  }
+
+  const appendTracksForImport = (count: number) => {
+    if (count <= 0) return
+    beginImportUndo()
+    const next = [...trackStatesRef.current]
+    for (let i = 0; i < count; i++) {
+      next.push({
+        ...createEmptyTrack(nextPistaName(next.map(t => t.name), next.length)),
+        clips: [] as Clip[]
+      })
+    }
+    ensureTrackGains(next.length)
+    trackStatesRef.current = next
+    setTrackStates(next)
+  }
+
+  const processNextImport = async () => {
+    if (pendingFileRef.current) return
+    const next = importQueueRef.current.shift()
+    if (!next) {
+      finishImportBatchIfIdle()
       return
     }
-
-    // Store the file and show dialog
-    pendingFileRef.current = file
+    beginImportUndo()
+    let trackIndex = next.trackIndex
+    if (next.createNew) {
+      appendTracksForImport(1)
+      trackIndex = trackStatesRef.current.length - 1
+    }
+    setSelectedTrack(trackIndex)
+    pendingOffsetRef.current = next.offsetSeconds
+    const { supported, reason } = isStemSeparationSupported()
+    if (!supported) {
+      console.warn('Stem separation not supported:', reason)
+      await loadSingleTrack(next.file, trackIndex, next.offsetSeconds)
+      setSelectedTrack(null)
+      void processNextImport()
+      return
+    }
+    pendingFileRef.current = next.file
     setShowStemDialog(true)
+  }
+
+  const enqueueAudioImports = (
+    files: File[],
+    hoverTrackIndex: number | null,
+    offsetSeconds: number
+  ) => {
+    if (files.length === 0) return
+    const placements = resolveDropPlacement(files.length, hoverTrackIndex, trackStatesRef.current.length)
+    importQueueRef.current.push(...files.map((file, i) => ({
+      file,
+      trackIndex: placements[i].trackIndex,
+      createNew: placements[i].createNew,
+      offsetSeconds
+    })))
+    void processNextImport()
+  }
+
+  const toastIgnoredFiles = (count: number) => {
+    const message = ignoredAudioToast(count)
+    if (!message) return
+    setErrorMessage(message)
+    setTimeout(() => setErrorMessage(null), 4000)
+  }
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const list = e.target.files
+    if (!list || list.length === 0) return
+    const { audio, ignored } = partitionDroppedFiles(Array.from(list))
+    toastIgnoredFiles(ignored.length)
+    if (audio.length > 0) {
+      enqueueAudioImports(audio, selectedTrack, getCountInSeconds())
+    }
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const handleStemDialogConfirm = async () => {
@@ -2439,20 +2916,17 @@ function App() {
 
     const file = pendingFileRef.current
     const track = selectedTrack
+    const offset = pendingOffsetRef.current
 
     try {
-      await processStemSeparation(file, track)
+      await processStemSeparation(file, track, offset)
     } catch (error) {
       console.error('Stem separation failed:', error)
       const errorMessage = error instanceof Error ? error.message : 'Error desconocido'
-      
-      // Show error message via toast/error system instead of alert
       setErrorMessage(`⚠️ Separación de stems no disponible: ${errorMessage}`)
       setTimeout(() => setErrorMessage(null), 5000)
-      
-      // Fall back to single track import
       try {
-        await loadSingleTrack(file, track)
+        await loadSingleTrack(file, track, offset)
         setToastMessage('Audio cargado como pista única')
         setShowToast(true)
         setTimeout(() => setShowToast(false), 3000)
@@ -2466,10 +2940,8 @@ function App() {
       stemAbortControllerRef.current = null
       pendingFileRef.current = null
       setSelectedTrack(null)
-      
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
+      if (fileInputRef.current) fileInputRef.current.value = ''
+      void processNextImport()
     }
   }
 
@@ -2480,158 +2952,80 @@ function App() {
     setShowStemDialog(false)
     setIsProcessingStems(false)
     setStemProgress(0)
-    
-    // Fall back to single track
     if (pendingFileRef.current && selectedTrack !== null) {
-      loadSingleTrack(pendingFileRef.current, selectedTrack).catch(console.error)
+      loadSingleTrack(pendingFileRef.current, selectedTrack, pendingOffsetRef.current).catch(console.error)
     }
-    
     pendingFileRef.current = null
     setSelectedTrack(null)
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    void processNextImport()
   }
 
   const handleStemDialogCancel = async () => {
     setShowStemDialog(false)
     if (!pendingFileRef.current || selectedTrack === null) return
-
-    await loadSingleTrack(pendingFileRef.current, selectedTrack)
-    
+    await loadSingleTrack(pendingFileRef.current, selectedTrack, pendingOffsetRef.current)
     pendingFileRef.current = null
     setSelectedTrack(null)
-    
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    void processNextImport()
   }
 
-  const handleYoutubeImport = async () => {
-    if (!youtubeUrl.trim()) {
-      setYoutubeError('Ingresa una URL de YouTube')
-      return
-    }
-
-    if (selectedTrack === null) {
-      setYoutubeError('Selecciona una pista primero')
-      return
-    }
-
-    setIsLoadingYoutube(true)
-    setYoutubeError(null)
-
-    try {
-      // Initial request to check if chunking is needed
-      const initialResponse = await fetch('/api/youtube-audio', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${getAuthToken()}`
-        },
-        body: JSON.stringify({ url: youtubeUrl })
-      })
-
-      if (!initialResponse.ok) {
-        const error = await initialResponse.json()
-        throw new Error(error.error || 'Error al obtener audio de YouTube')
-      }
-
-      const contentType = initialResponse.headers.get('Content-Type') || 'audio/mp4'
-      
-      // Check if response is JSON (chunking metadata) or binary (direct stream)
-      let audioBlob: Blob
-      let videoTitle = 'YouTube Audio'
-      
-      if (contentType.includes('application/json')) {
-        // Chunked response - fetch all chunks
-        const metadata = await initialResponse.json()
-        
-        if (!metadata.needsChunking) {
-          throw new Error('Respuesta inesperada del servidor')
-        }
-        
-        videoTitle = metadata.videoTitle
-        const chunks: Uint8Array[] = []
-        
-        console.log(`[YouTube] Fetching ${metadata.totalChunks} chunks (${(metadata.estimatedSize / 1024 / 1024).toFixed(1)}MB)`)
-        
-        // Fetch all chunks sequentially
-        for (let i = 0; i < metadata.totalChunks; i++) {
-          console.log(`[YouTube] Fetching chunk ${i + 1}/${metadata.totalChunks}`)
-          
-          const chunkResponse = await fetch('/api/youtube-audio', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${getAuthToken()}`
-            },
-            body: JSON.stringify({ url: youtubeUrl, chunkIndex: i })
-          })
-          
-          if (!chunkResponse.ok) {
-            throw new Error(`Error en chunk ${i + 1}: ${chunkResponse.statusText}`)
-          }
-          
-          const chunkData = await chunkResponse.arrayBuffer()
-          chunks.push(new Uint8Array(chunkData))
-          
-          // Optional: Update progress if we want to show it
-          // const progress = Math.round(((i + 1) / metadata.totalChunks) * 100)
-        }
-        
-        // Concatenate all chunks
-        const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0)
-        const combined = new Uint8Array(totalLength)
-        let offset = 0
-        for (const chunk of chunks) {
-          combined.set(chunk, offset)
-          offset += chunk.length
-        }
-        
-        audioBlob = new Blob([combined], { type: metadata.mimeType })
-        
-      } else {
-        // Direct streaming response (small file)
-        videoTitle = decodeURIComponent(initialResponse.headers.get('X-Video-Title') || 'YouTube Audio')
-        audioBlob = await initialResponse.blob()
-      }
-      
-      const file = new File([audioBlob], `${videoTitle}.${contentType.includes('webm') ? 'webm' : 'm4a'}`, { type: contentType })
-
-      // Close dialog
-      setShowYoutubeDialog(false)
-      setYoutubeUrl('')
-
-      // Check if stem separation is supported
-      const { supported, reason } = await isStemSeparationSupported()
-      
-      if (!supported) {
-        console.warn('Stem separation not supported:', reason)
-        alert(`Separación de stems no disponible: ${reason}\n\nCargando como pista única.`)
-        await loadSingleTrack(file, selectedTrack)
-        setSelectedTrack(null)
-        return
-      }
-
-      // Store the file and show dialog
-      pendingFileRef.current = file
-      setShowStemDialog(true)
-
-    } catch (error: any) {
-      console.error('YouTube import error:', error)
-      setYoutubeError(error.message || 'Error al importar desde YouTube')
-    } finally {
-      setIsLoadingYoutube(false)
-    }
+  const handleAppDragEnter = (e: React.DragEvent) => {
+    if (!dataTransferHasFiles(e.dataTransfer.types)) return
+    e.preventDefault()
+    fileDragDepthRef.current++
+    setFileDragActive(true)
   }
 
-  const loadSingleTrack = async (file: File, trackIndex: number) => {
+  const handleAppDragOver = (e: React.DragEvent) => {
+    if (!dataTransferHasFiles(e.dataTransfer.types)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    highlightDropTrack(trackIndexFromPoint(e.clientX, e.clientY))
+  }
+
+  const handleAppDragLeave = (e: React.DragEvent) => {
+    if (!dataTransferHasFiles(e.dataTransfer.types)) return
+    fileDragDepthRef.current--
+    if (fileDragDepthRef.current <= 0) clearFileDrag()
+  }
+
+  const handleAppDrop = (e: React.DragEvent) => {
+    if (!dataTransferHasFiles(e.dataTransfer.types)) return
+    e.preventDefault()
+    e.stopPropagation()
+    const hover = trackIndexFromPoint(e.clientX, e.clientY)
+    clearFileDrag()
+    const { audio, ignored } = partitionDroppedFiles(Array.from(e.dataTransfer.files || []))
+    toastIgnoredFiles(ignored.length)
+    if (audio.length === 0) return
+    let offset = getCountInSeconds()
+    if (hover != null) {
+      const lane = document.querySelector(`.track-content[data-track-index="${hover}"]`) as HTMLElement | null
+      if (lane) {
+        const rect = lane.getBoundingClientRect()
+        offset = dropTimeOnLane(
+          e.clientX,
+          rect.left,
+          rect.width,
+          timelineMaxRef.current || 100,
+          snapEnabled,
+          snapToGrid
+        )
+      }
+    }
+    enqueueAudioImports(audio, hover, offset)
+  }
+
+  const loadSingleTrack = async (file: File, trackIndex: number, offsetSeconds?: number) => {
     await ensureAudio()
+    beginImportUndo()
     console.log('[DEBUG] loadSingleTrack: trackIndex=', trackIndex, 'gain exists=', !!trackGainsRef.current[trackIndex])
 
     const url = URL.createObjectURL(file)
     const trackGain = trackGainsRef.current[trackIndex]
+    if (!trackGain) return
     
     const player = new Tone.Player()
     player.loop = false
@@ -2662,22 +3056,25 @@ function App() {
       isPlaying: false,
       buffer,
       startPosition: 0,
-      offsetSeconds: getCountInSeconds(),
+      offsetSeconds: offsetSeconds ?? getCountInSeconds(),
       id: `clip-${Date.now()}-${Math.random()}`,
       sourceStart: 0,
       duration: buffer.duration
     }
 
-    const newTrackStates = [...trackStates]
+    const newTrackStates = [...trackStatesRef.current]
+    if (!newTrackStates[trackIndex]) return
     newTrackStates[trackIndex] = {
       ...newTrackStates[trackIndex],
       clips: [...newTrackStates[trackIndex].clips, newClip]
     }
+    trackStatesRef.current = newTrackStates
     setTrackStates(newTrackStates)
   }
 
-  const processStemSeparation = async (file: File, startTrackIndex: number) => {
+  const processStemSeparation = async (file: File, startTrackIndex: number, offsetSeconds?: number) => {
     await ensureAudio()
+    beginImportUndo()
 
     const abortController = new AbortController()
     stemAbortControllerRef.current = abortController
@@ -2721,12 +3118,19 @@ function App() {
       console.log(`  ${stemNames[i]}: peak=${peak.toFixed(4)}, rms=${rms.toFixed(4)}, rms_dB=${(20 * Math.log10(rms)).toFixed(1)}`)
     })
     
-    const newTrackStates = [...trackStates]
-    const stemOffset = getCountInSeconds()
+    const newTrackStates = [...trackStatesRef.current]
+    const needed = startTrackIndex + stemBuffers.length
+    while (newTrackStates.length < needed) {
+      newTrackStates.push({
+        ...createEmptyTrack(nextPistaName(newTrackStates.map(t => t.name), newTrackStates.length)),
+        clips: []
+      })
+    }
+    ensureTrackGains(newTrackStates.length)
+    const stemOffset = offsetSeconds ?? getCountInSeconds()
 
     for (let i = 0; i < stemBuffers.length; i++) {
       const targetTrackIndex = startTrackIndex + i
-      if (targetTrackIndex >= trackStates.length) break
 
       const player = new Tone.Player()
       player.loop = false
@@ -2755,10 +3159,11 @@ function App() {
       }
     }
 
+    trackStatesRef.current = newTrackStates
     setTrackStates(newTrackStates)
   }
 
-  const handleMuteToggle = (trackIndex: number) => {
+  const handleMuteToggle = useCallback((trackIndex: number) => {
     setTrackStates(prev => {
       const newStates = [...prev]
       newStates[trackIndex] = {
@@ -2767,9 +3172,9 @@ function App() {
       }
       return newStates
     })
-  }
+  }, [])
 
-  const handleSoloToggle = (trackIndex: number) => {
+  const handleSoloToggle = useCallback((trackIndex: number) => {
     setTrackStates(prev => {
       const newStates = [...prev]
       newStates[trackIndex] = {
@@ -2778,28 +3183,159 @@ function App() {
       }
       return newStates
     })
+  }, [])
+
+  const handleVolumeLive = useCallback((trackIndex: number, volume: number) => {
+    const tracks = trackStatesRef.current
+    const track = tracks[trackIndex]
+    if (!track) return
+    const anySolo = tracks.some(t => t.solo)
+    rampTrackGain(
+      trackGainsRef.current[trackIndex],
+      effectiveTrackGain(volume, track.mute, track.solo, anySolo)
+    )
+  }, [])
+
+  const handleVolumeCommit = useCallback((trackIndex: number, volume: number) => {
+    const tracks = trackStatesRef.current
+    const track = tracks[trackIndex]
+    if (track) {
+      const anySolo = tracks.some(t => t.solo)
+      rampTrackGain(
+        trackGainsRef.current[trackIndex],
+        effectiveTrackGain(volume, track.mute, track.solo, anySolo)
+      )
+    }
+    setTrackStates(prev => {
+      if (!prev[trackIndex] || Math.abs(prev[trackIndex].volume - volume) < 1e-4) return prev
+      return prev.map((t, i) => i === trackIndex ? { ...t, volume } : t)
+    })
+  }, [])
+
+  const requestDeleteTrack = (trackIndex: number) => {
+    closeContextMenu()
+    if (trackIndex < 0 || trackIndex >= trackStates.length) return
+    if (trackStates.length <= 1) {
+      showClipToast('Debe quedar al menos una pista')
+      return
+    }
+    const track = trackStates[trackIndex]
+    const name = resolveTrackName(track.name, trackIndex)
+    if (track.clips.length > 0) {
+      setTrackDeleteConfirm({ trackIndex, name, clipCount: track.clips.length })
+      return
+    }
+    deleteTrackAt(trackIndex)
   }
 
-  const handleVolumeChange = (trackIndex: number, volume: number) => {
-    setTrackStates(prev => {
-      const newStates = [...prev]
-      newStates[trackIndex] = {
-        ...newStates[trackIndex],
-        volume
+  const deleteTrackAt = (trackIndex: number) => {
+    const planned = deleteTrackFromList(trackStates, trackIndex, selectedClipIds)
+    if (!planned) {
+      showClipToast('Debe quedar al menos una pista')
+      setTrackDeleteConfirm(null)
+      return
+    }
+    saveUndo()
+    const recordingThis = recordLiveRef.current?.trackIndex === trackIndex
+    if (recordingThis) {
+      void stopRecordingRef.current({ then: 'keep', commit: false })
+    } else if (recordLiveRef.current && recordLiveRef.current.trackIndex > trackIndex) {
+      recordLiveRef.current.trackIndex -= 1
+    }
+    const removed = trackStates[trackIndex]
+    removed.clips.forEach(clip => {
+      if (clip.isPlaying || clip.player.state === 'started') {
+        try { clip.player.stop() } catch { /* already stopped */ }
       }
-      return newStates
+      clip.player.dispose()
     })
+    reconnectAllClips(planned.tracks)
+    setTrackStates(planned.tracks)
+    setSelectedClipIds(planned.selectedIds)
+    if (selectedTrack === trackIndex) setSelectedTrack(null)
+    else if (selectedTrack !== null && selectedTrack > trackIndex) setSelectedTrack(selectedTrack - 1)
+    setRecordArmedIndex((prev) => armedIndexAfterDelete(prev, trackIndex))
+    if (recordingTrackIndex != null) {
+      if (recordingThis) setRecordingTrackIndex(null)
+      else if (recordingTrackIndex > trackIndex) setRecordingTrackIndex(recordingTrackIndex - 1)
+    }
+    setTrackDeleteConfirm(null)
+    showClipToast('Pista eliminada')
+  }
+
+  const addEmptyTrack = () => {
+    closeContextMenu()
+    saveUndo()
+    const next = appendEmptyTrack(trackStatesRef.current, (name) => ({
+      ...createEmptyTrack(name),
+      clips: [] as Clip[]
+    }))
+    ensureTrackGains(next.length)
+    setTrackStates(next)
+    showClipToast('Pista agregada')
+    return next.length - 1
+  }
+
+  const syncVerticalScroll = (source: 'sidebar' | 'lanes') => {
+    if (syncingVerticalScroll.current) return
+    const from = source === 'sidebar' ? sidebarScrollRef.current : lanesScrollRef.current
+    const to = source === 'sidebar' ? lanesScrollRef.current : sidebarScrollRef.current
+    if (!from || !to || to.scrollTop === from.scrollTop) return
+    syncingVerticalScroll.current = true
+    to.scrollTop = from.scrollTop
+    requestAnimationFrame(() => {
+      syncingVerticalScroll.current = false
+    })
+  }
+
+  const openTrackHeaderMenu = (e: React.MouseEvent, trackIndex: number) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      trackIndex,
+      clipId: null,
+      time: 0,
+      kind: 'header'
+    })
+  }
+
+  const startRenameTrack = (trackIndex: number) => {
+    closeContextMenu()
+    renamingTrackRef.current = trackIndex
+    setRenamingTrack(trackIndex)
+    setRenameDraft(resolveTrackName(trackStates[trackIndex]?.name, trackIndex))
+  }
+
+  const cancelRenameTrack = () => {
+    renamingTrackRef.current = null
+    setRenamingTrack(null)
+    setRenameDraft('')
+  }
+
+  const commitRenameTrack = (trackIndex: number, raw: string) => {
+    if (renamingTrackRef.current !== trackIndex) return
+    renamingTrackRef.current = null
+    const previous = resolveTrackName(trackStates[trackIndex]?.name, trackIndex)
+    const next = commitEditedTrackName(raw, previous)
+    setRenamingTrack(null)
+    setRenameDraft('')
+    if (next === (trackStates[trackIndex]?.name ?? previous)) return
+    saveUndo()
+    setTrackStates(prev => prev.map((track, i) => (
+      i === trackIndex ? { ...track, name: next } : track
+    )))
   }
 
   const timeFromClientX = (clientX: number, el: HTMLElement) => {
     const rect = el.getBoundingClientRect()
-    const percentage = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0
-    return percentage * (getMaxDuration() || 0)
+    return clickTimeFromX(clientX, rect.left, rect.width, timelineMaxRef.current || 100)
   }
 
-  const seekToPosition = (seconds: number) => {
-    const maxDuration = getMaxDuration()
-    const clampedSeconds = Math.max(0, Math.min(seconds, maxDuration))
+  const seekToPosition = (seconds: number, shiftKey = false) => {
+    const layoutMax = timelineMaxRef.current || 100
+    const clampedSeconds = applySeekSnap(seconds, layoutMax, snapEnabled, shiftKey, snapToGrid)
     commitPlayhead(clampedSeconds)
     Tone.getTransport().seconds = clampedSeconds
     
@@ -2827,32 +3363,125 @@ function App() {
       })
     })
   }
+  seekToPositionRef.current = seekToPosition
 
-  const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>, trackIndex: number) => {
-    const track = trackStates[trackIndex]
-    if (track.clips.length === 0) {
-      handleLaneClick(trackIndex)
-      return
+  const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
+    if (isDraggingLoop || isDraggingLoopEdge || isDraggingClipRef.current) return
+    if (marqueeLiveRef.current.didDrag) return
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
+    if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      setSelectedClipIds(new Set())
     }
+  }
 
-    if (isDraggingLoop || isDraggingLoopEdge || isDraggingClip) {
-      return
+  const handleLaneDoubleClick = (trackIndex: number) => {
+    if (trackStates[trackIndex].clips.length === 0) {
+      void handleLaneClick(trackIndex)
     }
-
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
   }
 
   const handleRulerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
   }
 
-  const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>, trackIndex: number) => {
+  const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
     const target = e.target as HTMLElement
     if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
-    if (isLoopEnabled && trackStates[trackIndex]?.clips.length > 0) return
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
+    if (isLoopEnabled && target.closest('.clip-region')) return
+
+    const scroller = lanesColumnRef.current?.querySelector('.lanes-scroll-content') as HTMLElement | null
+    const startX = e.clientX
+    const startY = e.clientY
+    marqueeLiveRef.current = {
+      active: true,
+      didDrag: false,
+      x0: startX,
+      y0: startY,
+      x1: startX,
+      y1: startY,
+      additive: e.shiftKey,
+      toggle: e.ctrlKey || e.metaKey
+    }
+
+    const updateBox = () => {
+      const live = marqueeLiveRef.current
+      if (!scroller || !live.active || isClickGesture(Math.hypot(live.x1 - live.x0, live.y1 - live.y0))) {
+        setMarqueeBox(null)
+        return
+      }
+      const sr = scroller.getBoundingClientRect()
+      const left = Math.min(live.x0, live.x1) - sr.left
+      const top = Math.min(live.y0, live.y1) - sr.top
+      setMarqueeBox({
+        left,
+        top,
+        width: Math.abs(live.x1 - live.x0),
+        height: Math.abs(live.y1 - live.y0)
+      })
+    }
+
+    const onMove = (ev: MouseEvent) => {
+      marqueeLiveRef.current.x1 = ev.clientX
+      marqueeLiveRef.current.y1 = ev.clientY
+      if (dragRafRef.current == null) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = null
+          updateBox()
+        })
+      }
+    }
+
+    const onUp = (ev: MouseEvent) => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      if (dragRafRef.current != null) {
+        cancelAnimationFrame(dragRafRef.current)
+        dragRafRef.current = null
+      }
+      const live = marqueeLiveRef.current
+      live.x1 = ev.clientX
+      live.y1 = ev.clientY
+      live.active = false
+      setMarqueeBox(null)
+      const distance = Math.hypot(live.x1 - live.x0, live.y1 - live.y0)
+      const lane = (ev.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
+        ?? (e.currentTarget as HTMLElement)
+
+      if (isClickGesture(distance)) {
+        live.didDrag = false
+        if (lane) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(ev.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, ev.shiftKey)
+        }
+        if (!live.additive && !live.toggle) {
+          setSelectedClipIds(new Set())
+        }
+        return
+      }
+
+      live.didDrag = true
+      const band = marqueeClientRect(live.x0, live.y0, live.x1, live.y1)
+      const hit: string[] = []
+      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
+        const el = node as HTMLElement
+        const id = el.dataset.clipId
+        if (!id) return
+        const r = el.getBoundingClientRect()
+        if (clientRectsIntersect(r, band)) hit.push(id)
+      })
+      const mode = live.toggle ? 'toggle' : live.additive ? 'add' : 'replace'
+      setSelectedClipIds(prev => mergeSelection(prev, hit, mode))
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.userSelect = 'none'
   }
 
   const clearLoop = () => {
@@ -2884,6 +3513,8 @@ function App() {
 
   const handleLoopMouseDown = (e: React.MouseEvent<HTMLDivElement>, edge?: 'start' | 'end') => {
     if (!isLoopEnabled) return
+
+    loopGestureRef.current = { x: e.clientX, y: e.clientY, distance: 0 }
     
     if (edge) {
       e.stopPropagation()
@@ -2894,7 +3525,7 @@ function App() {
       const rect = e.currentTarget.getBoundingClientRect()
       const clickX = e.clientX - rect.left
       const percentage = clickX / rect.width
-      const clickTime = percentage * getMaxDuration()
+      const clickTime = percentage * (timelineMaxRef.current || 100)
       
       setIsDraggingLoop(true)
       setLoopDragStart(clickTime)
@@ -2907,10 +3538,14 @@ function App() {
     if (!isLoopEnabled) return
     if (!isDraggingLoop && !isDraggingLoopEdge) return
     
+    const dx = e.clientX - loopGestureRef.current.x
+    const dy = e.clientY - loopGestureRef.current.y
+    loopGestureRef.current.distance = Math.hypot(dx, dy)
+
     const rect = e.currentTarget.getBoundingClientRect()
     const clickX = e.clientX - rect.left
     const percentage = Math.max(0, Math.min(1, clickX / rect.width))
-    const currentTime = percentage * getMaxDuration()
+    const currentTime = percentage * (timelineMaxRef.current || 100)
     
     if (isDraggingLoop && loopDragStart !== null) {
       if (currentTime < loopDragStart) {
@@ -2933,7 +3568,33 @@ function App() {
     }
   }
 
-  const handleLoopMouseUp = () => {
+  const handleLoopMouseUp = (e?: MouseEvent | React.MouseEvent) => {
+    if (e) {
+      const dx = e.clientX - loopGestureRef.current.x
+      const dy = e.clientY - loopGestureRef.current.y
+      loopGestureRef.current.distance = Math.hypot(dx, dy)
+    }
+    if ((isDraggingLoop || isDraggingLoopEdge) && isClickGesture(loopGestureRef.current.distance)) {
+      if (e) {
+        const lane = (e.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
+          ?? (document.querySelector('.track-content') as HTMLElement | null)
+        if (lane) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, e.shiftKey)
+        }
+        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+          setSelectedClipIds(new Set())
+        }
+      }
+      setTempLoopStart(null)
+      setTempLoopEnd(null)
+      setIsDraggingLoop(false)
+      setIsDraggingLoopEdge(null)
+      setLoopDragStart(null)
+      loopGestureRef.current.distance = 0
+      return
+    }
     if (isDraggingLoop || isDraggingLoopEdge) {
       // Commit temporary values to actual state
       if (tempLoopStart !== null) setLoopStart(tempLoopStart)
@@ -2944,6 +3605,7 @@ function App() {
     setIsDraggingLoop(false)
     setIsDraggingLoopEdge(null)
     setLoopDragStart(null)
+    loopGestureRef.current.distance = 0
   }
 
   useEffect(() => {
@@ -3035,11 +3697,19 @@ function App() {
   }, [bpm, trackStates])
 
   return (
-    <div className="app">
+    <div
+      className={`app${fileDragActive ? ' file-drag' : ''}`}
+      data-app-commits={appCommitCountRef.current}
+      onDragEnter={handleAppDragEnter}
+      onDragOver={handleAppDragOver}
+      onDragLeave={handleAppDragLeave}
+      onDrop={handleAppDrop}
+    >
       <input
         ref={fileInputRef}
         type="file"
-        accept="audio/wav,audio/mpeg,audio/mp3,audio/ogg,audio/webm,audio/*"
+        accept="audio/wav,audio/mpeg,audio/mp3,audio/ogg,audio/webm,audio/flac,audio/aac,audio/x-m4a,.mp3,.wav,.ogg,.m4a,.flac,.aac"
+        multiple
         style={{ display: 'none' }}
         onChange={handleFileSelect}
       />
@@ -3061,181 +3731,212 @@ function App() {
       
       <div className="transport-bar">
         <div className="transport-controls">
-          <button className="header-btn" onClick={handleNewProject} title="Nuevo proyecto">🆕</button>
+          <button className="header-btn icon-only" onClick={handleNewProject} title="Nuevo proyecto" aria-label="Nuevo proyecto">
+            <IconFilePlus />
+          </button>
           {currentUser ? (
-            <button 
-              className="header-btn" 
+            <button
+              className="header-btn"
               onClick={handleLogout}
               title={`Sesión: ${currentUser.username}`}
             >
-              👤 {currentUser.username}
+              <IconLogOut />
+              <span className="btn-label">{currentUser.username}</span>
             </button>
           ) : (
-            <button 
-              className="header-btn" 
+            <button
+              className="header-btn"
               onClick={() => { setShowAuth(true); setAuthMode('login') }}
               title="Iniciar sesión"
             >
-              🔑 Iniciar sesión
+              <IconLogIn />
+              <span className="btn-label">Sesión</span>
             </button>
           )}
-          <button 
-            className="header-btn" 
+          <button
+            className="header-btn"
             onClick={() => handleSaveToLocal(false)}
             title="Guardar proyecto (Cmd/Ctrl+S, Shift+Cmd/Ctrl+S para guardar como...)"
           >
-            💾 Guardar
+            <IconSave />
+            <span className="btn-label">Guardar</span>
           </button>
           <button
             className="header-btn"
             onClick={() => localFileInputRef.current?.click()}
             title="Abrir proyecto"
           >
-            📂 Abrir
-          </button>
-          <button 
-            className="header-btn" 
-            onClick={handleShowCloudProjects}
-            title="Abrir proyectos anteriores guardados en la nube"
-            style={{ fontSize: '11px', padding: '8px 10px' }}
-          >
-            ☁️ Proyectos en la nube (anteriores)
-          </button>
-          <button 
-            className="header-btn" 
-            onClick={handleOpenExportDialog}
-            title="Exportar pistas seleccionadas"
-          >
-            🎵 Exportar
+            <IconFolderOpen />
+            <span className="btn-label">Abrir</span>
           </button>
           <button
             className="header-btn"
-            onClick={() => {
-              if (!hasAuth()) {
-                setErrorMessage('Inicia sesión para importar desde YouTube')
-                setTimeout(() => setErrorMessage(null), 3000)
-                return
-              }
-              if (trackStates.some(t => t.clips.length === 0)) {
-                setSelectedTrack(trackStates.findIndex(t => t.clips.length === 0))
-                setShowYoutubeDialog(true)
-              } else {
-                setErrorMessage('Todas las pistas están ocupadas')
-                setTimeout(() => setErrorMessage(null), 3000)
-              }
-            }}
-            title="Importar desde YouTube"
+            onClick={handleOpenExportDialog}
+            title="Exportar pistas seleccionadas"
           >
-            📺 YouTube
+            <IconDownload />
+            <span className="btn-label">Exportar</span>
           </button>
           <button
-            className={`header-btn ${snapEnabled ? 'active' : ''}`}
-            onClick={() => setSnapEnabled(!snapEnabled)}
-            title="Ajuste a cuadrícula (Shift para desactivar temporalmente)"
+            className={`header-btn toggle-btn ${snapEnabled ? 'active' : ''}`}
+            aria-pressed={snapEnabled}
+            onClick={() => {
+              setSnapEnabled(prev => {
+                const next = !prev
+                persistSnapEnabled(next)
+                return next
+              })
+            }}
+            title={`Snap ${snapEnabled ? 'ON' : 'OFF'}. Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras`}
           >
-            🧲 {snapEnabled ? 'Snap ON' : 'Snap OFF'}
+            <IconMagnet />
+            <span className="btn-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
           </button>
           <button
             className="header-btn"
             onClick={() => setShowHelp(true)}
             title="Atajos de teclado"
           >
-            ❓ Ayuda
+            <IconCircleHelp />
+            <span className="btn-label">Ayuda</span>
           </button>
         </div>
-        <div className="transport-playback">
+        <div className="transport-playback" role="group" aria-label="Transporte">
           <button
             className="transport-button icon-btn"
             onClick={handleJumpToStart}
             title="Ir al inicio"
+            aria-label="Ir al inicio"
           >
-            ⏮
+            <IconSkipBack size={15} />
           </button>
           <button
-            className={`transport-button icon-btn ${isPlaying ? 'active' : ''}`}
+            className={`transport-button icon-btn play-btn ${isPlaying ? 'active' : ''}`}
             onClick={handlePlay}
-            disabled={isPlaying}
+            disabled={isPlaying || isRecording}
             title="Reproducir"
+            aria-label="Reproducir"
           >
-            ▶
+            <IconPlay size={14} />
           </button>
           <button
             className="transport-button icon-btn"
             onClick={handlePause}
-            disabled={!isPlaying}
+            disabled={!isPlaying && !isRecording}
             title="Pausar"
+            aria-label="Pausar"
           >
-            ⏸
+            <IconPause size={14} />
           </button>
           <button
             className="transport-button icon-btn"
             onClick={handleStop}
-            disabled={!isPlaying && !isPaused}
+            disabled={!isPlaying && !isPaused && !isRecording}
             title="Detener"
+            aria-label="Detener"
           >
-            ⏹
+            <IconStop size={13} />
           </button>
           <button
-            className={`transport-button ${metronomeEnabled ? 'active' : ''}`}
+            className={`transport-button icon-btn record-btn ${isRecording ? 'active' : ''}`}
+            data-testid="record-button"
+            data-recording-track={recordingTrackIndex ?? ''}
+            onClick={() => { void handleRecord() }}
+            title={isRecording ? 'Detener grabación' : 'Grabar'}
+            aria-label="Grabar"
+            aria-pressed={isRecording}
+          >
+            <IconRecord size={14} />
+          </button>
+          {audioInputs.length > 1 && (
+            <select
+              className="mic-select"
+              data-testid="mic-select"
+              value={
+                audioInputs.some((device) => device.deviceId === micDeviceId)
+                  ? micDeviceId ?? ''
+                  : (audioInputs[0]?.deviceId ?? '')
+              }
+              onChange={(e) => handleMicDeviceChange(e.target.value)}
+              title="Entrada de audio"
+              aria-label="Entrada de audio"
+              disabled={isRecording}
+            >
+              {audioInputs.map((device, index) => (
+                <option key={device.deviceId || String(index)} value={device.deviceId}>
+                  {device.label || `Micrófono ${index + 1}`}
+                </option>
+              ))}
+            </select>
+          )}
+          <span className="record-elapsed" ref={recordElapsedRef} data-testid="record-elapsed" />
+          <button
+            className={`transport-button toggle-btn ${metronomeEnabled ? 'active' : ''}`}
             onClick={() => setMetronomeEnabled(!metronomeEnabled)}
             title="Metrónomo (cuenta 2 compases antes)"
+            aria-label="Metrónomo"
+            aria-pressed={metronomeEnabled}
           >
-            🎵
+            <IconMetronome size={15} />
           </button>
           <button
-            className={`transport-button ${isLoopEnabled ? 'active' : ''}`}
+            className={`transport-button toggle-btn ${isLoopEnabled ? 'active' : ''}`}
             onClick={handleLoopToggle}
-            title="Activar loop - arrastra en el timeline para marcar zona"
+            title="Activar loop — arrastra en el timeline para marcar zona"
+            aria-label="Loop"
+            aria-pressed={isLoopEnabled}
           >
-            🔁
+            <IconRepeat size={15} />
           </button>
         </div>
-        <div className="time-display">
-          <span className="time-label">Time</span>
-          <span className="time-value" ref={timeDisplayRef}>
-            {formatTime(playheadPosition)} / {formatTime(getMaxDuration())}
-          </span>
-        </div>
-        {isLoopEnabled && (loopStart !== null || loopEnd !== null) && (
-          <div className="loop-indicator">
-            <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
-            <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
+        <div className="transport-meta">
+          <div className="time-display">
+            <span className="time-label">Time</span>
+            <span className="time-value" ref={timeDisplayRef}>
+              {formatTime(playheadPosition)} / {formatTime(getMaxDuration())}
+            </span>
           </div>
-        )}
-        <div className="zoom-controls">
-          <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)">⬌</span>
-          <input
-            type="range"
-            className="zoom-slider"
-            min="0.5"
-            max="4"
-            step="0.1"
-            value={horizontalZoom}
-            onChange={(e) => setHorizontalZoom(parseFloat(e.target.value))}
-            title={`Zoom horizontal: ${(horizontalZoom * 100).toFixed(0)}%`}
-          />
-          <span className="zoom-label" title="Zoom vertical (Shift+Rueda)">⬍</span>
-          <input
-            type="range"
-            className="zoom-slider"
-            min="0.5"
-            max="3"
-            step="0.1"
-            value={verticalZoom}
-            onChange={(e) => setVerticalZoom(parseFloat(e.target.value))}
-            title={`Zoom vertical: ${(verticalZoom * 100).toFixed(0)}%`}
-          />
-        </div>
-        <div className="bpm-control">
-          <span className="bpm-label">BPM</span>
-          <input
-            type="number"
-            className="bpm-input"
-            value={bpm}
-            onChange={handleBpmChange}
-            min="20"
-            max="300"
-          />
+          {isLoopEnabled && (loopStart !== null || loopEnd !== null) && (
+            <div className="loop-indicator">
+              <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
+              <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
+            </div>
+          )}
+          <div className="zoom-controls">
+            <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)"><IconMoveHorizontal size={14} /></span>
+            <input
+              type="range"
+              className="zoom-slider"
+              min="0.5"
+              max="4"
+              step="0.1"
+              value={horizontalZoom}
+              onChange={(e) => setHorizontalZoom(parseFloat(e.target.value))}
+              title={`Zoom horizontal: ${(horizontalZoom * 100).toFixed(0)}%`}
+            />
+            <span className="zoom-label" title="Zoom vertical (Shift+Rueda)"><IconMoveVertical size={14} /></span>
+            <input
+              type="range"
+              className="zoom-slider"
+              min="0.5"
+              max="3"
+              step="0.1"
+              value={verticalZoom}
+              onChange={(e) => setVerticalZoom(parseFloat(e.target.value))}
+              title={`Zoom vertical: ${(verticalZoom * 100).toFixed(0)}%`}
+            />
+          </div>
+          <div className="bpm-control">
+            <span className="bpm-label">BPM</span>
+            <input
+              type="number"
+              className="bpm-input"
+              value={bpm}
+              onChange={handleBpmChange}
+              min="20"
+              max="300"
+            />
+          </div>
         </div>
         <div className="header-info">
           <div className="audio-diagnostics">
@@ -3244,13 +3945,21 @@ function App() {
             <span ref={meterDisplayRef} title="Output Level" className="level-inactive">
               -∞
             </span>
-            <button className="test-tone-btn" onClick={playTestTone} title="Test Tone (440Hz)">🔊</button>
+            <button className="test-tone-btn" onClick={playTestTone} title="Test Tone (440Hz)" aria-label="Tono de prueba">
+              <IconVolume2 size={13} />
+            </button>
           </div>
           <div className="version-badge">
             <span className="version-label">v{APP_VERSION}</span>
           </div>
         </div>
       </div>
+
+      {fileDragActive && (
+        <div className="drop-overlay" data-testid="drop-overlay">
+          <span>Soltá archivos de audio</span>
+        </div>
+      )}
 
       {showStemDialog && (
         <StemSplitDialog
@@ -3281,60 +3990,6 @@ function App() {
         </div>
       )}
       
-      {showYoutubeDialog && (
-        <div className="drive-projects-modal">
-          <div className="modal-content">
-            <h2>Importar desde YouTube</h2>
-            <p style={{ fontSize: '13px', color: '#999', marginBottom: '16px' }}>
-              Pega la URL de un video de YouTube (máximo 10 minutos)
-            </p>
-            <input
-              type="text"
-              placeholder="https://youtube.com/watch?v=..."
-              value={youtubeUrl}
-              onChange={(e) => setYoutubeUrl(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '8px',
-                marginBottom: '12px',
-                fontSize: '14px',
-                borderRadius: '4px',
-                border: '1px solid #444',
-                background: '#2a2a2a',
-                color: '#fff'
-              }}
-              disabled={isLoadingYoutube}
-            />
-            {youtubeError && (
-              <div style={{ color: '#ff6b6b', fontSize: '13px', marginBottom: '12px' }}>
-                {youtubeError}
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button 
-                className="modal-close" 
-                onClick={handleYoutubeImport}
-                disabled={isLoadingYoutube}
-              >
-                {isLoadingYoutube ? 'Cargando...' : 'Importar'}
-              </button>
-              <button 
-                className="modal-close" 
-                onClick={() => {
-                  setShowYoutubeDialog(false)
-                  setYoutubeUrl('')
-                  setYoutubeError(null)
-                  setSelectedTrack(null)
-                }}
-                disabled={isLoadingYoutube}
-              >
-                Cancelar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {showExportDialog && (
         <div className="drive-projects-modal">
           <div className="modal-content">
@@ -3388,9 +4043,9 @@ function App() {
                 )
               ))}
             </div>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '20px' }}>
-              <button className="modal-close" onClick={handleExport}>Exportar</button>
-              <button className="modal-close" onClick={() => setShowExportDialog(false)}>Cancelar</button>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setShowExportDialog(false)}>Cancelar</button>
+              <button className="btn btn-primary" onClick={handleExport}>Exportar</button>
             </div>
           </div>
         </div>
@@ -3410,31 +4065,31 @@ function App() {
                   formData.get('password') as string
                 )
               }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div className="modal-stack">
                   <input
                     type="email"
                     name="email"
+                    className="field-input"
                     placeholder="Email"
                     required
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
                     type="password"
                     name="password"
+                    className="field-input"
                     placeholder="Contraseña"
                     required
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
-                  <button type="submit" disabled={authLoading} style={{ padding: '8px' }}>
+                  <button type="submit" className="btn btn-primary" disabled={authLoading}>
                     {authLoading ? 'Iniciando sesión...' : 'Iniciar sesión'}
                   </button>
                   <button
                     type="button"
+                    className="btn btn-ghost"
                     onClick={() => { setAuthMode('register'); setErrorMessage(null) }}
                     disabled={authLoading}
-                    style={{ padding: '8px', background: '#444' }}
                   >
                     ¿No tienes cuenta? Crear una
                   </button>
@@ -3451,91 +4106,52 @@ function App() {
                   formData.get('password') as string
                 )
               }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div className="modal-stack">
                   <input
                     type="text"
                     name="username"
+                    className="field-input"
                     placeholder="Usuario"
                     required
                     minLength={3}
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
                     type="email"
                     name="email"
+                    className="field-input"
                     placeholder="Email"
                     required
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
                     type="password"
                     name="password"
+                    className="field-input"
                     placeholder="Contraseña (mínimo 6 caracteres)"
                     required
                     minLength={6}
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
-                  <button type="submit" disabled={authLoading} style={{ padding: '8px' }}>
+                  <button type="submit" className="btn btn-primary" disabled={authLoading}>
                     {authLoading ? 'Creando cuenta...' : 'Crear cuenta'}
                   </button>
                   <button
                     type="button"
+                    className="btn btn-ghost"
                     onClick={() => { setAuthMode('login'); setErrorMessage(null) }}
                     disabled={authLoading}
-                    style={{ padding: '8px', background: '#444' }}
                   >
                     ¿Ya tienes cuenta? Iniciar sesión
                   </button>
                 </div>
               </form>
             )}
-            <button className="modal-close" onClick={() => { setShowAuth(false); setErrorMessage(null); setAuthLoading(false) }}>Cerrar</button>
+            <button className="btn btn-ghost" onClick={() => { setShowAuth(false); setErrorMessage(null); setAuthLoading(false) }}>Cerrar</button>
           </div>
         </div>
       )}
 
-      {showCloudProjects && (
-        <div className="drive-projects-modal">
-          <div className="modal-content">
-            <h2>Mis proyectos en la nube</h2>
-            <div className="storage-info">
-              Espacio usado: {(storageUsage / 1024 / 1024).toFixed(2)} MB
-              <button 
-                onClick={handleMigrateLegacyProjects}
-                style={{ marginLeft: '10px', padding: '4px 8px', fontSize: '12px' }}
-                title="Copiar proyectos compartidos antiguos a tu cuenta (no elimina los originales)"
-              >
-                📦 Copiar proyectos compartidos
-              </button>
-            </div>
-            <div className="projects-list">
-              {cloudProjects.length === 0 ? (
-                <p>No hay proyectos guardados</p>
-              ) : (
-                cloudProjects.map(project => (
-                  <div key={project.pathname} className="project-item">
-                    <div className="project-info">
-                      <div className="project-name">{project.name}</div>
-                      <div className="project-meta">
-                        {new Date(project.uploadedAt).toLocaleDateString()} · {(project.size / 1024 / 1024).toFixed(2)} MB
-                      </div>
-                    </div>
-                    <div className="project-actions">
-                      <button onClick={() => handleOpenCloudProject(project.pathname, project.name)}>Abrir</button>
-                      <button onClick={() => handleDeleteCloudProject(project.pathname, project.name)} className="delete-btn">Eliminar</button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-            <button className="modal-close" onClick={() => setShowCloudProjects(false)}>Cerrar</button>
-          </div>
-        </div>
-      )}
-      
       {isExporting && exportProgress && (
         <div className="export-progress-toast">
           {exportProgress}
@@ -3544,38 +4160,61 @@ function App() {
 
       <div className="arrangement-view">
         <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
-          <div className="ruler-spacer" style={{ height: '32px', flexShrink: 0, borderBottom: '1px solid #333' }} />
-          {trackStates.map((trackState, trackIndex) => (
-            <div key={trackIndex} className="track-header" style={{ height: `${88 * verticalZoom}px` }}>
-              <div className="track-name">{trackState.name || `Track ${trackIndex + 1}`}</div>
-              <div className="track-controls">
-                <button
-                  className={`control-button mute-button ${trackState.mute ? 'active' : ''}`}
-                  onClick={() => handleMuteToggle(trackIndex)}
-                  title="Mute"
-                >
-                  M
-                </button>
-                <button
-                  className={`control-button solo-button ${trackState.solo ? 'active' : ''}`}
-                  onClick={() => handleSoloToggle(trackIndex)}
-                  title="Solo"
-                >
-                  S
-                </button>
-                <input
-                  type="range"
-                  className="volume-slider"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={trackState.volume}
-                  onChange={(e) => handleVolumeChange(trackIndex, parseFloat(e.target.value))}
-                  title={`Volume: ${Math.round(trackState.volume * 100)}%`}
-                />
-              </div>
-            </div>
-          ))}
+          <div
+            className="sidebar-scroll"
+            ref={sidebarScrollRef}
+            onScroll={() => syncVerticalScroll('sidebar')}
+          >
+            <div className="ruler-spacer" />
+            {trackStates.map((trackState, trackIndex) => (
+              <TrackHeader
+                key={trackIndex}
+                trackIndex={trackIndex}
+                name={trackState.name}
+                mute={trackState.mute}
+                solo={trackState.solo}
+                volume={trackState.volume}
+                height={88 * verticalZoom}
+                canDelete={trackStates.length > 1}
+                isRenaming={renamingTrack === trackIndex}
+                renameDraft={renamingTrack === trackIndex ? renameDraft : ''}
+                onContextMenu={openTrackHeaderMenu}
+                onStartRename={startRenameTrack}
+                onRenameDraftChange={setRenameDraft}
+                onCommitRename={commitRenameTrack}
+                onCancelRename={cancelRenameTrack}
+                onDelete={requestDeleteTrack}
+                onMute={handleMuteToggle}
+                onSolo={handleSoloToggle}
+                onVolumeLive={handleVolumeLive}
+                onVolumeCommit={handleVolumeCommit}
+                recordArmed={recordArmedIndex === trackIndex}
+                onRecordArm={handleRecordArm}
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            className="add-track-button"
+            data-testid="add-track-button"
+            title="Agregar pista"
+            onClick={addEmptyTrack}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              setContextMenu({
+                x: e.clientX,
+                y: e.clientY,
+                trackIndex: trackStates.length - 1,
+                clipId: null,
+                time: 0,
+                kind: 'empty'
+              })
+            }}
+          >
+            <IconPlus size={14} />
+            Agregar pista
+          </button>
         </div>
         <div 
           className="resize-handle"
@@ -3585,151 +4224,81 @@ function App() {
         <div
           className="lanes-column"
           ref={lanesColumnRef}
-          style={{ minWidth: `${100 * horizontalZoom}%` }}
-          onContextMenu={(e) => e.preventDefault()}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            const target = e.target as HTMLElement
+            if (target.closest('.track-content, .clip-wrapper, .bar-ruler')) return
+            setContextMenu({
+              x: e.clientX,
+              y: e.clientY,
+              trackIndex: trackStates.length - 1,
+              clipId: null,
+              time: 0,
+              kind: 'empty'
+            })
+          }}
         >
-          <div className="lanes-scroll-content">
+          <div
+            className="lanes-scroll-content"
+            ref={lanesScrollRef}
+            onScroll={() => syncVerticalScroll('lanes')}
+          >
+          {marqueeBox && (
+            <div
+              className="marquee-rect"
+              style={{
+                left: marqueeBox.left,
+                top: marqueeBox.top,
+                width: marqueeBox.width,
+                height: marqueeBox.height
+              }}
+            />
+          )}
+          <div className="lanes-scroll-inner" style={{ minWidth: `${100 * horizontalZoom}%` }}>
           <div className="bar-ruler" onMouseDown={handleRulerMouseDown}>
             {rulerBars}
           </div>
           {(() => {
-            const maxDur = getMaxDuration() || 100
-            return trackStates.map((trackState, trackIndex) => {
-              const hasClips = trackState.clips.length > 0
-              const isAnyClipPlaying = trackState.clips.some(c => c.isPlaying)
-            
-            return (
-            <div 
+            const maxDur = getLayoutMax()
+            return trackStates.map((trackState, trackIndex) => (
+            <TrackLane
               key={trackIndex}
-              className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
-              style={{ height: `${88 * verticalZoom}px` }}
-              onClick={(e) => handleWaveformClick(e, trackIndex)}
-              onMouseDown={(e) => handleTrackMouseDown(e, trackIndex)}
-              onContextMenu={(e) => openContextMenu(e, trackIndex, null)}
-            >
-              {hasClips ? (
-                <div 
-                  className="clip-region"
-                  onMouseDown={(e) => {
-                    if (isLoopEnabled && e.button === 0 && !isDraggingLoopEdge && !isDraggingClip) {
-                      handleLoopMouseDown(e)
-                    }
-                  }}
-                  onMouseMove={handleLoopMouseMove}
-                  onMouseUp={handleLoopMouseUp}
-                >
-                  {trackState.clips.map((clip) => {
-                    const clipOffset = (isDraggingClip && selectedClipIds.has(clip.id)) 
-                      ? (clip.offsetSeconds + (tempDragOffset - dragStartPosition))
-                      : clip.offsetSeconds
-                    const isSelected = selectedClipIds.has(clip.id)
-                    const showOnDifferentTrack = isDraggingClip && tempDragTrack !== null && tempDragTrack !== trackIndex && selectedClipIds.has(clip.id) && draggedClipTrack === trackIndex
-                    
-                    return (
-                      <div 
-                        key={clip.id}
-                        className={`clip-wrapper ${isSelected ? 'selected' : ''} ${showOnDifferentTrack ? 'moving-away' : ''}`}
-                        style={{
-                          position: 'absolute',
-                          left: `${(clipOffset / maxDur) * 100}%`,
-                          width: `${(clip.duration / maxDur) * 100}%`,
-                          height: '100%',
-                          opacity: showOnDifferentTrack ? 0.3 : 1
-                        }}
-                        onClick={(e) => handleClipClick(e, trackIndex, clip.id)}
-                        onContextMenu={(e) => openContextMenu(e, trackIndex, clip.id)}
-                      >
-                        <div 
-                          className="clip-trim-handle left"
-                          onMouseDown={(e) => handleResizeStart(e, trackIndex, clip.id, 'left')}
-                          title="Arrastra para recortar desde el inicio"
-                        />
-                        <div 
-                          className="clip-body"
-                          onMouseDown={(e) => handleClipDragStart(e, trackIndex, clip.id)}
-                          title="Arrastra para mover (clic derecho para editar, Alt+arrastrar para duplicar)"
-                          style={{ cursor: 'move' }}
-                        >
-                          <div className="clip-info">
-                            <span className="clip-filename">{clip.fileName}</span>
-                          </div>
-                          <ClipWaveform
-                            buffer={clip.buffer}
-                            sourceStart={clip.sourceStart}
-                            duration={clip.duration}
-                          />
-                        </div>
-                        <div 
-                          className="clip-trim-handle right"
-                          onMouseDown={(e) => handleResizeStart(e, trackIndex, clip.id, 'right')}
-                          title="Arrastra para recortar desde el final"
-                        />
-                      </div>
-                    )
-                  })}
-                  {isDraggingClip && tempDragTrack !== null && tempDragTrack !== draggedClipTrack && draggedClipTrack !== null && (
-                    trackStates[draggedClipTrack].clips
-                      .filter((clip: Clip) => selectedClipIds.has(clip.id))
-                      .map((clip: Clip) => {
-                        const clipOffset = clip.offsetSeconds + (tempDragOffset - dragStartPosition)
-                        return trackIndex === tempDragTrack ? (
-                          <div
-                            key={`ghost-${clip.id}`}
-                            className="clip-wrapper ghost"
-                            style={{
-                              position: 'absolute',
-                              left: `${(clipOffset / maxDur) * 100}%`,
-                              width: `${(clip.duration / maxDur) * 100}%`,
-                              height: '100%',
-                              opacity: 0.5,
-                              border: '2px dashed #0a5'
-                            }}
-                          />
-                        ) : null
-                      })
-                  )}
-                  {(loopStart !== null || tempLoopStart !== null) && (
-                    <div 
-                      className="loop-marker loop-start draggable"
-                      style={{ 
-                        left: `${((tempLoopStart ?? loopStart)! / maxDur) * 100}%` 
-                      }}
-                      onMouseDown={(e) => handleLoopMouseDown(e, 'start')}
-                      title="Arrastra para ajustar inicio"
-                    />
-                  )}
-                  {(loopEnd !== null || tempLoopEnd !== null) && (
-                    <div 
-                      className="loop-marker loop-end draggable"
-                      style={{ 
-                        left: `${((tempLoopEnd ?? loopEnd)! / maxDur) * 100}%` 
-                      }}
-                      onMouseDown={(e) => handleLoopMouseDown(e, 'end')}
-                      title="Arrastra para ajustar fin"
-                    />
-                  )}
-                  {((loopStart !== null && loopEnd !== null) || (tempLoopStart !== null && tempLoopEnd !== null)) && (
-                    <div 
-                      className="loop-region"
-                      style={{ 
-                        left: `${((tempLoopStart ?? loopStart)! / maxDur) * 100}%`,
-                        width: `${(((tempLoopEnd ?? loopEnd)! - (tempLoopStart ?? loopStart)!) / maxDur) * 100}%`
-                      }}
-                    />
-                  )}
-                </div>
-              ) : (
-                <div className="empty-lane">
-                  <span className="import-hint">Click para importar audio</span>
-                </div>
-              )}
-            </div>
-            )
-            })
+              trackIndex={trackIndex}
+              hasClips={trackState.clips.length > 0}
+              isAnyClipPlaying={trackState.clips.some(c => c.isPlaying)}
+              height={88 * verticalZoom}
+              maxDur={maxDur}
+              clips={trackState.clips}
+              selectedClipIds={selectedClipIds}
+              isLoopEnabled={isLoopEnabled}
+              isDraggingLoopEdge={!!isDraggingLoopEdge}
+              loopStart={loopStart}
+              loopEnd={loopEnd}
+              tempLoopStart={tempLoopStart}
+              tempLoopEnd={tempLoopEnd}
+              onWaveformClick={handleWaveformClick}
+              onDoubleClick={handleLaneDoubleClick}
+              onMouseDown={handleTrackMouseDown}
+              onContextMenuTrack={openContextMenu}
+              onLoopMouseDown={handleLoopMouseDown}
+              onLoopMouseMove={handleLoopMouseMove}
+              onLoopMouseUp={handleLoopMouseUp}
+              onClipClick={handleClipClick}
+              onResizeStart={handleResizeStart}
+              onClipDragStart={handleClipDragStart}
+              isRecordingLane={isRecording && recordingTrackIndex === trackIndex}
+              recordingStartOffset={
+                recordingTrackIndex === trackIndex
+                  ? (recordLiveRef.current?.startOffset ?? playheadPositionRef.current)
+                  : 0
+              }
+            />
+            ))
           })()}
             <div className="playhead" ref={playheadElRef} aria-hidden="true">
               <span className="playhead-cap" />
             </div>
+          </div>
           </div>
         </div>
       </div>
@@ -3747,90 +4316,159 @@ function App() {
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onMouseDown={(e) => e.stopPropagation()}
           >
-            {contextMenu.clipId ? (
+            {contextMenu.kind === 'header' ? (
               <>
-                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('cut')}>Cortar</button>
-                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('copy')}>Copiar</button>
-                <button
-                  type="button"
-                  className={`context-menu-item ${clipboard ? '' : 'disabled'}`}
-                  disabled={!clipboard}
-                  onClick={() => runContextMenuAction('paste')}
-                >
-                  Pegar
-                </button>
+                <ContextMenuItem icon={<IconPencil />} label="Renombrar pista" onClick={() => startRenameTrack(contextMenu.trackIndex)} />
+                <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
                 <div className="context-menu-sep" />
-                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('split')}>Dividir aquí</button>
-                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('duplicate')}>Duplicar</button>
-                <button type="button" className="context-menu-item danger" onClick={() => runContextMenuAction('delete')}>Eliminar</button>
+                <ContextMenuItem
+                  icon={<IconTrash />}
+                  label="Eliminar pista"
+                  danger
+                  disabled={trackStates.length <= 1}
+                  onClick={() => requestDeleteTrack(contextMenu.trackIndex)}
+                />
+              </>
+            ) : contextMenu.kind === 'empty' ? (
+              <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
+            ) : contextMenu.clipId ? (
+              <>
+                <ContextMenuItem icon={<IconScissors />} label="Cortar" shortcut="Ctrl+X" onClick={() => runContextMenuAction('cut')} />
+                <ContextMenuItem icon={<IconCopy />} label="Copiar" shortcut="Ctrl+C" onClick={() => runContextMenuAction('copy')} />
+                <ContextMenuItem
+                  icon={<IconClipboardPaste />}
+                  label="Pegar"
+                  shortcut="Ctrl+V"
+                  disabled={!clipboard || clipboard.length === 0}
+                  onClick={() => runContextMenuAction('paste')}
+                />
+                <div className="context-menu-sep" />
+                <ContextMenuItem icon={<IconSplit />} label="Dividir aquí" shortcut="S" onClick={() => runContextMenuAction('split')} />
+                <ContextMenuItem icon={<IconCopyPlus />} label="Duplicar" shortcut="Ctrl+D" onClick={() => runContextMenuAction('duplicate')} />
+                <ContextMenuItem icon={<IconTrash />} label="Eliminar" shortcut="Del" danger onClick={() => runContextMenuAction('delete')} />
               </>
             ) : (
-              <button
-                type="button"
-                className={`context-menu-item ${clipboard ? '' : 'disabled'}`}
-                disabled={!clipboard}
-                onClick={() => runContextMenuAction('paste')}
-              >
-                Pegar aquí
-              </button>
+              <>
+                <ContextMenuItem
+                  icon={<IconClipboardPaste />}
+                  label="Pegar aquí"
+                  shortcut="Ctrl+V"
+                  disabled={!clipboard || clipboard.length === 0}
+                  onClick={() => runContextMenuAction('paste')}
+                />
+                <div className="context-menu-sep" />
+                <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
+              </>
             )}
           </div>
         </>
       )}
 
+      {trackDeleteConfirm && (
+        <div
+          className="confirm-modal"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setTrackDeleteConfirm(null)
+          }}
+        >
+          <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="track-delete-title">
+            <h2 id="track-delete-title">Eliminar pista</h2>
+            <p>
+              ¿Eliminar la pista «{trackDeleteConfirm.name}» y {trackDeleteConfirm.clipCount === 1
+                ? 'su clip'
+                : `sus ${trackDeleteConfirm.clipCount} clips`}? Esta acción se puede deshacer.
+            </p>
+            <div className="confirm-actions">
+              <button type="button" className="confirm-cancel" onClick={() => setTrackDeleteConfirm(null)}>
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="confirm-danger"
+                onClick={() => deleteTrackAt(trackDeleteConfirm.trackIndex)}
+              >
+                Eliminar pista
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showHelp && (
         <div className="drive-projects-modal">
-          <div className="modal-content" style={{ maxWidth: '600px' }}>
+          <div className="modal-content help-modal" style={{ maxWidth: '600px' }}>
             <h2>Atajos de teclado y gestos</h2>
-            <div style={{ fontSize: '13px', color: '#ccc', lineHeight: '1.8', marginBottom: '16px' }}>
-              <h3 style={{ color: '#0a5', marginTop: '12px', marginBottom: '8px' }}>Edición de clips</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
+            <div>
+              <h3>Edición de clips</h3>
+              <ul>
                 <li>• <strong>Click derecho en un clip</strong> - Menú: Cortar, Copiar, Pegar, Dividir aquí, Duplicar, Eliminar</li>
                 <li>• <strong>Click derecho en una pista vacía</strong> - Pegar aquí (en la posición del cursor, con snap si está activo)</li>
-                <li>• <strong>Click</strong> - Seleccionar clip</li>
-                <li>• <strong>Shift+Click</strong> - Seleccionar múltiples clips</li>
-                <li>• <strong>Arrastrar clip</strong> - Mover horizontal y verticalmente</li>
+                <li>• <strong>Click</strong> - Seleccionar clip y mover playhead</li>
+                <li>• <strong>Cmd/Ctrl+Click</strong> - Añadir o quitar un clip de la selección</li>
+                <li>• <strong>Shift+Click</strong> - Añadir clip a la selección</li>
+                <li>• <strong>Arrastrar en área vacía</strong> - Selección rectangular (varios tracks). Shift añade, Ctrl/Cmd alterna. Con Loop activo, arrastrar marca el loop</li>
+                <li>• <strong>Arrastrar clip</strong> - Mover la selección junta (tiempo y pista)</li>
                 <li>• <strong>Alt+Click en clip</strong> - Dividir en el punto clickeado</li>
                 <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
-                <li>• <strong>Shift al arrastrar</strong> - Desactivar snap temporalmente</li>
-                <li>• <strong>Botón 🧲 Snap</strong> - Activa/desactiva ajuste a cuadrícula</li>
+                <li>• <strong>Arrastrar archivos de audio</strong> - Soltalos en una pista para colocarlos ahí (con snap si está activo). Fuera de una pista se crea una pista nueva. Varios archivos: una pista por archivo</li>
+                <li>• <strong>Botón Snap</strong> - Empieza en OFF. Activa/desactiva el ajuste a cuadrícula (se recuerda)</li>
+                <li>• <strong>Shift al arrastrar</strong> - Invierte el snap mientras arrastras (lo enciende si está OFF, lo apaga si está ON)</li>
+              </ul>
+
+              <h3>Pistas</h3>
+              <ul>
+                <li>• <strong>Doble clic en el nombre</strong> - Renombrar pista (Enter o clic fuera guarda, Escape cancela)</li>
+                <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
+                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar pista, Agregar pista, Eliminar pista</li>
+                <li>• <strong>+ Agregar pista</strong> - Añade una pista vacía al final (Pista 9, 10, …). También en una pista vacía o zona vacía (clic derecho). Se puede deshacer</li>
+                <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
+                <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
+                <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
+              </ul>
+
+              <h3>Grabación</h3>
+              <ul>
+                <li>• <strong>Grabar</strong> (punto rojo) - Graba el micrófono desde el playhead. Si no hay pista armada, usa la seleccionada o crea «Grabación N»</li>
+                <li>• <strong>Overdub</strong> - Mientras grabás se reproducen las demás pistas. La cuenta del metrónomo se respeta si está activa y el playhead está en esos compases</li>
+                <li>• <strong>Grabar de nuevo, Stop o Espacio</strong> - Termina la toma y deja un clip (un deshacer la saca)</li>
+                <li>• <strong>Entrada de audio</strong> - Si hay más de un micrófono, elige cuál usar (se recuerda)</li>
               </ul>
               
-              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Teclado</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
+              <h3>Teclado</h3>
+              <ul>
                 <li>• <strong>Cmd/Ctrl+S</strong> - Guardar proyecto localmente</li>
                 <li>• <strong>Shift+Cmd/Ctrl+S</strong> - Guardar como... (nueva ubicación)</li>
                 <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead</li>
-                <li>• <strong>Cmd/Ctrl+X</strong> - Cortar clip seleccionado</li>
-                <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clip seleccionado</li>
-                <li>• <strong>Cmd/Ctrl+V</strong> - Pegar en playhead</li>
-                <li>• <strong>Cmd/Ctrl+D</strong> - Duplicar clip después del original</li>
+                <li>• <strong>Cmd/Ctrl+X</strong> - Cortar clips seleccionados</li>
+                <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clips seleccionados</li>
+                <li>• <strong>Cmd/Ctrl+V</strong> - Pegar selección en playhead (posiciones relativas)</li>
+                <li>• <strong>Cmd/Ctrl+D</strong> - Duplicar clips seleccionados</li>
                 <li>• <strong>Delete/Backspace</strong> - Eliminar clips seleccionados</li>
-                <li>• <strong>Escape</strong> - Cerrar menú contextual</li>
+                <li>• <strong>Escape</strong> - Cerrar menú o limpiar selección</li>
                 <li>• <strong>Cmd/Ctrl+A</strong> - Seleccionar todos los clips</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Shift+Z</strong> o <strong>Cmd/Ctrl+Y</strong> - Rehacer</li>
+                <li>• <strong>Espacio</strong> - Play/Pausa solo con esta pestaña enfocada. No hace nada si estás escribiendo en un campo</li>
               </ul>
               
-              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Guardar y Abrir</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
-                <li>• <strong>💾 Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe)</li>
-                <li>• <strong>📂 Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>
+              <h3>Guardar y Abrir</h3>
+              <ul>
+                <li>• <strong>Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe)</li>
+                <li>• <strong>Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>
                 <li>• Los proyectos incluyen todo el audio y stems sin rehacer separación</li>
-                <li>• <strong>☁️ Proyectos en la nube (anteriores)</strong> - Abrir proyectos viejos de la nube</li>
               </ul>
               
-              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
-                <li>• <strong>Espacio</strong> - Reproducir/Pausar</li>
-                <li>• <strong>Click en timeline o regla</strong> - Mover playhead (siempre visible, también en pausa y al arrastrar)</li>
+              <h3>Transporte</h3>
+              <ul>
+                <li>• <strong>Espacio</strong> - Play/Pausa solo mientras Musicalia está enfocada y visible (no desde otras pestañas, apps ni teclas de media). El playhead se queda donde paró; la próxima vez sigue desde ahí o desde donde hiciste click. Si hay una grabación en curso, la detiene. No desplaza la página ni activa el botón enfocado</li>
+                <li>• <strong>Click en timeline, regla o clip</strong> - Mover playhead (siempre visible, también en pausa)</li>
                 <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
                 <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>
               </ul>
             </div>
-            <button className="modal-close" onClick={() => setShowHelp(false)}>Cerrar</button>
+            <button className="btn btn-primary" onClick={() => setShowHelp(false)}>Cerrar</button>
           </div>
         </div>
       )}

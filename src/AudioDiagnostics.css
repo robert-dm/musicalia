@@ -55,6 +55,12 @@
   color: var(--accent);
 }
 
+@media (max-width: 1500px) {
+  .audio-diagnostics {
+    display: none;
+  }
+}
+
 .header-actions {
   display: flex;
   gap: 8px;

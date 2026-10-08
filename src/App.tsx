@@ -3501,52 +3501,54 @@ function App() {
             <IconRepeat size={15} />
           </button>
         </div>
-        <div className="time-display">
-          <span className="time-label">Time</span>
-          <span className="time-value" ref={timeDisplayRef}>
-            {formatTime(playheadPosition)} / {formatTime(getMaxDuration())}
-          </span>
-        </div>
-        {isLoopEnabled && (loopStart !== null || loopEnd !== null) && (
-          <div className="loop-indicator">
-            <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
-            <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
+        <div className="transport-meta">
+          <div className="time-display">
+            <span className="time-label">Time</span>
+            <span className="time-value" ref={timeDisplayRef}>
+              {formatTime(playheadPosition)} / {formatTime(getMaxDuration())}
+            </span>
           </div>
-        )}
-        <div className="zoom-controls">
-          <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)"><IconMoveHorizontal size={14} /></span>
-          <input
-            type="range"
-            className="zoom-slider"
-            min="0.5"
-            max="4"
-            step="0.1"
-            value={horizontalZoom}
-            onChange={(e) => setHorizontalZoom(parseFloat(e.target.value))}
-            title={`Zoom horizontal: ${(horizontalZoom * 100).toFixed(0)}%`}
-          />
-          <span className="zoom-label" title="Zoom vertical (Shift+Rueda)"><IconMoveVertical size={14} /></span>
-          <input
-            type="range"
-            className="zoom-slider"
-            min="0.5"
-            max="3"
-            step="0.1"
-            value={verticalZoom}
-            onChange={(e) => setVerticalZoom(parseFloat(e.target.value))}
-            title={`Zoom vertical: ${(verticalZoom * 100).toFixed(0)}%`}
-          />
-        </div>
-        <div className="bpm-control">
-          <span className="bpm-label">BPM</span>
-          <input
-            type="number"
-            className="bpm-input"
-            value={bpm}
-            onChange={handleBpmChange}
-            min="20"
-            max="300"
-          />
+          {isLoopEnabled && (loopStart !== null || loopEnd !== null) && (
+            <div className="loop-indicator">
+              <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
+              <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
+            </div>
+          )}
+          <div className="zoom-controls">
+            <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)"><IconMoveHorizontal size={14} /></span>
+            <input
+              type="range"
+              className="zoom-slider"
+              min="0.5"
+              max="4"
+              step="0.1"
+              value={horizontalZoom}
+              onChange={(e) => setHorizontalZoom(parseFloat(e.target.value))}
+              title={`Zoom horizontal: ${(horizontalZoom * 100).toFixed(0)}%`}
+            />
+            <span className="zoom-label" title="Zoom vertical (Shift+Rueda)"><IconMoveVertical size={14} /></span>
+            <input
+              type="range"
+              className="zoom-slider"
+              min="0.5"
+              max="3"
+              step="0.1"
+              value={verticalZoom}
+              onChange={(e) => setVerticalZoom(parseFloat(e.target.value))}
+              title={`Zoom vertical: ${(verticalZoom * 100).toFixed(0)}%`}
+            />
+          </div>
+          <div className="bpm-control">
+            <span className="bpm-label">BPM</span>
+            <input
+              type="number"
+              className="bpm-input"
+              value={bpm}
+              onChange={handleBpmChange}
+              min="20"
+              max="300"
+            />
+          </div>
         </div>
         <div className="header-info">
           <div className="audio-diagnostics">

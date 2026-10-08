@@ -1478,7 +1478,7 @@ function App() {
     let maxDuration = 0
     trackStates.forEach(track => {
       track.clips.forEach(clip => {
-        const clipEnd = clip.offsetSeconds + clip.buffer.duration
+        const clipEnd = clip.offsetSeconds + clip.duration
         maxDuration = Math.max(maxDuration, clipEnd)
       })
     })

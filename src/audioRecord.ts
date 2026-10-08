@@ -154,11 +154,30 @@ export interface PcmCapture {
   stop: () => { chunks: Float32Array[][]; sampleRate: number; peaks: number[] }
 }
 
+export function nativeAudioContext(ctx: unknown): AudioContext {
+  if (!ctx || typeof ctx !== 'object') {
+    throw new Error('No se pudo iniciar la captura de audio')
+  }
+  const rec = ctx as {
+    createScriptProcessor?: AudioContext['createScriptProcessor']
+    createMediaStreamSource?: AudioContext['createMediaStreamSource']
+    _nativeContext?: AudioContext
+    rawContext?: unknown
+  }
+  if (typeof rec.createScriptProcessor === 'function' && typeof rec.createMediaStreamSource === 'function') {
+    return rec as AudioContext
+  }
+  if (rec._nativeContext) return nativeAudioContext(rec._nativeContext)
+  if (rec.rawContext) return nativeAudioContext(rec.rawContext)
+  throw new Error('No se pudo iniciar la captura de audio')
+}
+
 export function startPcmCapture(ctx: AudioContext, stream: MediaStream): PcmCapture {
-  const source = ctx.createMediaStreamSource(stream)
+  const native = nativeAudioContext(ctx)
+  const source = native.createMediaStreamSource(stream)
   const channelCount = Math.max(1, source.channelCount || 1)
-  const processor = ctx.createScriptProcessor(4096, channelCount, 1)
-  const mute = ctx.createGain()
+  const processor = native.createScriptProcessor(4096, channelCount, 1)
+  const mute = native.createGain()
   mute.gain.value = 0
   const chunks: Float32Array[][] = []
   const peaks: number[] = []
@@ -185,7 +204,7 @@ export function startPcmCapture(ctx: AudioContext, stream: MediaStream): PcmCapt
 
   source.connect(processor)
   processor.connect(mute)
-  mute.connect(ctx.destination)
+  mute.connect(native.destination)
 
   return {
     peaks,
@@ -193,7 +212,7 @@ export function startPcmCapture(ctx: AudioContext, stream: MediaStream): PcmCapt
       try { processor.disconnect() } catch { /* already disconnected */ }
       try { source.disconnect() } catch { /* already disconnected */ }
       try { mute.disconnect() } catch { /* already disconnected */ }
-      return { chunks, sampleRate: ctx.sampleRate, peaks }
+      return { chunks, sampleRate: native.sampleRate, peaks }
     }
   }
 }

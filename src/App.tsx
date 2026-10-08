@@ -57,6 +57,7 @@ import {
   drawRecordingPeaks,
   listAudioInputDevices,
   micErrorMessage,
+  nativeAudioContext,
   nextGrabacionName,
   pcmChunksToAudioBuffer,
   persistMicDeviceId,
@@ -1507,7 +1508,8 @@ function App() {
     const maxDuration = getMaxDuration()
     
     const skipRecordTrack = recordLiveRef.current?.trackIndex
-    const updatedStates = trackStatesRef.current.map((track, trackIndex) => {
+    const sourceTracks = trackStatesRef.current
+    const updatedStates = sourceTracks.map((track, trackIndex) => {
       if (trackIndex === skipRecordTrack) {
         return { ...track, clips: track.clips.map(clip => ({ ...clip, isPlaying: false })) }
       }
@@ -1694,7 +1696,7 @@ function App() {
     recordLiveRef.current = null
     if (recordElapsedRef.current) recordElapsedRef.current.textContent = ''
 
-    const ctx = Tone.getContext().rawContext as AudioContext
+    const ctx = nativeAudioContext(Tone.getContext().rawContext)
     if (commit && captured && captured.chunks.length > 0) {
       try {
         const buffer = pcmChunksToAudioBuffer(ctx, captured.chunks, captured.sampleRate)
@@ -1783,6 +1785,7 @@ function App() {
       // ignore enumerate failures
     }
 
+    projectLoadGenRef.current++
     saveUndo()
     let nextTracks = tracks
     if (placement.createNew) {
@@ -1799,8 +1802,9 @@ function App() {
     try {
       capture = startPcmCapture(ctx, stream)
     } catch (err) {
+      console.error('[record] capture failed', err)
       stream.getTracks().forEach((track) => track.stop())
-      setErrorMessage(micErrorMessage(err))
+      setErrorMessage('No se pudo iniciar la captura de audio')
       setTimeout(() => setErrorMessage(null), 4000)
       return
     }
@@ -1838,6 +1842,12 @@ function App() {
         if (clip.player.state === 'started') clip.player.stop()
         clip.isPlaying = false
       })
+    }
+    if (recordLiveRef.current && !trackStatesRef.current[trackIndex] && nextTracks[trackIndex]) {
+      const restored = [...trackStatesRef.current, nextTracks[trackIndex]]
+      ensureTrackGains(restored.length)
+      trackStatesRef.current = restored
+      setTrackStates(restored)
     }
   }
 
@@ -3790,6 +3800,7 @@ function App() {
           <button
             className={`transport-button icon-btn record-btn ${isRecording ? 'active' : ''}`}
             data-testid="record-button"
+            data-recording-track={recordingTrackIndex ?? ''}
             onClick={() => { void handleRecord() }}
             title={isRecording ? 'Detener grabación' : 'Grabar'}
             aria-label="Grabar"

@@ -3,6 +3,7 @@ import {
   compensatedRecordOffset,
   micConstraints,
   micErrorMessage,
+  nativeAudioContext,
   nextGrabacionName,
   nextGrabacionNumber,
   pcmChunksToAudioBuffer,
@@ -82,6 +83,13 @@ assert(
 
 const empty = pcmChunksToAudioBuffer(fakeCtx(), [], 44100)
 assert(empty.length === 1 && empty.numberOfChannels === 1, 'empty capture still yields a buffer')
+
+const native = { createScriptProcessor() {}, createMediaStreamSource() {} }
+assert(nativeAudioContext(native) === (native as unknown as AudioContext), 'uses a context that already has capture APIs')
+assert(
+  nativeAudioContext({ _nativeContext: native, rawContext: {} }) === (native as unknown as AudioContext),
+  'unwraps Tone/standardized-audio-context'
+)
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

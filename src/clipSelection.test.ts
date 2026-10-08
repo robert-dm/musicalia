@@ -2,11 +2,13 @@ import {
   clampGroupTimeDelta,
   clampGroupTrackDelta,
   clientRectsIntersect,
+  commitEditedTrackName,
   deleteTrackFromList,
   marqueeClientRect,
   mergeSelection,
   packClipboard,
-  pastePlacement
+  pastePlacement,
+  resolveTrackName
 } from './clipSelection'
 
 let failed = 0
@@ -65,6 +67,12 @@ assert(!!del && del.tracks.length === 2, 'deleting a track leaves the others')
 assert(!!del && del.tracks[1].clips[0].id === 'd', 'later tracks shift down')
 assert(!!del && del.selectedIds.has('a') && del.selectedIds.has('d') && !del.selectedIds.has('b'), 'selection drops clips from the removed track')
 assert(deleteTrackFromList([{ clips: [] }], 0, new Set()) === null, 'cannot delete the last track')
+
+assert(resolveTrackName('  Voces  ', 2) === 'Voces', 'trims stored track names')
+assert(resolveTrackName('', 3) === 'Track 4', 'empty name falls back to Track N')
+assert(resolveTrackName(undefined, 0) === 'Track 1', 'missing name from old files falls back')
+assert(commitEditedTrackName('  Bajo  ', 'Track 2') === 'Bajo', 'rename commit trims')
+assert(commitEditedTrackName('   ', 'Voces') === 'Voces', 'empty rename reverts to previous')
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

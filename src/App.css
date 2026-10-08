@@ -292,6 +292,22 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: text;
+}
+
+.track-name-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  background: #1a1a1a;
+  border: 1px solid #0a5;
+  color: #eee;
+  border-radius: 3px;
+  font-size: 13px;
+  font-weight: 500;
+  outline: none;
 }
 
 .track-delete-button {

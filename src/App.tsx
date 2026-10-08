@@ -29,11 +29,13 @@ import {
   clampGroupTimeDelta,
   clampGroupTrackDelta,
   clientRectsIntersect,
+  commitEditedTrackName,
   deleteTrackFromList,
   marqueeClientRect,
   mergeSelection,
   packClipboard,
-  pastePlacement
+  pastePlacement,
+  resolveTrackName
 } from './clipSelection'
 
 const APP_VERSION = '0.0074b'
@@ -196,6 +198,9 @@ function App() {
     name: string
     clipCount: number
   } | null>(null)
+  const [renamingTrack, setRenamingTrack] = useState<number | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const renamingTrackRef = useRef<number | null>(null)
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -400,7 +405,7 @@ function App() {
         }))
         
         return {
-          name: t.name || '',
+          name: resolveTrackName(t.name, i),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
@@ -497,7 +502,7 @@ function App() {
         // Handle old format with single clip
         if (t.clip) {
           const buffer = await loadAudioBuffer(t.clip.audioBufferKey)
-          if (!buffer) return { ...t, clips: [] }
+          if (!buffer) return { ...t, name: resolveTrackName(t.name, i), clips: [] }
           
           const toneBuffer = new Tone.ToneAudioBuffer(buffer)
           const player = new Tone.Player()
@@ -507,6 +512,7 @@ function App() {
           
           return {
             ...t,
+            name: resolveTrackName(t.name, i),
             clips: [{
               player,
               fileName: t.clip.fileName,
@@ -547,6 +553,7 @@ function App() {
         
         return {
           ...t,
+          name: resolveTrackName(t.name, i),
           clips: loadedClips.filter(c => c !== null) as Clip[]
         }
       }))
@@ -707,7 +714,7 @@ function App() {
         metronomeEnabled,
         countInBars,
         tracks: trackStates.map((t, trackIdx) => ({
-          name: t.name,
+          name: resolveTrackName(t.name, trackIdx),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
@@ -802,7 +809,7 @@ function App() {
         metronomeEnabled,
         countInBars,
         tracks: trackStates.map((t, trackIdx) => ({
-          name: t.name,
+          name: resolveTrackName(t.name, trackIdx),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
@@ -962,7 +969,7 @@ function App() {
         }))
         
         return {
-          name: t.name,
+          name: resolveTrackName(t.name, trackIdx),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
@@ -1066,6 +1073,7 @@ function App() {
           
           return {
             ...t,
+            name: resolveTrackName(t.name, i),
             clips: [{
               player,
               fileName: t.clip.fileName,
@@ -1109,6 +1117,7 @@ function App() {
         
         return {
           ...t,
+          name: resolveTrackName(t.name, i),
           clips: loadedClips
         }
       })
@@ -3021,7 +3030,7 @@ function App() {
       return
     }
     const track = trackStates[trackIndex]
-    const name = track.name || `Track ${trackIndex + 1}`
+    const name = resolveTrackName(track.name, trackIndex)
     if (track.clips.length > 0) {
       setTrackDeleteConfirm({ trackIndex, name, clipCount: track.clips.length })
       return
@@ -3064,6 +3073,33 @@ function App() {
       time: 0,
       kind: 'header'
     })
+  }
+
+  const startRenameTrack = (trackIndex: number) => {
+    closeContextMenu()
+    renamingTrackRef.current = trackIndex
+    setRenamingTrack(trackIndex)
+    setRenameDraft(resolveTrackName(trackStates[trackIndex]?.name, trackIndex))
+  }
+
+  const cancelRenameTrack = () => {
+    renamingTrackRef.current = null
+    setRenamingTrack(null)
+    setRenameDraft('')
+  }
+
+  const commitRenameTrack = (trackIndex: number, raw: string) => {
+    if (renamingTrackRef.current !== trackIndex) return
+    renamingTrackRef.current = null
+    const previous = resolveTrackName(trackStates[trackIndex]?.name, trackIndex)
+    const next = commitEditedTrackName(raw, previous)
+    setRenamingTrack(null)
+    setRenameDraft('')
+    if (next === (trackStates[trackIndex]?.name ?? previous)) return
+    saveUndo()
+    setTrackStates(prev => prev.map((track, i) => (
+      i === trackIndex ? { ...track, name: next } : track
+    )))
   }
 
   const timeFromClientX = (clientX: number, el: HTMLElement) => {
@@ -3953,7 +3989,41 @@ function App() {
               onContextMenu={(e) => openTrackHeaderMenu(e, trackIndex)}
             >
               <div className="track-name-row">
-                <div className="track-name">{trackState.name || `Track ${trackIndex + 1}`}</div>
+                {renamingTrack === trackIndex ? (
+                  <input
+                    className="track-name-input"
+                    value={renameDraft}
+                    autoFocus
+                    aria-label="Nombre de pista"
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        commitRenameTrack(trackIndex, renameDraft)
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault()
+                        cancelRenameTrack()
+                      }
+                    }}
+                    onBlur={() => commitRenameTrack(trackIndex, renameDraft)}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <div
+                    className="track-name"
+                    title={resolveTrackName(trackState.name, trackIndex)}
+                    onDoubleClick={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      startRenameTrack(trackIndex)
+                    }}
+                  >
+                    {resolveTrackName(trackState.name, trackIndex)}
+                  </div>
+                )}
                 <button
                   type="button"
                   className="control-button track-delete-button"
@@ -4160,14 +4230,23 @@ function App() {
             onMouseDown={(e) => e.stopPropagation()}
           >
             {contextMenu.kind === 'header' ? (
-              <button
-                type="button"
-                className={`context-menu-item danger ${trackStates.length <= 1 ? 'disabled' : ''}`}
-                disabled={trackStates.length <= 1}
-                onClick={() => requestDeleteTrack(contextMenu.trackIndex)}
-              >
-                Eliminar pista
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="context-menu-item"
+                  onClick={() => startRenameTrack(contextMenu.trackIndex)}
+                >
+                  Renombrar pista
+                </button>
+                <button
+                  type="button"
+                  className={`context-menu-item danger ${trackStates.length <= 1 ? 'disabled' : ''}`}
+                  disabled={trackStates.length <= 1}
+                  onClick={() => requestDeleteTrack(contextMenu.trackIndex)}
+                >
+                  Eliminar pista
+                </button>
+              </>
             ) : contextMenu.clipId ? (
               <>
                 <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('cut')}>Cortar</button>
@@ -4253,9 +4332,10 @@ function App() {
 
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Pistas</h3>
               <ul style={{ listStyle: 'none', padding: 0 }}>
+                <li>• <strong>Doble clic en el nombre</strong> - Renombrar pista (Enter o clic fuera guarda, Escape cancela)</li>
                 <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
-                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Eliminar pista</li>
-                <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer la eliminación (restaura clips, volumen, mute y solo)</li>
+                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar pista, Eliminar pista</li>
+                <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
               </ul>
               
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Teclado</h3>

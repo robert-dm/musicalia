@@ -61,6 +61,16 @@ export function pastePlacement(
   }
 }
 
+export function resolveTrackName(name: string | undefined | null, index: number): string {
+  const trimmed = typeof name === 'string' ? name.trim() : ''
+  return trimmed || `Track ${index + 1}`
+}
+
+export function commitEditedTrackName(draft: string, previous: string): string {
+  const trimmed = draft.trim()
+  return trimmed.length > 0 ? trimmed : previous
+}
+
 export function deleteTrackFromList<T extends { clips: { id: string }[] }>(
   tracks: T[],
   index: number,

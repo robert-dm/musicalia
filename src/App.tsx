@@ -102,7 +102,6 @@ function App() {
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const [loopStart, setLoopStart] = useState<number | null>(null)
   const [loopEnd, setLoopEnd] = useState<number | null>(null)
-  const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
   const [tempLoopStart, setTempLoopStart] = useState<number | null>(null)
   const [tempLoopEnd, setTempLoopEnd] = useState<number | null>(null)
   const [horizontalZoom, setHorizontalZoom] = useState(1)
@@ -1393,8 +1392,9 @@ function App() {
   const syncPlayheadDom = (seconds: number) => {
     playheadPositionRef.current = seconds
     const layoutMax = timelineMaxRef.current || 100
+    const left = `${Math.min((seconds / layoutMax) * 100, 100)}%`
     if (playheadElRef.current) {
-      playheadElRef.current.style.left = `${Math.min((seconds / layoutMax) * 100, 100)}%`
+      playheadElRef.current.style.left = left
     }
     if (timeDisplayRef.current) {
       timeDisplayRef.current.textContent = `${formatTime(seconds)} / ${formatTime(timelineMaxRef.current)}`
@@ -1406,7 +1406,7 @@ function App() {
     setPlayheadPosition(seconds)
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     timelineMaxRef.current = getMaxDuration()
     syncPlayheadDom(playheadPositionRef.current)
   }, [trackStates, horizontalZoom])
@@ -2791,9 +2791,10 @@ function App() {
     })
   }
 
-  const handlePlayheadMouseDown = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    setIsDraggingPlayhead(true)
+  const timeFromClientX = (clientX: number, el: HTMLElement) => {
+    const rect = el.getBoundingClientRect()
+    const percentage = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0
+    return percentage * (getMaxDuration() || 0)
   }
 
   const seekToPosition = (seconds: number) => {
@@ -2838,13 +2839,20 @@ function App() {
       return
     }
 
-    const rect = e.currentTarget.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
-    const percentage = clickX / rect.width
-    const maxDuration = getMaxDuration()
-    const clickTime = percentage * maxDuration
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
+  }
 
-    seekToPosition(clickTime)
+  const handleRulerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
+  }
+
+  const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>, trackIndex: number) => {
+    if (e.button !== 0) return
+    const target = e.target as HTMLElement
+    if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
+    if (isLoopEnabled && trackStates[trackIndex]?.clips.length > 0) return
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
   }
 
   const clearLoop = () => {
@@ -2965,47 +2973,6 @@ function App() {
       }
     }
   }, [isResizing])
-
-  useEffect(() => {
-    if (!isDraggingPlayhead) return
-    let raf: number | null = null
-    let pendingTime: number | null = null
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      
-      const firstLane = lanes[0] as HTMLElement
-      const rect = firstLane.getBoundingClientRect()
-      const clickX = e.clientX - rect.left
-      const percentage = Math.max(0, Math.min(1, clickX / rect.width))
-      pendingTime = percentage * (timelineMaxRef.current || 0)
-      if (raf == null) {
-        raf = requestAnimationFrame(() => {
-          raf = null
-          if (pendingTime != null) seekToPosition(pendingTime)
-        })
-      }
-    }
-
-    const handleMouseUp = () => {
-      if (raf != null) cancelAnimationFrame(raf)
-      setIsDraggingPlayhead(false)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'ew-resize'
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-      if (raf != null) cancelAnimationFrame(raf)
-    }
-  }, [isDraggingPlayhead, isPlaying])
 
   useLayoutEffect(() => {
     if (!contextMenu || !contextMenuRef.current) return
@@ -3621,10 +3588,10 @@ function App() {
           style={{ minWidth: `${100 * horizontalZoom}%` }}
           onContextMenu={(e) => e.preventDefault()}
         >
-          <div className="bar-ruler">
+          <div className="lanes-scroll-content">
+          <div className="bar-ruler" onMouseDown={handleRulerMouseDown}>
             {rulerBars}
           </div>
-          <div className="lanes-body">
           {(() => {
             const maxDur = getMaxDuration() || 100
             return trackStates.map((trackState, trackIndex) => {
@@ -3637,6 +3604,7 @@ function App() {
               className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
               style={{ height: `${88 * verticalZoom}px` }}
               onClick={(e) => handleWaveformClick(e, trackIndex)}
+              onMouseDown={(e) => handleTrackMouseDown(e, trackIndex)}
               onContextMenu={(e) => openContextMenu(e, trackIndex, null)}
             >
               {hasClips ? (
@@ -3759,14 +3727,9 @@ function App() {
             )
             })
           })()}
-            <div
-              className="playhead"
-              ref={playheadElRef}
-              style={{
-                left: `${Math.min((playheadPosition / (getMaxDuration() || 100)) * 100, 100)}%`
-              }}
-              onMouseDown={handlePlayheadMouseDown}
-            />
+            <div className="playhead" ref={playheadElRef} aria-hidden="true">
+              <span className="playhead-cap" />
+            </div>
           </div>
         </div>
       </div>
@@ -3862,7 +3825,7 @@ function App() {
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>
               <ul style={{ listStyle: 'none', padding: 0 }}>
                 <li>• <strong>Espacio</strong> - Reproducir/Pausar</li>
-                <li>• <strong>Click en timeline</strong> - Mover playhead</li>
+                <li>• <strong>Click en timeline o regla</strong> - Mover playhead (siempre visible, también en pausa y al arrastrar)</li>
                 <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
                 <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>
               </ul>

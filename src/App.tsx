@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import * as Tone from 'tone'
+import JSZip from 'jszip'
 import './App.css'
 import './AudioDiagnostics.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
@@ -23,7 +24,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0069b'
+const APP_VERSION = '0.0070b'
 
 interface Clip {
   player: Tone.Player
@@ -57,6 +58,7 @@ function App() {
   const [isDraggingLoopEdge, setIsDraggingLoopEdge] = useState<'start' | 'end' | null>(null)
   const [loopDragStart, setLoopDragStart] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const localFileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
   const [showYoutubeDialog, setShowYoutubeDialog] = useState(false)
   const [youtubeUrl, setYoutubeUrl] = useState('')
@@ -131,6 +133,8 @@ function App() {
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
   const [scissorsMode, setScissorsMode] = useState(false)
+  const [showSaveNameDialog, setShowSaveNameDialog] = useState(false)
+  const [saveNameInput, setSaveNameInput] = useState('')
   const [cutLinePreview, setCutLinePreview] = useState<{trackIndex: number, time: number} | null>(null)
   const [isDraggingThreshold, setIsDraggingThreshold] = useState(false)
   const [dragDistance, setDragDistance] = useState(0)
@@ -555,17 +559,20 @@ function App() {
       return
     }
     
-    const name = prompt('Nombre del proyecto:', currentProjectName)
-    if (!name) {
-      // User cancelled - no error needed
-      return
-    }
+    setSaveNameInput(currentProjectName)
+    setShowSaveNameDialog(true)
+  }
+  
+  const handleConfirmSaveToCloud = async () => {
+    const name = saveNameInput.trim()
     
-    if (!name.trim()) {
+    if (!name) {
       setErrorMessage('El nombre del proyecto no puede estar vacío')
       setTimeout(() => setErrorMessage(null), 3000)
       return
     }
+    
+    setShowSaveNameDialog(false)
     
     const projectData = {
       name,
@@ -633,6 +640,246 @@ function App() {
       setStorageUsage(usage)
     } catch (err: any) {
       setErrorMessage(err.message || 'Error al migrar proyectos')
+    }
+  }
+
+  const handleSaveToLocal = async () => {
+    try {
+      const hasAnyAudio = trackStates.some(t => t.clips.length > 0)
+      if (!hasAnyAudio) {
+        setErrorMessage('No hay audio para guardar. Importa al menos un archivo de audio.')
+        setTimeout(() => setErrorMessage(null), 5000)
+        return
+      }
+      
+      setUploadProgress(5)
+      setExportProgress('Preparando proyecto...')
+      
+      const zip = new JSZip()
+      
+      const projectData = {
+        version: APP_VERSION,
+        name: currentProjectName,
+        bpm,
+        loopStart,
+        loopEnd,
+        playheadPosition,
+        metronomeEnabled,
+        countInBars,
+        tracks: trackStates.map((t, trackIdx) => ({
+          name: t.name,
+          mute: t.mute,
+          solo: t.solo,
+          volume: t.volume,
+          clips: t.clips.map((clip, clipIdx) => ({
+            fileName: clip.fileName,
+            startPosition: clip.startPosition,
+            offsetSeconds: clip.offsetSeconds,
+            id: clip.id,
+            sourceStart: clip.sourceStart,
+            duration: clip.duration,
+            audioFile: `audio_${trackIdx}_${clipIdx}.wav`
+          }))
+        }))
+      }
+      
+      zip.file('project.json', JSON.stringify(projectData, null, 2))
+      
+      setExportProgress('Guardando audio...')
+      
+      const bufferMap = new Map<AudioBuffer, string>()
+      
+      for (let trackIdx = 0; trackIdx < trackStates.length; trackIdx++) {
+        const track = trackStates[trackIdx]
+        for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
+          const clip = track.clips[clipIdx]
+          
+          let audioFileName: string
+          if (bufferMap.has(clip.buffer)) {
+            audioFileName = bufferMap.get(clip.buffer)!
+          } else {
+            audioFileName = `audio_${trackIdx}_${clipIdx}.wav`
+            bufferMap.set(clip.buffer, audioFileName)
+            
+            const wavData = encodeWAV(
+              [clip.buffer.getChannelData(0), clip.buffer.getChannelData(1)],
+              clip.buffer.sampleRate
+            )
+            zip.file(audioFileName, wavData.buffer as ArrayBuffer)
+          }
+          
+          const progress = 10 + ((trackIdx * track.clips.length + clipIdx + 1) / 
+            trackStates.reduce((sum, t) => sum + t.clips.length, 0)) * 70
+          setUploadProgress(progress)
+        }
+      }
+      
+      setExportProgress('Comprimiendo...')
+      setUploadProgress(80)
+      
+      const blob = await zip.generateAsync({ 
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 }
+      }, (metadata) => {
+        const progress = 80 + (metadata.percent * 0.2)
+        setUploadProgress(progress)
+      })
+      
+      setUploadProgress(100)
+      
+      const fileName = `${currentProjectName.replace(/[^a-z0-9]/gi, '_')}.musicalia`
+      
+      if ('showSaveFilePicker' in window) {
+        try {
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName: fileName,
+            types: [{
+              description: 'Proyecto Musicalia',
+              accept: { 'application/x-musicalia': ['.musicalia'] }
+            }]
+          })
+          const writable = await handle.createWritable()
+          await writable.write(blob)
+          await writable.close()
+        } catch (e: any) {
+          if (e.name !== 'AbortError') throw e
+          return
+        }
+      } else {
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = fileName
+        a.click()
+        URL.revokeObjectURL(url)
+      }
+      
+      setToastMessage('Proyecto guardado en tu computadora')
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+    } catch (err: any) {
+      console.error('Local save error:', err)
+      setErrorMessage(err.message || 'Error al guardar localmente')
+      setTimeout(() => setErrorMessage(null), 5000)
+    } finally {
+      setUploadProgress(0)
+      setExportProgress('')
+    }
+  }
+
+  const handleOpenFromLocal = async (file: File) => {
+    try {
+      setExportProgress('Cargando proyecto...')
+      setUploadProgress(5)
+      
+      const zip = new JSZip()
+      const contents = await zip.loadAsync(file)
+      
+      setUploadProgress(10)
+      
+      const projectFile = contents.file('project.json')
+      if (!projectFile) {
+        throw new Error('Archivo de proyecto inválido: falta project.json')
+      }
+      
+      const projectJson = await projectFile.async('string')
+      const projectData = JSON.parse(projectJson)
+      
+      setUploadProgress(20)
+      setExportProgress('Cargando audio...')
+      
+      await ensureAudio()
+      
+      projectLoadGenRef.current++
+      const loadGen = projectLoadGenRef.current
+      console.log(`[Open Local] Starting load, gen=${loadGen}`)
+      
+      const audioFiles = new Map<string, AudioBuffer>()
+      const audioFileNames = Object.keys(contents.files).filter(name => name.endsWith('.wav'))
+      
+      for (let i = 0; i < audioFileNames.length; i++) {
+        const fileName = audioFileNames[i]
+        const file = contents.file(fileName)
+        if (file) {
+          const arrayBuffer = await file.async('arraybuffer')
+          const audioBuffer = await Tone.context.decodeAudioData(arrayBuffer)
+          audioFiles.set(fileName, audioBuffer)
+          
+          const progress = 20 + ((i + 1) / audioFileNames.length) * 60
+          setUploadProgress(progress)
+        }
+      }
+      
+      setUploadProgress(80)
+      setExportProgress('Restaurando proyecto...')
+      
+      const newTrackStates = await Promise.all(projectData.tracks.map(async (t: any, trackIdx: number) => {
+        const clips = await Promise.all((t.clips || []).map(async (clipData: any) => {
+          const audioBuffer = audioFiles.get(clipData.audioFile)
+          if (!audioBuffer) {
+            console.warn(`Audio file not found: ${clipData.audioFile}`)
+            return null
+          }
+          
+          const player = new Tone.Player()
+          player.buffer = new Tone.ToneAudioBuffer(audioBuffer)
+          player.loop = false
+          
+          if (!trackGainsRef.current[trackIdx]) {
+            console.warn(`Track gain ${trackIdx} not available`)
+            return null
+          }
+          player.connect(trackGainsRef.current[trackIdx])
+          
+          return {
+            player,
+            fileName: clipData.fileName,
+            isPlaying: false,
+            buffer: audioBuffer,
+            startPosition: clipData.startPosition,
+            offsetSeconds: clipData.offsetSeconds,
+            id: clipData.id,
+            sourceStart: clipData.sourceStart ?? 0,
+            duration: clipData.duration ?? audioBuffer.duration
+          }
+        }))
+        
+        return {
+          name: t.name,
+          mute: t.mute,
+          solo: t.solo,
+          volume: t.volume,
+          clips: clips.filter(c => c !== null) as Clip[]
+        }
+      }))
+      
+      if (projectLoadGenRef.current !== loadGen) {
+        console.log(`[Open Local] Aborted due to newer load, current gen=${projectLoadGenRef.current}`)
+        return
+      }
+      
+      setBpm(projectData.bpm || 120)
+      Tone.getTransport().bpm.value = projectData.bpm || 120
+      setLoopStart(projectData.loopStart ?? null)
+      setLoopEnd(projectData.loopEnd ?? null)
+      setPlayheadPosition(projectData.playheadPosition || 0)
+      setTrackStates(newTrackStates)
+      setCurrentProjectName(projectData.name || 'Proyecto sin título')
+      
+      setUploadProgress(100)
+      setToastMessage('Proyecto cargado desde tu computadora')
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+      
+      console.log(`[Open Local] Load completed, gen=${loadGen}`)
+    } catch (err: any) {
+      console.error('Local open error:', err)
+      setErrorMessage(err.message || 'Error al abrir proyecto local')
+      setTimeout(() => setErrorMessage(null), 5000)
+    } finally {
+      setUploadProgress(0)
+      setExportProgress('')
     }
   }
 
@@ -1977,7 +2224,10 @@ function App() {
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
       const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey
       
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIds.size > 0) {
+      if (e.key === 's' && cmdOrCtrl) {
+        e.preventDefault()
+        handleSaveToLocal()
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIds.size > 0) {
         e.preventDefault()
         handleDeleteSelected()
       } else if (e.key === 's' && !cmdOrCtrl && !e.shiftKey) {
@@ -2689,6 +2939,21 @@ function App() {
         style={{ display: 'none' }}
         onChange={handleFileSelect}
       />
+      <input
+        ref={localFileInputRef}
+        type="file"
+        accept=".musicalia"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) {
+            handleOpenFromLocal(file)
+          }
+          if (localFileInputRef.current) {
+            localFileInputRef.current.value = ''
+          }
+        }}
+      />
       
       <div className="transport-bar">
         <div className="transport-controls">
@@ -2724,12 +2989,26 @@ function App() {
           >
             📁 Proyectos
           </button>
+          <button
+            className="header-btn"
+            onClick={handleSaveToLocal}
+            title="Guardar en mi computadora (Cmd/Ctrl+S)"
+          >
+            💾 Guardar local
+          </button>
+          <button
+            className="header-btn"
+            onClick={() => localFileInputRef.current?.click()}
+            title="Abrir proyecto desde mi computadora"
+          >
+            📂 Abrir local
+          </button>
           <button 
             className="header-btn" 
             onClick={handleOpenExportDialog}
             title="Exportar pistas seleccionadas"
           >
-            💾 Exportar
+            🎵 Exportar
           </button>
           <button
             className="header-btn"
@@ -3021,6 +3300,56 @@ function App() {
             <div style={{ display: 'flex', gap: '8px', marginTop: '20px' }}>
               <button className="modal-close" onClick={handleExport}>Exportar</button>
               <button className="modal-close" onClick={() => setShowExportDialog(false)}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSaveNameDialog && (
+        <div className="drive-projects-modal">
+          <div className="modal-content">
+            <h2>Guardar proyecto en la nube</h2>
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', marginBottom: '8px', fontSize: '14px', color: '#ccc' }}>
+                Nombre del proyecto:
+              </label>
+              <input
+                type="text"
+                value={saveNameInput}
+                onChange={(e) => setSaveNameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleConfirmSaveToCloud()
+                  } else if (e.key === 'Escape') {
+                    setShowSaveNameDialog(false)
+                  }
+                }}
+                autoFocus
+                style={{
+                  width: '100%',
+                  padding: '8px',
+                  fontSize: '14px',
+                  background: '#2a2a2a',
+                  border: '1px solid #555',
+                  borderRadius: '4px',
+                  color: '#e0e0e0'
+                }}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button 
+                className="modal-close" 
+                onClick={() => setShowSaveNameDialog(false)}
+                style={{ background: '#555' }}
+              >
+                Cancelar
+              </button>
+              <button 
+                className="modal-close" 
+                onClick={handleConfirmSaveToCloud}
+              >
+                Guardar
+              </button>
             </div>
           </div>
         </div>
@@ -3441,6 +3770,7 @@ function App() {
               
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Teclado</h3>
               <ul style={{ listStyle: 'none', padding: 0 }}>
+                <li>• <strong>Cmd/Ctrl+S</strong> - Guardar proyecto localmente</li>
                 <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead</li>
                 <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clip seleccionado</li>
                 <li>• <strong>Cmd/Ctrl+V</strong> - Pegar en playhead</li>
@@ -3449,6 +3779,14 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+A</strong> - Seleccionar todos los clips</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Shift+Z</strong> o <strong>Cmd/Ctrl+Y</strong> - Rehacer</li>
+              </ul>
+              
+              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Guardar y Abrir</h3>
+              <ul style={{ listStyle: 'none', padding: 0 }}>
+                <li>• <strong>☁️ Guardar</strong> - Guardar en la nube (requiere cuenta)</li>
+                <li>• <strong>💾 Guardar local</strong> - Guardar archivo .musicalia en tu compu</li>
+                <li>• <strong>📂 Abrir local</strong> - Abrir archivo .musicalia desde tu compu</li>
+                <li>• Los proyectos locales incluyen audio y stems sin rehacer separación</li>
               </ul>
               
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>

@@ -1542,9 +1542,9 @@
 }
 
 .practice-button.active {
-  background: var(--accent-dim);
+  background: var(--accent);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .isolate-button {

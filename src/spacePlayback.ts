@@ -36,11 +36,46 @@ export function modalHasTextField(root: ParentNode = document): boolean {
 
 export type SpacePlaybackDecision = 'toggle' | 'suppress' | 'ignore'
 
+export function pageHasPlaybackFocus(doc: {
+  hasFocus?: () => boolean
+  visibilityState?: string
+} | null | undefined): boolean {
+  if (!doc) return false
+  const focused = typeof doc.hasFocus === 'function' ? doc.hasFocus() : false
+  return focused && doc.visibilityState === 'visible'
+}
+
+const MEDIA_SESSION_ACTIONS = [
+  'play',
+  'pause',
+  'stop',
+  'seekbackward',
+  'seekforward',
+  'seekto',
+  'previoustrack',
+  'nexttrack'
+] as const
+
+/** Never register Media Session / hardware-key handlers. Null out any the browser may have set. */
+export function clearMediaSessionHandlers(
+  session: Pick<MediaSession, 'setActionHandler'> | null | undefined
+): void {
+  if (!session || typeof session.setActionHandler !== 'function') return
+  for (const action of MEDIA_SESSION_ACTIONS) {
+    try {
+      session.setActionHandler(action, null)
+    } catch {
+      // browser may reject unknown actions
+    }
+  }
+}
+
 export function spacePlaybackDecision(
   e: { code?: string; key?: string; repeat?: boolean; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; target?: EventTarget | null },
-  options?: { modalHasTextField?: boolean }
+  options?: { modalHasTextField?: boolean; pageHasFocus?: boolean }
 ): SpacePlaybackDecision {
   if (!isSpaceKey(e)) return 'ignore'
+  if (options?.pageHasFocus === false) return 'ignore'
   if (e.metaKey || e.ctrlKey || e.altKey) return 'ignore'
   if (isTypingTarget(e.target ?? null)) return 'ignore'
   if (e.repeat) return 'suppress'

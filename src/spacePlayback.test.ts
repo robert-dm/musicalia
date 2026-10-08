@@ -1,7 +1,9 @@
 import {
+  clearMediaSessionHandlers,
   isSpaceKey,
   isTypingTarget,
   modalHasTextField,
+  pageHasPlaybackFocus,
   spacePlaybackDecision,
   spaceToggleAction
 } from './spacePlayback'
@@ -20,14 +22,41 @@ assert(isSpaceKey({ code: 'Space', key: ' ' }), 'code Space')
 assert(isSpaceKey({ key: 'Spacebar' }), 'legacy Spacebar')
 assert(!isSpaceKey({ code: 'Enter', key: 'Enter' }), 'Enter is not Space')
 
-assert(spacePlaybackDecision({ code: 'Space', key: ' ' }) === 'toggle', 'plain Space toggles')
-assert(spacePlaybackDecision({ code: 'Space', key: ' ', repeat: true }) === 'suppress', 'key repeat is ignored')
-assert(spacePlaybackDecision({ code: 'Space', key: ' ', metaKey: true }) === 'ignore', 'Meta+Space is ignored')
-assert(spacePlaybackDecision({ code: 'Space', key: ' ', ctrlKey: true }) === 'ignore', 'Ctrl+Space is ignored')
+assert(spacePlaybackDecision({ code: 'Space', key: ' ' }, { pageHasFocus: true }) === 'toggle', 'plain Space toggles')
+assert(spacePlaybackDecision({ code: 'Space', key: ' ', repeat: true }, { pageHasFocus: true }) === 'suppress', 'key repeat is ignored')
+assert(spacePlaybackDecision({ code: 'Space', key: ' ', metaKey: true }, { pageHasFocus: true }) === 'ignore', 'Meta+Space is ignored')
+assert(spacePlaybackDecision({ code: 'Space', key: ' ', ctrlKey: true }, { pageHasFocus: true }) === 'ignore', 'Ctrl+Space is ignored')
 assert(
-  spacePlaybackDecision({ code: 'Space', key: ' ' }, { modalHasTextField: true }) === 'suppress',
+  spacePlaybackDecision({ code: 'Space', key: ' ' }, { modalHasTextField: true, pageHasFocus: true }) === 'suppress',
   'modal with a text field suppresses Space'
 )
+assert(
+  spacePlaybackDecision({ code: 'Space', key: ' ' }, { pageHasFocus: false }) === 'ignore',
+  'Space is ignored when the page is not focused'
+)
+assert(
+  pageHasPlaybackFocus({ hasFocus: () => true, visibilityState: 'visible' }),
+  'visible focused document can toggle'
+)
+assert(
+  !pageHasPlaybackFocus({ hasFocus: () => false, visibilityState: 'visible' }),
+  'unfocused tab cannot toggle'
+)
+assert(
+  !pageHasPlaybackFocus({ hasFocus: () => true, visibilityState: 'hidden' }),
+  'hidden tab cannot toggle'
+)
+assert(!pageHasPlaybackFocus(null), 'missing document cannot toggle')
+
+const sessionCalls: Array<[string, null]> = []
+clearMediaSessionHandlers({
+  setActionHandler(action: string, handler: null) {
+    sessionCalls.push([action, handler])
+  }
+})
+assert(sessionCalls.some(([action, handler]) => action === 'play' && handler === null), 'clears Media Session play')
+assert(sessionCalls.some(([action, handler]) => action === 'pause' && handler === null), 'clears Media Session pause')
+assert(sessionCalls.every(([, handler]) => handler === null), 'never registers a Media Session handler')
 
 assert(spaceToggleAction(true, true) === 'stop-record', 'Space stops recording first')
 assert(spaceToggleAction(false, true) === 'pause', 'Space pauses when transport is running')
@@ -44,7 +73,7 @@ assert(isTypingTarget(select), 'select is a typing target')
 assert(isTypingTarget(editable), 'contenteditable is a typing target')
 assert(!isTypingTarget(button), 'button is not a typing target')
 assert(
-  spacePlaybackDecision({ code: 'Space', key: ' ', target: input }) === 'ignore',
+  spacePlaybackDecision({ code: 'Space', key: ' ', target: input }, { pageHasFocus: true }) === 'ignore',
   'Space in an input is ignored'
 )
 

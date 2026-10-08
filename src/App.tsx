@@ -69,8 +69,10 @@ import {
   type PcmCapture
 } from './audioRecord'
 import {
+  clearMediaSessionHandlers,
   isSpaceKey,
   modalHasTextField,
+  pageHasPlaybackFocus,
   spacePlaybackDecision,
   spaceToggleAction
 } from './spacePlayback'
@@ -2746,9 +2748,14 @@ function App() {
   }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm])
 
   useEffect(() => {
+    const mediaSession = typeof navigator !== 'undefined' ? navigator.mediaSession : null
+    clearMediaSessionHandlers(mediaSession)
     const onSpace = (e: KeyboardEvent) => {
       if (!isSpaceKey(e)) return
-      const decision = spacePlaybackDecision(e, { modalHasTextField: modalHasTextField() })
+      const decision = spacePlaybackDecision(e, {
+        modalHasTextField: modalHasTextField(document),
+        pageHasFocus: pageHasPlaybackFocus(document)
+      })
       if (decision === 'ignore') return
       e.preventDefault()
       if (typeof e.stopPropagation === 'function') e.stopPropagation()
@@ -2767,13 +2774,13 @@ function App() {
       const button = target.closest('button')
       if (button instanceof HTMLButtonElement) button.blur()
     }
-    window.addEventListener('keydown', onSpace, true)
-    window.addEventListener('keyup', onSpace, true)
-    window.addEventListener('mouseup', blurButtons, true)
+    document.addEventListener('keydown', onSpace, true)
+    document.addEventListener('keyup', onSpace, true)
+    document.addEventListener('mouseup', blurButtons, true)
     return () => {
-      window.removeEventListener('keydown', onSpace, true)
-      window.removeEventListener('keyup', onSpace, true)
-      window.removeEventListener('mouseup', blurButtons, true)
+      document.removeEventListener('keydown', onSpace, true)
+      document.removeEventListener('keyup', onSpace, true)
+      document.removeEventListener('mouseup', blurButtons, true)
     }
   }, [])
 
@@ -4443,7 +4450,7 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+A</strong> - Seleccionar todos los clips</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Shift+Z</strong> o <strong>Cmd/Ctrl+Y</strong> - Rehacer</li>
-                <li>• <strong>Espacio</strong> - Play/Pausa. No hace nada si estás escribiendo en un campo</li>
+                <li>• <strong>Espacio</strong> - Play/Pausa solo con esta pestaña enfocada. No hace nada si estás escribiendo en un campo</li>
               </ul>
               
               <h3>Guardar y Abrir</h3>
@@ -4455,7 +4462,7 @@ function App() {
               
               <h3>Transporte</h3>
               <ul>
-                <li>• <strong>Espacio</strong> - Play/Pausa (el playhead se queda donde paró; la próxima vez sigue desde ahí o desde donde hiciste click). Si hay una grabación en curso, la detiene. No desplaza la página ni activa el botón enfocado</li>
+                <li>• <strong>Espacio</strong> - Play/Pausa solo mientras Musicalia está enfocada y visible (no desde otras pestañas, apps ni teclas de media). El playhead se queda donde paró; la próxima vez sigue desde ahí o desde donde hiciste click. Si hay una grabación en curso, la detiene. No desplaza la página ni activa el botón enfocado</li>
                 <li>• <strong>Click en timeline, regla o clip</strong> - Mover playhead (siempre visible, también en pausa)</li>
                 <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
                 <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>

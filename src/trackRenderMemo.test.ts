@@ -47,6 +47,14 @@ assert(
   !trackHeaderDataEqual(headerA, { ...headerA, recordArmed: true }),
   'record-arm change re-renders that header'
 )
+assert(
+  !trackHeaderDataEqual(headerA, { ...headerA, fxOpen: true }),
+  'FX panel open re-renders that header'
+)
+assert(
+  !trackHeaderDataEqual(headerA, { ...headerA, autoOpen: true }),
+  'automation open re-renders that header'
+)
 
 const clips = [{ id: 'c1' }]
 const selected = new Set(['c1'])

@@ -9,6 +9,8 @@ export interface TrackHeaderDataProps {
   isRenaming: boolean
   renameDraft: string
   recordArmed?: boolean
+  fxOpen?: boolean
+  autoOpen?: boolean
 }
 
 export interface TrackLaneDataProps {
@@ -40,6 +42,8 @@ export function trackHeaderDataEqual(prev: TrackHeaderDataProps, next: TrackHead
     prev.canDelete === next.canDelete &&
     prev.isRenaming === next.isRenaming &&
     prev.recordArmed === next.recordArmed &&
+    prev.fxOpen === next.fxOpen &&
+    prev.autoOpen === next.autoOpen &&
     (!next.isRenaming || prev.renameDraft === next.renameDraft)
   )
 }

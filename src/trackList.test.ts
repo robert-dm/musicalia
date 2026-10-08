@@ -1,3 +1,4 @@
+import { newLaneJoinsSolo } from './practiceMode'
 import {
   appendEmptyTrack,
   createEmptyTrack,
@@ -33,6 +34,19 @@ assert(ten.length === 10 && ten[9].name === 'Pista 10', 'append adds Pista 10')
 
 const created = createEmptyTrack('Pista 9')
 assert(created.volume === 0.8 && created.solo === false && created.clips.length === 0, 'factory volume/mute/empty lane')
+
+const afterStems = [
+  { solo: false },
+  { solo: true },
+  { solo: false },
+  { solo: false }
+]
+assert(newLaneJoinsSolo(afterStems), 'Aislar/solo after stems: added track must join or stay silent')
+const joined = appendEmptyTrack(
+  afterStems.map((t, i) => ({ ...createEmptyTrack(`Pista ${i + 1}`), ...t })),
+  (name) => ({ ...createEmptyTrack(name), solo: newLaneJoinsSolo(afterStems) })
+)
+assert(joined[joined.length - 1].solo === true, 'appended lane is soloed so it can be heard')
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

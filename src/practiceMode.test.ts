@@ -1,4 +1,11 @@
-import { resolvePracticeTrack, toggleAislar, togglePractice } from './practiceMode'
+import {
+  AISLAR_BUTTON_TITLE,
+  AISLAR_TRANSPORT_TITLE,
+  newLaneJoinsSolo,
+  resolvePracticeTrack,
+  toggleAislar,
+  togglePractice
+} from './practiceMode'
 
 let failed = 0
 function assert(cond: boolean, msg: string) {
@@ -32,6 +39,15 @@ assert(!iso.tracks[2].mute && iso.practiceIndex === null, 'aislar unmutes the st
 
 const isoOff = toggleAislar(iso.tracks, 2)
 assert(!isoOff.tracks[2].solo, 'second aislar clears solo')
+
+const withNewLane = [...iso.tracks, { mute: false, solo: true }]
+const exitGroup = toggleAislar(withNewLane, 2)
+assert(exitGroup.tracks.every((t) => !t.solo), 'Aislar off after play-along lane hears all tracks')
+
+assert(!newLaneJoinsSolo(tracks), 'no solo: new lane stays unsoloed')
+assert(newLaneJoinsSolo(iso.tracks), 'after Aislar, new lane must join solo or it is silent')
+assert(AISLAR_BUTTON_TITLE.includes('Mute') && AISLAR_BUTTON_TITLE.includes('Solo'), 'Aislar tooltip contrasts Mute/Solo')
+assert(AISLAR_TRANSPORT_TITLE.includes('Mute') && AISLAR_TRANSPORT_TITLE.includes('Solo'), 'transport Aislar explains vs Mute/Solo')
 
 assert(resolvePracticeTrack(2, 0, 4) === 2, 'selected track wins')
 assert(resolvePracticeTrack(null, 1, 4) === 1, 'armed track if none selected')

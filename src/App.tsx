@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react'
+import { flushSync } from 'react-dom'
 import * as Tone from 'tone'
 import JSZip from 'jszip'
 import './App.css'
@@ -51,6 +52,22 @@ import {
   trackIndexFromPoint
 } from './audioImport'
 import {
+  armedIndexAfterDelete,
+  compensatedRecordOffset,
+  drawRecordingPeaks,
+  listAudioInputDevices,
+  micErrorMessage,
+  nextGrabacionName,
+  pcmChunksToAudioBuffer,
+  persistMicDeviceId,
+  readStoredMicDeviceId,
+  recordLatencySeconds,
+  requestMicStream,
+  resolveRecordTrack,
+  startPcmCapture,
+  type PcmCapture
+} from './audioRecord'
+import {
   ContextMenuItem,
   IconCircleHelp,
   IconClipboardPaste,
@@ -69,6 +86,7 @@ import {
   IconPencil,
   IconPlay,
   IconPlus,
+  IconRecord,
   IconRepeat,
   IconSave,
   IconScissors,
@@ -135,6 +153,12 @@ interface TrackState {
 function App() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordingTrackIndex, setRecordingTrackIndex] = useState<number | null>(null)
+  const [recordArmedIndex, setRecordArmedIndex] = useState<number | null>(null)
+  const [recordLayoutTick, setRecordLayoutTick] = useState(0)
+  const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([])
+  const [micDeviceId, setMicDeviceId] = useState<string | null>(() => readStoredMicDeviceId())
   const [bpm, setBpm] = useState(120)
   const [metronomeEnabled, setMetronomeEnabled] = useState(true)
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
@@ -201,6 +225,19 @@ function App() {
   const importUndoSavedRef = useRef(false)
   const fileDragDepthRef = useRef(0)
   const highlightedDropTrackRef = useRef<number | null>(null)
+  const recordLiveRef = useRef<{
+    trackIndex: number
+    startOffset: number
+    capture: PcmCapture
+    stream: MediaStream
+    el: HTMLElement | null
+    canvas: HTMLCanvasElement | null
+    startedPlayback: boolean
+  } | null>(null)
+  const recordElapsedRef = useRef<HTMLSpanElement>(null)
+  const isRecordingRef = useRef(false)
+  const lastRecordLayoutRef = useRef(0)
+  const stopRecordingRef = useRef<(opts?: { then?: 'stop' | 'pause' | 'keep'; commit?: boolean }) => Promise<void>>(async () => {})
   const metronomePlayerRef = useRef<Tone.Player | null>(null)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() =>
     initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] }))
@@ -301,6 +338,9 @@ function App() {
   }
 
   const handleUndo = () => {
+    if (isRecordingRef.current) {
+      void stopRecordingRef.current({ then: 'keep', commit: false })
+    }
     if (undoStack.length === 0) return
     const currentState = {
       trackStates: JSON.parse(JSON.stringify(trackStates.map(t => ({
@@ -326,6 +366,9 @@ function App() {
   }
 
   const handleRedo = () => {
+    if (isRecordingRef.current) {
+      void stopRecordingRef.current({ then: 'keep', commit: false })
+    }
     if (redoStack.length === 0) return
     const currentState = {
       trackStates: JSON.parse(JSON.stringify(trackStates.map(t => ({
@@ -1321,7 +1364,7 @@ function App() {
 
   const getMaxDuration = (): number => {
     let maxDuration = 0
-    trackStates.forEach(track => {
+    trackStatesRef.current.forEach(track => {
       track.clips.forEach(clip => {
         const clipEnd = clip.offsetSeconds + clip.duration
         maxDuration = Math.max(maxDuration, clipEnd)
@@ -1330,7 +1373,14 @@ function App() {
     return maxDuration > 0 ? maxDuration : 0
   }
 
-  const getLayoutMax = (): number => getMaxDuration() || 100
+  const getLayoutMax = (): number => {
+    const clipMax = getMaxDuration()
+    const live = recordLiveRef.current
+    if (!live) return clipMax > 0 ? clipMax : 100
+    const elapsed = Math.max(0, playheadPositionRef.current - live.startOffset)
+    const liveEnd = live.startOffset + elapsed + 12
+    return Math.max(clipMax, liveEnd, 100)
+  }
 
   const syncPlayheadDom = (seconds: number) => {
     playheadPositionRef.current = seconds
@@ -1352,7 +1402,7 @@ function App() {
   useLayoutEffect(() => {
     timelineMaxRef.current = getLayoutMax()
     syncPlayheadDom(playheadPositionRef.current)
-  }, [trackStates, horizontalZoom])
+  }, [trackStates, horizontalZoom, isRecording, recordLayoutTick, recordingTrackIndex])
 
   useLayoutEffect(() => {
     syncPlayheadDom(playheadPosition)
@@ -1371,6 +1421,42 @@ function App() {
       )
     })
   }, [trackStates])
+
+  const bindRecordingPreview = (trackIndex: number) => {
+    const el = document.querySelector(
+      `.track-content[data-track-index="${trackIndex}"] [data-recording-clip]`
+    ) as HTMLElement | null
+    const canvas = el?.querySelector('canvas') as HTMLCanvasElement | null
+    return { el, canvas }
+  }
+
+  const updateRecordingPreview = (currentTime: number) => {
+    const live = recordLiveRef.current
+    if (!live) return
+    const elapsed = Math.max(0, currentTime - live.startOffset)
+    if (recordElapsedRef.current) {
+      recordElapsedRef.current.textContent = formatTime(elapsed)
+    }
+    const needed = Math.max(timelineMaxRef.current, live.startOffset + elapsed + 12, 100)
+    if (needed > timelineMaxRef.current + 2) {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      if (now - lastRecordLayoutRef.current > 400) {
+        lastRecordLayoutRef.current = now
+        setRecordLayoutTick((tick) => tick + 1)
+      }
+    }
+    const layoutMax = timelineMaxRef.current || 100
+    if (live.el) {
+      live.el.style.left = `${(live.startOffset / layoutMax) * 100}%`
+      live.el.style.width = `${(Math.max(0.05, elapsed) / layoutMax) * 100}%`
+    }
+    if (live.canvas && live.capture.peaks.length) {
+      const width = Math.max(40, Math.floor(live.el?.getBoundingClientRect().width || 40))
+      if (live.canvas.width !== width) live.canvas.width = width
+      if (live.canvas.height !== 64) live.canvas.height = 64
+      drawRecordingPeaks(live.canvas, live.capture.peaks)
+    }
+  }
 
   const handlePlay = async () => {
     await Tone.start()
@@ -1420,7 +1506,11 @@ function App() {
     
     const maxDuration = getMaxDuration()
     
-    const updatedStates = trackStates.map(track => {
+    const skipRecordTrack = recordLiveRef.current?.trackIndex
+    const updatedStates = trackStatesRef.current.map((track, trackIndex) => {
+      if (trackIndex === skipRecordTrack) {
+        return { ...track, clips: track.clips.map(clip => ({ ...clip, isPlaying: false })) }
+      }
       const updatedClips = track.clips.map(clip => {
         if (!clip.isPlaying && startTime < clip.offsetSeconds + clip.duration) {
           clip.player.loop = false
@@ -1495,7 +1585,7 @@ function App() {
               })
             })
           }
-        } else if (!isLoopEnabled && maxDuration > 0 && currentTime >= maxDuration) {
+        } else if (!isLoopEnabled && !recordLiveRef.current && maxDuration > 0 && currentTime >= maxDuration) {
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
             track.clips.forEach(clip => {
@@ -1510,6 +1600,7 @@ function App() {
         
         lastLoopCheck = currentTime
         syncPlayheadDom(currentTime)
+        updateRecordingPreview(currentTime)
         playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
       }
     }
@@ -1517,6 +1608,10 @@ function App() {
   }
 
   const handlePause = () => {
+    if (isRecordingRef.current) {
+      void stopRecording({ then: 'pause' })
+      return
+    }
     Tone.getTransport().pause()
     
     if (playheadAnimationRef.current !== null) {
@@ -1541,6 +1636,10 @@ function App() {
   }
 
   const handleStop = () => {
+    if (isRecordingRef.current) {
+      void stopRecording({ then: 'stop' })
+      return
+    }
     // Capture current position before stopping
     const currentPosition = Tone.getTransport().seconds
     
@@ -1576,6 +1675,194 @@ function App() {
       Tone.getTransport().seconds = 0
     }
   }
+
+  const stopRecording = async (opts?: { then?: 'stop' | 'pause' | 'keep'; commit?: boolean }) => {
+    const live = recordLiveRef.current
+    if (!live) return
+    isRecordingRef.current = false
+    setIsRecording(false)
+    setRecordingTrackIndex(null)
+    const after = opts?.then ?? 'stop'
+    const commit = opts?.commit !== false
+    let captured: { chunks: Float32Array[][]; sampleRate: number } | null = null
+    try {
+      captured = live.capture.stop()
+    } catch (err) {
+      console.error('record stop failed', err)
+    }
+    live.stream.getTracks().forEach((track) => track.stop())
+    recordLiveRef.current = null
+    if (recordElapsedRef.current) recordElapsedRef.current.textContent = ''
+
+    const ctx = Tone.getContext().rawContext as AudioContext
+    if (commit && captured && captured.chunks.length > 0) {
+      try {
+        const buffer = pcmChunksToAudioBuffer(ctx, captured.chunks, captured.sampleRate)
+        if (buffer.duration >= 0.05) {
+          await ensureAudio()
+          ensureTrackGains(trackStatesRef.current.length)
+          const latency = recordLatencySeconds(ctx)
+          const offset = compensatedRecordOffset(live.startOffset, latency)
+          const player = new Tone.Player()
+          player.loop = false
+          player.buffer = new Tone.ToneAudioBuffer(buffer)
+          const gain = trackGainsRef.current[live.trackIndex]
+          if (gain) player.connect(gain)
+          const newClip: Clip = {
+            player,
+            fileName: 'Grabación',
+            isPlaying: false,
+            buffer,
+            startPosition: 0,
+            offsetSeconds: offset,
+            id: `clip-${Date.now()}-${Math.random()}`,
+            sourceStart: 0,
+            duration: buffer.duration
+          }
+          const next = [...trackStatesRef.current]
+          if (next[live.trackIndex]) {
+            next[live.trackIndex] = {
+              ...next[live.trackIndex],
+              clips: [...next[live.trackIndex].clips, newClip]
+            }
+            trackStatesRef.current = next
+            setTrackStates(next)
+            showClipToast('Grabación lista')
+          }
+        } else {
+          setErrorMessage('Grabación demasiado corta')
+          setTimeout(() => setErrorMessage(null), 3000)
+        }
+      } catch (err) {
+        console.error(err)
+        setErrorMessage('No se pudo procesar la grabación')
+        setTimeout(() => setErrorMessage(null), 4000)
+      }
+    }
+
+    if (after === 'pause') handlePause()
+    else if (after === 'stop') handleStop()
+  }
+  stopRecordingRef.current = stopRecording
+
+  const handleRecordArm = (trackIndex: number) => {
+    setRecordArmedIndex((prev) => (prev === trackIndex ? null : trackIndex))
+  }
+
+  const handleMicDeviceChange = (deviceId: string) => {
+    setMicDeviceId(deviceId)
+    persistMicDeviceId(deviceId)
+  }
+
+  const handleRecord = async () => {
+    if (isRecordingRef.current) {
+      await stopRecording({ then: 'stop' })
+      return
+    }
+    await ensureAudio()
+    const tracks = trackStatesRef.current
+    const placement = resolveRecordTrack(recordArmedIndex, selectedTrack, tracks.length)
+    let trackIndex = placement.trackIndex
+    let stream: MediaStream
+    try {
+      stream = await requestMicStream(micDeviceId)
+    } catch (err) {
+      setErrorMessage(micErrorMessage(err))
+      setTimeout(() => setErrorMessage(null), 4000)
+      return
+    }
+    try {
+      const devices = await listAudioInputDevices()
+      setAudioInputs(devices)
+      const selected = stream.getAudioTracks()[0]?.getSettings().deviceId
+      if (typeof selected === 'string' && selected.length > 0 && selected !== micDeviceId) {
+        setMicDeviceId(selected)
+        persistMicDeviceId(selected)
+      }
+    } catch {
+      // ignore enumerate failures
+    }
+
+    saveUndo()
+    let nextTracks = tracks
+    if (placement.createNew) {
+      const name = nextGrabacionName(tracks.map((t) => t.name), tracks.length)
+      nextTracks = [...tracks, { ...createEmptyTrack(name), clips: [] as Clip[] }]
+      ensureTrackGains(nextTracks.length)
+      trackIndex = nextTracks.length - 1
+      trackStatesRef.current = nextTracks
+    }
+
+    const startOffset = playheadPositionRef.current
+    const ctx = Tone.getContext().rawContext as AudioContext
+    let capture: PcmCapture
+    try {
+      capture = startPcmCapture(ctx, stream)
+    } catch (err) {
+      stream.getTracks().forEach((track) => track.stop())
+      setErrorMessage(micErrorMessage(err))
+      setTimeout(() => setErrorMessage(null), 4000)
+      return
+    }
+
+    recordLiveRef.current = {
+      trackIndex,
+      startOffset,
+      capture,
+      stream,
+      el: null,
+      canvas: null,
+      startedPlayback: Tone.getTransport().state !== 'started'
+    }
+    isRecordingRef.current = true
+    flushSync(() => {
+      if (placement.createNew) {
+        setTrackStates(nextTracks)
+        setRecordArmedIndex(trackIndex)
+        setSelectedTrack(trackIndex)
+      }
+      setRecordingTrackIndex(trackIndex)
+      setIsRecording(true)
+    })
+    const preview = bindRecordingPreview(trackIndex)
+    if (recordLiveRef.current) {
+      recordLiveRef.current.el = preview.el
+      recordLiveRef.current.canvas = preview.canvas
+    }
+
+    if (Tone.getTransport().state !== 'started') {
+      await handlePlay()
+    } else {
+      const armed = trackStatesRef.current[trackIndex]
+      armed?.clips.forEach((clip) => {
+        if (clip.player.state === 'started') clip.player.stop()
+        clip.isPlaying = false
+      })
+    }
+  }
+
+  useLayoutEffect(() => {
+    const live = recordLiveRef.current
+    if (!live || !isRecording) return
+    if (!live.el || !live.el.isConnected) {
+      const preview = bindRecordingPreview(live.trackIndex)
+      live.el = preview.el
+      live.canvas = preview.canvas
+    }
+  }, [isRecording, recordingTrackIndex, trackStates])
+
+  useEffect(() => {
+    const refreshInputs = () => {
+      void listAudioInputDevices()
+        .then(setAudioInputs)
+        .catch(() => {})
+    }
+    refreshInputs()
+    const media = navigator.mediaDevices
+    if (!media?.addEventListener) return
+    media.addEventListener('devicechange', refreshInputs)
+    return () => media.removeEventListener('devicechange', refreshInputs)
+  }, [])
 
   const handleSplitClip = async (trackIndex: number) => {
     const track = trackStates[trackIndex]
@@ -2358,7 +2645,7 @@ function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return
       
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
       const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey
@@ -2431,6 +2718,15 @@ function App() {
         e.preventDefault()
         const allClipIds = new Set(trackStates.flatMap(t => t.clips.map(c => c.id)))
         setSelectedClipIds(allClipIds)
+      } else if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault()
+        if (isRecordingRef.current) {
+          void stopRecordingRef.current({ then: 'stop' })
+        } else if (Tone.getTransport().state === 'started') {
+          handlePause()
+        } else {
+          void handlePlay()
+        }
       }
     }
     
@@ -2890,6 +3186,12 @@ function App() {
       return
     }
     saveUndo()
+    const recordingThis = recordLiveRef.current?.trackIndex === trackIndex
+    if (recordingThis) {
+      void stopRecordingRef.current({ then: 'keep', commit: false })
+    } else if (recordLiveRef.current && recordLiveRef.current.trackIndex > trackIndex) {
+      recordLiveRef.current.trackIndex -= 1
+    }
     const removed = trackStates[trackIndex]
     removed.clips.forEach(clip => {
       if (clip.isPlaying || clip.player.state === 'started') {
@@ -2902,6 +3204,11 @@ function App() {
     setSelectedClipIds(planned.selectedIds)
     if (selectedTrack === trackIndex) setSelectedTrack(null)
     else if (selectedTrack !== null && selectedTrack > trackIndex) setSelectedTrack(selectedTrack - 1)
+    setRecordArmedIndex((prev) => armedIndexAfterDelete(prev, trackIndex))
+    if (recordingTrackIndex != null) {
+      if (recordingThis) setRecordingTrackIndex(null)
+      else if (recordingTrackIndex > trackIndex) setRecordingTrackIndex(recordingTrackIndex - 1)
+    }
     setTrackDeleteConfirm(null)
     showClipToast('Pista eliminada')
   }
@@ -3456,7 +3763,7 @@ function App() {
           <button
             className={`transport-button icon-btn play-btn ${isPlaying ? 'active' : ''}`}
             onClick={handlePlay}
-            disabled={isPlaying}
+            disabled={isPlaying || isRecording}
             title="Reproducir"
             aria-label="Reproducir"
           >
@@ -3465,7 +3772,7 @@ function App() {
           <button
             className="transport-button icon-btn"
             onClick={handlePause}
-            disabled={!isPlaying}
+            disabled={!isPlaying && !isRecording}
             title="Pausar"
             aria-label="Pausar"
           >
@@ -3474,12 +3781,44 @@ function App() {
           <button
             className="transport-button icon-btn"
             onClick={handleStop}
-            disabled={!isPlaying && !isPaused}
+            disabled={!isPlaying && !isPaused && !isRecording}
             title="Detener"
             aria-label="Detener"
           >
             <IconStop size={13} />
           </button>
+          <button
+            className={`transport-button icon-btn record-btn ${isRecording ? 'active' : ''}`}
+            data-testid="record-button"
+            onClick={() => { void handleRecord() }}
+            title={isRecording ? 'Detener grabación' : 'Grabar'}
+            aria-label="Grabar"
+            aria-pressed={isRecording}
+          >
+            <IconRecord size={14} />
+          </button>
+          {audioInputs.length > 1 && (
+            <select
+              className="mic-select"
+              data-testid="mic-select"
+              value={
+                audioInputs.some((device) => device.deviceId === micDeviceId)
+                  ? micDeviceId ?? ''
+                  : (audioInputs[0]?.deviceId ?? '')
+              }
+              onChange={(e) => handleMicDeviceChange(e.target.value)}
+              title="Entrada de audio"
+              aria-label="Entrada de audio"
+              disabled={isRecording}
+            >
+              {audioInputs.map((device, index) => (
+                <option key={device.deviceId || String(index)} value={device.deviceId}>
+                  {device.label || `Micrófono ${index + 1}`}
+                </option>
+              ))}
+            </select>
+          )}
+          <span className="record-elapsed" ref={recordElapsedRef} data-testid="record-elapsed" />
           <button
             className={`transport-button toggle-btn ${metronomeEnabled ? 'active' : ''}`}
             onClick={() => setMetronomeEnabled(!metronomeEnabled)}
@@ -3798,6 +4137,8 @@ function App() {
                 onSolo={handleSoloToggle}
                 onVolumeLive={handleVolumeLive}
                 onVolumeCommit={handleVolumeCommit}
+                recordArmed={recordArmedIndex === trackIndex}
+                onRecordArm={handleRecordArm}
               />
             ))}
           </div>
@@ -3867,7 +4208,7 @@ function App() {
             {rulerBars}
           </div>
           {(() => {
-            const maxDur = getMaxDuration() || 100
+            const maxDur = getLayoutMax()
             return trackStates.map((trackState, trackIndex) => (
             <TrackLane
               key={trackIndex}
@@ -3894,6 +4235,12 @@ function App() {
               onClipClick={handleClipClick}
               onResizeStart={handleResizeStart}
               onClipDragStart={handleClipDragStart}
+              isRecordingLane={isRecording && recordingTrackIndex === trackIndex}
+              recordingStartOffset={
+                recordingTrackIndex === trackIndex
+                  ? (recordLiveRef.current?.startOffset ?? playheadPositionRef.current)
+                  : 0
+              }
             />
             ))
           })()}
@@ -4027,6 +4374,15 @@ function App() {
                 <li>• <strong>+ Agregar pista</strong> - Añade una pista vacía al final (Pista 9, 10, …). También en una pista vacía o zona vacía (clic derecho). Se puede deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
+                <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
+              </ul>
+
+              <h3>Grabación</h3>
+              <ul>
+                <li>• <strong>Grabar</strong> (punto rojo) - Graba el micrófono desde el playhead. Si no hay pista armada, usa la seleccionada o crea «Grabación N»</li>
+                <li>• <strong>Overdub</strong> - Mientras grabás se reproducen las demás pistas. La cuenta del metrónomo se respeta si está activa y el playhead está en esos compases</li>
+                <li>• <strong>Grabar de nuevo, Stop o Espacio</strong> - Termina la toma y deja un clip (un deshacer la saca)</li>
+                <li>• <strong>Entrada de audio</strong> - Si hay más de un micrófono, elige cuál usar (se recuerda)</li>
               </ul>
               
               <h3>Teclado</h3>
@@ -4054,7 +4410,7 @@ function App() {
               
               <h3>Transporte</h3>
               <ul>
-                <li>• <strong>Espacio</strong> - Reproducir/Pausar</li>
+                <li>• <strong>Espacio</strong> - Reproducir/Pausar. Durante una grabación, la detiene</li>
                 <li>• <strong>Click en timeline, regla o clip</strong> - Mover playhead (siempre visible, también en pausa)</li>
                 <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
                 <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>

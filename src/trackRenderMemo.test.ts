@@ -19,7 +19,8 @@ const headerA = {
   height: 88,
   canDelete: true,
   isRenaming: false,
-  renameDraft: ''
+  renameDraft: '',
+  recordArmed: false
 }
 
 assert(trackHeaderDataEqual(headerA, { ...headerA }), 'identical header skips render')
@@ -41,6 +42,10 @@ assert(
 assert(
   trackHeaderDataEqual(headerA, { ...headerA, volume: 0.8 }),
   'other-track volume-identical header skips render'
+)
+assert(
+  !trackHeaderDataEqual(headerA, { ...headerA, recordArmed: true }),
+  'record-arm change re-renders that header'
 )
 
 const clips = [{ id: 'c1' }]
@@ -69,6 +74,10 @@ assert(
 assert(
   !trackLaneDataEqual(laneA, { ...laneA, clips: [{ id: 'c1' }] }),
   'new clips array re-renders that lane'
+)
+assert(
+  !trackLaneDataEqual(laneA, { ...laneA, isRecordingLane: true, recordingStartOffset: 1 }),
+  'recording overlay re-renders that lane'
 )
 
 const clipView = {

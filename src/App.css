@@ -819,6 +819,63 @@
   color: var(--accent-ink);
 }
 
+.record-arm-button.active {
+  background: #e23b3b;
+  border-color: #e23b3b;
+  color: #fff;
+}
+
+.transport-button.record-btn {
+  color: #e23b3b;
+}
+
+.transport-button.record-btn.active,
+.transport-button.record-btn:hover:not(:disabled) {
+  background: #e23b3b;
+  color: #fff;
+}
+
+.record-elapsed {
+  min-width: 40px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #e23b3b;
+}
+
+.record-elapsed:empty {
+  display: none;
+}
+
+.mic-select {
+  height: 28px;
+  max-width: 140px;
+  padding: 0 6px;
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+}
+
+.recording-clip {
+  position: absolute;
+  top: 6%;
+  height: 88%;
+  background: rgba(226, 59, 59, 0.32);
+  border: 2px solid #e23b3b;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 6;
+  overflow: hidden;
+}
+
+.recording-clip canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 .volume-slider {
   flex: 1;
   margin: 0 2px 0 0;

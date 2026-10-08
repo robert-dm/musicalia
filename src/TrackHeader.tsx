@@ -2,7 +2,7 @@ import { memo, useRef } from 'react'
 import { LiveParamSlider } from './LiveParamSlider'
 import { resolveTrackName } from './clipSelection'
 import { trackHeaderDataEqual } from './trackRenderMemo'
-import { IconTrash } from './uiIcons'
+import { IconRecordArm, IconTrash } from './uiIcons'
 
 interface TrackHeaderProps {
   trackIndex: number
@@ -24,6 +24,8 @@ interface TrackHeaderProps {
   onSolo: (trackIndex: number) => void
   onVolumeLive: (trackIndex: number, volume: number) => void
   onVolumeCommit: (trackIndex: number, volume: number) => void
+  recordArmed?: boolean
+  onRecordArm: (trackIndex: number) => void
 }
 
 export const TrackHeader = memo(function TrackHeader({
@@ -45,7 +47,9 @@ export const TrackHeader = memo(function TrackHeader({
   onMute,
   onSolo,
   onVolumeLive,
-  onVolumeCommit
+  onVolumeCommit,
+  recordArmed = false,
+  onRecordArm
 }: TrackHeaderProps) {
   const renderCountRef = useRef(0)
   renderCountRef.current += 1
@@ -110,6 +114,17 @@ export const TrackHeader = memo(function TrackHeader({
         </button>
       </div>
       <div className="track-controls">
+        <button
+          type="button"
+          className={`control-button record-arm-button ${recordArmed ? 'active' : ''}`}
+          data-testid={`record-arm-${trackIndex}`}
+          onClick={() => onRecordArm(trackIndex)}
+          title={recordArmed ? 'Quitar rec-arm' : 'Armar pista para grabar'}
+          aria-label="Armar grabación"
+          aria-pressed={recordArmed}
+        >
+          <IconRecordArm size={12} />
+        </button>
         <button
           className={`control-button mute-button ${mute ? 'active' : ''}`}
           onClick={() => onMute(trackIndex)}

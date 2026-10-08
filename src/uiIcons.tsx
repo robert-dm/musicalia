@@ -134,6 +134,22 @@ export function IconStop(props: IconProps) {
   )
 }
 
+export function IconRecord(props: IconProps) {
+  return (
+    <Svg {...props} fill="currentColor" stroke="none">
+      <circle cx="12" cy="12" r="7" />
+    </Svg>
+  )
+}
+
+export function IconRecordArm(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="6" />
+    </Svg>
+  )
+}
+
 export function IconMetronome(props: IconProps) {
   return (
     <Svg {...props}>

@@ -8,6 +8,7 @@ export interface TrackHeaderDataProps {
   canDelete: boolean
   isRenaming: boolean
   renameDraft: string
+  recordArmed?: boolean
 }
 
 export interface TrackLaneDataProps {
@@ -24,6 +25,8 @@ export interface TrackLaneDataProps {
   loopEnd: number | null
   tempLoopStart: number | null
   tempLoopEnd: number | null
+  isRecordingLane?: boolean
+  recordingStartOffset?: number
 }
 
 export function trackHeaderDataEqual(prev: TrackHeaderDataProps, next: TrackHeaderDataProps): boolean {
@@ -36,6 +39,7 @@ export function trackHeaderDataEqual(prev: TrackHeaderDataProps, next: TrackHead
     prev.height === next.height &&
     prev.canDelete === next.canDelete &&
     prev.isRenaming === next.isRenaming &&
+    prev.recordArmed === next.recordArmed &&
     (!next.isRenaming || prev.renameDraft === next.renameDraft)
   )
 }
@@ -54,7 +58,9 @@ export function trackLaneDataEqual(prev: TrackLaneDataProps, next: TrackLaneData
     prev.loopStart === next.loopStart &&
     prev.loopEnd === next.loopEnd &&
     prev.tempLoopStart === next.tempLoopStart &&
-    prev.tempLoopEnd === next.tempLoopEnd
+    prev.tempLoopEnd === next.tempLoopEnd &&
+    prev.isRecordingLane === next.isRecordingLane &&
+    prev.recordingStartOffset === next.recordingStartOffset
   )
 }
 

@@ -35,6 +35,8 @@ interface TrackLaneProps {
   onClipClick: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
   onResizeStart: (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
   onClipDragStart: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
+  isRecordingLane?: boolean
+  recordingStartOffset?: number
 }
 
 interface LaneClipViewProps {
@@ -127,7 +129,9 @@ export const TrackLane = memo(function TrackLane({
   onLoopMouseUp,
   onClipClick,
   onResizeStart,
-  onClipDragStart
+  onClipDragStart,
+  isRecordingLane = false,
+  recordingStartOffset = 0
 }: TrackLaneProps) {
   const renderCountRef = useRef(0)
   renderCountRef.current += 1
@@ -200,6 +204,19 @@ export const TrackLane = memo(function TrackLane({
       ) : (
         <div className="empty-lane">
           <span className="import-hint">Doble clic o arrastrá un archivo de audio</span>
+        </div>
+      )}
+      {isRecordingLane && (
+        <div
+          className="recording-clip"
+          data-testid="recording-clip"
+          data-recording-clip="true"
+          style={{
+            left: `${(recordingStartOffset / Math.max(maxDur, 1e-6)) * 100}%`,
+            width: `${(0.08 / Math.max(maxDur, 1e-6)) * 100}%`
+          }}
+        >
+          <canvas />
         </div>
       )}
     </div>

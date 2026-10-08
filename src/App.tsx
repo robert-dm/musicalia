@@ -28,6 +28,14 @@ import { TrackLane } from './TrackLane'
 import { effectiveTrackGain, rampTrackGain } from './trackGain'
 import { clipBufferSignature } from './trackRenderMemo'
 import {
+  applyClipTrim,
+  applyTrimPreviewStyles,
+  deltaTimeFromLanePx,
+  trimStatesEqual,
+  type ClipTrimEdge,
+  type ClipTrimState
+} from './clipTrim'
+import {
   DEFAULT_TRACK_VOLUME,
   appendEmptyTrack,
   createEmptyTrack,
@@ -179,20 +187,12 @@ function App() {
   const [exportProgress, setExportProgress] = useState('')
   const [exportMixed, setExportMixed] = useState(false)
   const [exportIncludeCountIn, setExportIncludeCountIn] = useState(false)
-  const [isDraggingClip, setIsDraggingClip] = useState(false)
-  const [draggedClipTrack, setDraggedClipTrack] = useState<number | null>(null)
-  const [draggedClipId, setDraggedClipId] = useState<string | null>(null)
-  const [dragStartX, setDragStartX] = useState<number>(0)
-  const [dragStartPosition, setDragStartPosition] = useState<number>(0)
+  const isDraggingClipRef = useRef(false)
   const [clipboard, setClipboard] = useState<ClipboardClip[] | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const projectLoadGenRef = useRef<number>(0)
   const [selectedClipIds, setSelectedClipIds] = useState<Set<string>>(new Set())
-  const [resizingClip, setResizingClip] = useState<{trackIndex: number, clipId: string, edge: 'left' | 'right'} | null>(null)
-  const [resizeStartX, setResizeStartX] = useState<number>(0)
-  const [resizeStartValue, setResizeStartValue] = useState<number>(0)
   const [snapEnabled, setSnapEnabled] = useState(true)
-  const [dragStartY, setDragStartY] = useState<number>(0)
   const [undoStack, setUndoStack] = useState<any[]>([])
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
@@ -207,6 +207,21 @@ function App() {
   const renamingTrackRef = useRef<number | null>(null)
   const trackStatesRef = useRef(trackStates)
   trackStatesRef.current = trackStates
+  const selectedClipIdsRef = useRef(selectedClipIds)
+  selectedClipIdsRef.current = selectedClipIds
+  const appCommitCountRef = useRef(0)
+  appCommitCountRef.current += 1
+  const trimLiveRef = useRef<{
+    active: boolean
+    trackIndex: number
+    clipId: string
+    edge: ClipTrimEdge
+    startX: number
+    orig: ClipTrimState & { bufferDuration: number }
+    next: ClipTrimState
+    wrapper: HTMLElement | null
+    waveform: HTMLElement | null
+  } | null>(null)
   const lastClipBufferSigRef = useRef<string | null>(null)
   const sidebarScrollRef = useRef<HTMLDivElement>(null)
   const lanesScrollRef = useRef<HTMLDivElement>(null)
@@ -2132,57 +2147,307 @@ function App() {
         }
       }
     }
-    setIsDraggingClip(false)
-    setDraggedClipTrack(null)
-    setDraggedClipId(null)
+    isDraggingClipRef.current = false
   }
 
   const handleClipDragStart = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
     if (e.button !== 0) return
-    
-    if (!selectedClipIds.has(clipId)) {
-      const cmd = e.ctrlKey || e.metaKey
-      if (e.shiftKey || cmd) {
-        setSelectedClipIds(prev => new Set(prev).add(clipId))
-      } else {
-        setSelectedClipIds(new Set([clipId]))
-      }
-    }
-    
-    const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
+    if (trimLiveRef.current?.active) return
+
+    const tracks = trackStatesRef.current
+    const clip = tracks[trackIndex]?.clips.find(c => c.id === clipId)
     if (!clip) return
-    
-    setIsDraggingClip(true)
-    setDraggedClipTrack(trackIndex)
-    setDraggedClipId(clipId)
-    setDragStartX(e.clientX)
-    setDragStartY(e.clientY)
-    setDragStartPosition(clip.offsetSeconds)
+
+    let selected = selectedClipIdsRef.current
+    if (!selected.has(clipId)) {
+      const cmd = e.ctrlKey || e.metaKey
+      selected = (e.shiftKey || cmd) ? new Set(selected).add(clipId) : new Set([clipId])
+      setSelectedClipIds(selected)
+    }
+
+    const startX = e.clientX
+    const startY = e.clientY
+    const startOffset = clip.offsetSeconds
+    const startTrack = trackIndex
+    const startedWithAlt = e.altKey
+    const zoom = verticalZoom
+    const snapOn = snapEnabled
+
+    let minOffset = Infinity
+    let minTrack = Infinity
+    let maxTrack = -Infinity
+    tracks.forEach((track, ti) => {
+      track.clips.forEach(c => {
+        if (!selected.has(c.id)) return
+        minOffset = Math.min(minOffset, c.offsetSeconds)
+        minTrack = Math.min(minTrack, ti)
+        maxTrack = Math.max(maxTrack, ti)
+      })
+    })
+    if (minOffset === Infinity) minOffset = startOffset
+    if (minTrack === Infinity) minTrack = startTrack
+    if (maxTrack === -Infinity) maxTrack = startTrack
+
+    isDraggingClipRef.current = true
     dragLiveRef.current = {
-      tempOffset: clip.offsetSeconds,
-      tempTrack: trackIndex,
-      threshold: e.altKey,
+      tempOffset: startOffset,
+      tempTrack: startTrack,
+      threshold: startedWithAlt,
       distance: 0,
       timeDelta: 0,
       trackDelta: 0,
-      minOffset: clip.offsetSeconds,
-      minTrack: trackIndex,
-      maxTrack: trackIndex
+      minOffset,
+      minTrack,
+      maxTrack
     }
+
+    const clearGroupDragPreview = () => {
+      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
+        const el = node as HTMLElement
+        el.style.transform = ''
+        el.style.zIndex = ''
+        el.style.willChange = ''
+      })
+      document.querySelectorAll('.track-content').forEach(node => {
+        const el = node as HTMLElement
+        el.style.zIndex = ''
+        el.style.overflow = ''
+      })
+    }
+
+    const applyGroupDragPreview = (timeDelta: number, trackDelta: number) => {
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      const laneWidth = (lanes[0] as HTMLElement).getBoundingClientRect().width
+      const layoutMax = timelineMaxRef.current || 100
+      const trackHeight = 88 * zoom
+      const dx = (timeDelta / layoutMax) * laneWidth
+      const dy = trackDelta * trackHeight
+      const selectedTracks = new Set<number>()
+      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
+        const el = node as HTMLElement
+        const id = el.dataset.clipId
+        if (!id || !selected.has(id)) return
+        el.style.willChange = 'transform'
+        el.style.transform = `translate(${dx}px, ${dy}px)`
+        el.style.zIndex = '20'
+        const lane = el.closest('.track-content')
+        if (lane) {
+          const idx = Array.prototype.indexOf.call(lanes, lane)
+          if (idx >= 0) selectedTracks.add(idx)
+        }
+      })
+      lanes.forEach((node, i) => {
+        const el = node as HTMLElement
+        el.style.overflow = 'visible'
+        el.style.zIndex = selectedTracks.has(i) ? String(25 + i) : '1'
+      })
+    }
+
+    const onMove = (ev: MouseEvent) => {
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      const deltaX = ev.clientX - startX
+      const deltaY = ev.clientY - startY
+      const distance = Math.hypot(deltaX, deltaY)
+      const live = dragLiveRef.current
+      live.distance = distance
+      if (isClickGesture(distance)) return
+      if (live.threshold && distance < 5) return
+
+      const firstLane = lanes[0] as HTMLElement
+      const rect = firstLane.getBoundingClientRect()
+      const deltaTime = deltaTimeFromLanePx(deltaX, rect.width, timelineMaxRef.current || 100)
+      const rawOffset = startOffset + deltaTime
+      const newOffset = snapOn && !ev.shiftKey ? snapToGrid(rawOffset) : rawOffset
+      let timeDelta = clampGroupTimeDelta(live.minOffset, newOffset - startOffset)
+      const trackHeight = 88 * zoom
+      const rawTrackDelta = Math.round(deltaY / trackHeight)
+      const trackDelta = clampGroupTrackDelta(live.minTrack, live.maxTrack, rawTrackDelta, trackStatesRef.current.length)
+      live.tempOffset = startOffset + timeDelta
+      live.tempTrack = startTrack + trackDelta
+      live.timeDelta = timeDelta
+      live.trackDelta = trackDelta
+
+      if (dragRafRef.current == null) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = null
+          applyGroupDragPreview(dragLiveRef.current.timeDelta, dragLiveRef.current.trackDelta)
+        })
+      }
+    }
+
+    const onUp = (ev: MouseEvent) => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      if (dragRafRef.current != null) {
+        cancelAnimationFrame(dragRafRef.current)
+        dragRafRef.current = null
+      }
+      const live = dragLiveRef.current
+      isDraggingClipRef.current = false
+      if (isClickGesture(live.distance) || (live.threshold && live.distance < 5)) {
+        clearGroupDragPreview()
+        const lane = (ev.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
+          ?? (document.querySelector('.track-content') as HTMLElement | null)
+        if (lane && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey && isClickGesture(live.distance)) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(ev.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, false)
+        }
+        return
+      }
+
+      const timeDelta = live.timeDelta
+      const trackDelta = live.trackDelta
+      const currentTracks = trackStatesRef.current
+      saveUndo()
+
+      let working = currentTracks
+      let workingSelected = selected
+      if (startedWithAlt && live.distance >= 5) {
+        working = currentTracks.map(track => ({ ...track, clips: [...track.clips] }))
+        workingSelected = new Set(selected)
+        selected.forEach(id => {
+          for (let ti = 0; ti < currentTracks.length; ti++) {
+            const sourceClip = currentTracks[ti].clips.find(c => c.id === id)
+            if (!sourceClip) continue
+            const player = new Tone.Player()
+            player.buffer = sourceClip.player.buffer
+            player.loop = false
+            player.connect(trackGainsRef.current[ti])
+            const newClip: Clip = {
+              player,
+              fileName: sourceClip.fileName,
+              isPlaying: false,
+              buffer: sourceClip.buffer,
+              startPosition: sourceClip.startPosition,
+              offsetSeconds: sourceClip.offsetSeconds + 0.001,
+              id: `clip-${Date.now()}-${Math.random()}`,
+              sourceStart: sourceClip.sourceStart,
+              duration: sourceClip.duration,
+              selected: true
+            }
+            working[ti].clips.push(newClip)
+            workingSelected.add(newClip.id)
+          }
+        })
+        setSelectedClipIds(workingSelected)
+      }
+
+      const moved: { to: number; clip: Clip }[] = []
+      working.forEach((track, ti) => {
+        track.clips.forEach(c => {
+          if (!workingSelected.has(c.id)) return
+          moved.push({
+            to: ti + trackDelta,
+            clip: { ...c, offsetSeconds: Math.max(0, c.offsetSeconds + timeDelta) }
+          })
+        })
+      })
+      const nextTracks = working.map(track => ({
+        ...track,
+        clips: track.clips.filter(c => !workingSelected.has(c.id))
+      }))
+      moved.forEach(({ to, clip }) => {
+        nextTracks[to].clips.push(clip)
+      })
+      clearGroupDragPreview()
+      setTrackStates(nextTracks)
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'move'
   }
 
-  const handleResizeStart = (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => {
+  const handleResizeStart = (e: React.MouseEvent, trackIndex: number, clipId: string, edge: ClipTrimEdge) => {
     e.stopPropagation()
+    e.preventDefault()
     if (e.button !== 0) return
-    
-    const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
+
+    const clip = trackStatesRef.current[trackIndex]?.clips.find(c => c.id === clipId)
     if (!clip) return
-    
-    saveUndo()
-    setResizingClip({ trackIndex, clipId, edge })
-    setResizeStartX(e.clientX)
-    setResizeStartValue(edge === 'left' ? clip.sourceStart : clip.duration)
+
+    const wrapper = (e.currentTarget as HTMLElement).closest('.clip-wrapper') as HTMLElement | null
+    const waveform = wrapper?.querySelector('[data-waveform-full]') as HTMLElement | null
+    const orig: ClipTrimState & { bufferDuration: number } = {
+      sourceStart: clip.sourceStart,
+      duration: clip.duration,
+      offsetSeconds: clip.offsetSeconds,
+      bufferDuration: clip.buffer.duration
+    }
+    trimLiveRef.current = {
+      active: true,
+      trackIndex,
+      clipId,
+      edge,
+      startX: e.clientX,
+      orig,
+      next: { sourceStart: orig.sourceStart, duration: orig.duration, offsetSeconds: orig.offsetSeconds },
+      wrapper,
+      waveform
+    }
+    dragLiveRef.current.distance = 0
+
+    const onMove = (ev: MouseEvent) => {
+      const live = trimLiveRef.current
+      if (!live?.active) return
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      const laneWidth = (lanes[0] as HTMLElement).getBoundingClientRect().width
+      const deltaTime = deltaTimeFromLanePx(ev.clientX - live.startX, laneWidth, timelineMaxRef.current || 100)
+      dragLiveRef.current.distance = Math.max(dragLiveRef.current.distance, Math.abs(ev.clientX - live.startX))
+      const next = applyClipTrim(live.edge, deltaTime, live.orig)
+      live.next = next
+      if (resizeRafRef.current == null) {
+        resizeRafRef.current = requestAnimationFrame(() => {
+          resizeRafRef.current = null
+          const current = trimLiveRef.current
+          if (!current?.active || !current.wrapper) return
+          applyTrimPreviewStyles(
+            current.wrapper,
+            current.waveform,
+            current.next,
+            current.orig.bufferDuration,
+            timelineMaxRef.current || 100
+          )
+        })
+      }
+    }
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      if (resizeRafRef.current != null) {
+        cancelAnimationFrame(resizeRafRef.current)
+        resizeRafRef.current = null
+      }
+      const live = trimLiveRef.current
+      trimLiveRef.current = null
+      if (!live) return
+      if (trimStatesEqual(live.orig, live.next)) return
+      saveUndo()
+      const { trackIndex: ti, clipId: id, next } = live
+      setTrackStates(prev => prev.map((track, i) => {
+        if (i !== ti) return track
+        return {
+          ...track,
+          clips: track.clips.map(c => c.id !== id ? c : { ...c, ...next })
+        }
+      }))
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'ew-resize'
   }
 
   const handleDeleteSelected = (toast?: string) => {
@@ -2243,305 +2508,7 @@ function App() {
     showClipToast(newSelectedIds.size > 1 ? `${newSelectedIds.size} clips duplicados` : 'Clip duplicado')
   }
 
-  useEffect(() => {
-    if (!isDraggingClip || draggedClipTrack === null || draggedClipId === null) return
 
-    let minOffset = Infinity
-    let minTrack = Infinity
-    let maxTrack = -Infinity
-    trackStates.forEach((track, ti) => {
-      track.clips.forEach(clip => {
-        if (!selectedClipIds.has(clip.id)) return
-        minOffset = Math.min(minOffset, clip.offsetSeconds)
-        minTrack = Math.min(minTrack, ti)
-        maxTrack = Math.max(maxTrack, ti)
-      })
-    })
-    if (minOffset === Infinity) minOffset = 0
-    if (minTrack === Infinity) minTrack = draggedClipTrack
-    if (maxTrack === -Infinity) maxTrack = draggedClipTrack
-    dragLiveRef.current.minOffset = minOffset
-    dragLiveRef.current.minTrack = minTrack
-    dragLiveRef.current.maxTrack = maxTrack
-
-    const clearGroupDragPreview = () => {
-      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
-        const el = node as HTMLElement
-        el.style.transform = ''
-        el.style.zIndex = ''
-        el.style.willChange = ''
-      })
-      document.querySelectorAll('.track-content').forEach(node => {
-        const el = node as HTMLElement
-        el.style.zIndex = ''
-        el.style.overflow = ''
-      })
-    }
-
-    const applyGroupDragPreview = (timeDelta: number, trackDelta: number) => {
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      const laneWidth = (lanes[0] as HTMLElement).getBoundingClientRect().width
-      const layoutMax = timelineMaxRef.current || 100
-      const trackHeight = 88 * verticalZoom
-      const dx = (timeDelta / layoutMax) * laneWidth
-      const dy = trackDelta * trackHeight
-      const selectedTracks = new Set<number>()
-      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
-        const el = node as HTMLElement
-        const id = el.dataset.clipId
-        if (!id || !selectedClipIds.has(id)) return
-        el.style.willChange = 'transform'
-        el.style.transform = `translate(${dx}px, ${dy}px)`
-        el.style.zIndex = '20'
-        const lane = el.closest('.track-content')
-        if (lane) {
-          const idx = Array.prototype.indexOf.call(lanes, lane)
-          if (idx >= 0) selectedTracks.add(idx)
-        }
-      })
-      lanes.forEach((node, i) => {
-        const el = node as HTMLElement
-        el.style.overflow = 'visible'
-        el.style.zIndex = selectedTracks.has(i) ? String(25 + i) : '1'
-      })
-    }
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      
-      const deltaX = e.clientX - dragStartX
-      const deltaY = e.clientY - dragStartY
-      const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
-      const live = dragLiveRef.current
-      live.distance = distance
-
-      if (isClickGesture(distance)) {
-        return
-      }
-      
-      if (live.threshold && distance < 5) {
-        return
-      }
-      
-      if (live.threshold && distance >= 5) {
-        saveUndo()
-        const newTrackStates = [...trackStates]
-        selectedClipIds.forEach(id => {
-          for (let ti = 0; ti < trackStates.length; ti++) {
-            const sourceClip = trackStates[ti].clips.find(c => c.id === id)
-            if (sourceClip) {
-              const player = new Tone.Player()
-              player.buffer = sourceClip.player.buffer
-              player.loop = false
-              player.connect(trackGainsRef.current[ti])
-              
-              const newClip: Clip = {
-                player,
-                fileName: sourceClip.fileName,
-                isPlaying: false,
-                buffer: sourceClip.buffer,
-                startPosition: sourceClip.startPosition,
-                offsetSeconds: sourceClip.offsetSeconds + 0.001,
-                id: `clip-${Date.now()}-${Math.random()}`,
-                sourceStart: sourceClip.sourceStart,
-                duration: sourceClip.duration,
-                selected: true
-              }
-              newTrackStates[ti].clips.push(newClip)
-              setSelectedClipIds(prev => {
-                const newSet = new Set(prev)
-                newSet.add(newClip.id)
-                return newSet
-              })
-            }
-          }
-        })
-        setTrackStates(newTrackStates)
-        live.threshold = false
-      }
-      
-      const firstLane = lanes[0] as HTMLElement
-      const rect = firstLane.getBoundingClientRect()
-      const deltaPercentage = deltaX / rect.width
-      const maxDuration = timelineMaxRef.current || 100
-      const deltaTime = deltaPercentage * maxDuration
-      
-      const rawOffset = dragStartPosition + deltaTime
-      const newOffset = snapEnabled && !e.shiftKey ? snapToGrid(rawOffset) : rawOffset
-      let timeDelta = newOffset - dragStartPosition
-      timeDelta = clampGroupTimeDelta(live.minOffset, timeDelta)
-      const trackHeight = 88 * verticalZoom
-      const rawTrackDelta = Math.round(deltaY / trackHeight)
-      const trackDelta = clampGroupTrackDelta(live.minTrack, live.maxTrack, rawTrackDelta, trackStates.length)
-      const newTrack = draggedClipTrack + trackDelta
-      
-      live.tempOffset = dragStartPosition + timeDelta
-      live.tempTrack = newTrack
-      live.timeDelta = timeDelta
-      live.trackDelta = trackDelta
-      live.distance = distance
-      
-      if (dragRafRef.current == null) {
-        dragRafRef.current = requestAnimationFrame(() => {
-          dragRafRef.current = null
-          applyGroupDragPreview(dragLiveRef.current.timeDelta, dragLiveRef.current.trackDelta)
-        })
-      }
-    }
-
-    const handleMouseUp = (e: MouseEvent) => {
-      if (dragRafRef.current != null) {
-        cancelAnimationFrame(dragRafRef.current)
-        dragRafRef.current = null
-      }
-      const live = dragLiveRef.current
-      if (isClickGesture(live.distance)) {
-        clearGroupDragPreview()
-        const lane = (e.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
-          ?? (document.querySelector('.track-content') as HTMLElement | null)
-        if (lane && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-          const rect = lane.getBoundingClientRect()
-          const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
-          seekToPositionRef.current(raw, false)
-        }
-        setIsDraggingClip(false)
-        setDraggedClipTrack(null)
-        setDraggedClipId(null)
-        return
-      }
-      if (live.threshold && live.distance < 5) {
-        clearGroupDragPreview()
-        setIsDraggingClip(false)
-        setDraggedClipTrack(null)
-        setDraggedClipId(null)
-        return
-      }
-
-      const timeDelta = live.timeDelta
-      const trackDelta = live.trackDelta
-      
-      if (!live.threshold) {
-        saveUndo()
-      }
-
-      const moved: { to: number; clip: Clip }[] = []
-      trackStates.forEach((track, ti) => {
-        track.clips.forEach(clip => {
-          if (!selectedClipIds.has(clip.id)) return
-          moved.push({
-            to: ti + trackDelta,
-            clip: { ...clip, offsetSeconds: Math.max(0, clip.offsetSeconds + timeDelta) }
-          })
-        })
-      })
-      const newTrackStates = trackStates.map(track => ({
-        ...track,
-        clips: track.clips.filter(clip => !selectedClipIds.has(clip.id))
-      }))
-      moved.forEach(({ to, clip }) => {
-        newTrackStates[to].clips.push(clip)
-      })
-      clearGroupDragPreview()
-      setTrackStates(newTrackStates)
-      setIsDraggingClip(false)
-      setDraggedClipTrack(null)
-      setDraggedClipId(null)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'move'
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-      if (dragRafRef.current != null) {
-        cancelAnimationFrame(dragRafRef.current)
-        dragRafRef.current = null
-      }
-      clearGroupDragPreview()
-    }
-  }, [isDraggingClip, draggedClipTrack, draggedClipId, dragStartX, dragStartY, dragStartPosition, selectedClipIds, snapEnabled, verticalZoom, trackStates])
-
-  useEffect(() => {
-    if (!resizingClip) return
-
-    const applyResize = (clientX: number) => {
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      
-      const firstLane = lanes[0] as HTMLElement
-      const rect = firstLane.getBoundingClientRect()
-      const deltaX = clientX - resizeStartX
-      const deltaPercentage = deltaX / rect.width
-      const maxDuration = timelineMaxRef.current || 100
-      const deltaTime = deltaPercentage * maxDuration
-      
-      const newTrackStates = trackStates.map((track, i) => {
-        if (i !== resizingClip.trackIndex) return track
-        return {
-          ...track,
-          clips: track.clips.map(c => {
-            if (c.id !== resizingClip.clipId) return c
-            if (resizingClip.edge === 'left') {
-              const newSourceStart = Math.max(0, Math.min(c.buffer.duration - 0.1, resizeStartValue + deltaTime))
-              const sourceDelta = newSourceStart - c.sourceStart
-              return {
-                ...c,
-                sourceStart: newSourceStart,
-                duration: Math.max(0.1, c.duration - sourceDelta),
-                offsetSeconds: Math.max(0, c.offsetSeconds + sourceDelta)
-              }
-            }
-            return {
-              ...c,
-              duration: Math.max(0.1, Math.min(c.buffer.duration - c.sourceStart, resizeStartValue + deltaTime))
-            }
-          })
-        }
-      })
-      setTrackStates(newTrackStates)
-    }
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const x = e.clientX
-      if (resizeRafRef.current == null) {
-        resizeRafRef.current = requestAnimationFrame(() => {
-          resizeRafRef.current = null
-          applyResize(x)
-        })
-      }
-    }
-
-    const handleMouseUp = () => {
-      if (resizeRafRef.current != null) {
-        cancelAnimationFrame(resizeRafRef.current)
-        resizeRafRef.current = null
-      }
-      setResizingClip(null)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'ew-resize'
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-      if (resizeRafRef.current != null) {
-        cancelAnimationFrame(resizeRafRef.current)
-        resizeRafRef.current = null
-      }
-    }
-  }, [resizingClip, resizeStartX, resizeStartValue])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -3196,7 +3163,7 @@ function App() {
   const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement
     if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
-    if (isDraggingLoop || isDraggingLoopEdge || isDraggingClip) return
+    if (isDraggingLoop || isDraggingLoopEdge || isDraggingClipRef.current) return
     if (marqueeLiveRef.current.didDrag) return
     seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
     if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
@@ -3525,7 +3492,7 @@ function App() {
   }, [bpm, trackStates])
 
   return (
-    <div className="app">
+    <div className="app" data-app-commits={appCommitCountRef.current}>
       <input
         ref={fileInputRef}
         type="file"
@@ -4142,7 +4109,6 @@ function App() {
               selectedClipIds={selectedClipIds}
               isLoopEnabled={isLoopEnabled}
               isDraggingLoopEdge={!!isDraggingLoopEdge}
-              isDraggingClip={isDraggingClip}
               loopStart={loopStart}
               loopEnd={loopEnd}
               tempLoopStart={tempLoopStart}

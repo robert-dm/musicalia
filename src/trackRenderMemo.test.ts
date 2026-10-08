@@ -1,4 +1,4 @@
-import { clipBufferSignature, trackHeaderDataEqual, trackLaneDataEqual } from './trackRenderMemo'
+import { clipBufferSignature, laneClipDataEqual, trackHeaderDataEqual, trackLaneDataEqual } from './trackRenderMemo'
 
 let failed = 0
 function assert(cond: boolean, msg: string) {
@@ -55,7 +55,6 @@ const laneA = {
   selectedClipIds: selected,
   isLoopEnabled: false,
   isDraggingLoopEdge: false,
-  isDraggingClip: false,
   loopStart: null,
   loopEnd: null,
   tempLoopStart: null,
@@ -70,6 +69,18 @@ assert(
 assert(
   !trackLaneDataEqual(laneA, { ...laneA, clips: [{ id: 'c1' }] }),
   'new clips array re-renders that lane'
+)
+
+const clipView = {
+  trackIndex: 0,
+  maxDur: 100,
+  selected: false,
+  clip: { id: 'c1', fileName: 'a.wav', offsetSeconds: 1, duration: 2, sourceStart: 0, buffer: clips }
+}
+assert(laneClipDataEqual(clipView, { ...clipView, clip: { ...clipView.clip } }), 'identical clip view skips render')
+assert(
+  !laneClipDataEqual(clipView, { ...clipView, clip: { ...clipView.clip, duration: 3 } }),
+  'duration change re-renders that clip'
 )
 
 const tracks = [

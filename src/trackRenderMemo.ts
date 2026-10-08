@@ -20,7 +20,6 @@ export interface TrackLaneDataProps {
   selectedClipIds: unknown
   isLoopEnabled: boolean
   isDraggingLoopEdge: boolean
-  isDraggingClip: boolean
   loopStart: number | null
   loopEnd: number | null
   tempLoopStart: number | null
@@ -52,11 +51,38 @@ export function trackLaneDataEqual(prev: TrackLaneDataProps, next: TrackLaneData
     prev.selectedClipIds === next.selectedClipIds &&
     prev.isLoopEnabled === next.isLoopEnabled &&
     prev.isDraggingLoopEdge === next.isDraggingLoopEdge &&
-    prev.isDraggingClip === next.isDraggingClip &&
     prev.loopStart === next.loopStart &&
     prev.loopEnd === next.loopEnd &&
     prev.tempLoopStart === next.tempLoopStart &&
     prev.tempLoopEnd === next.tempLoopEnd
+  )
+}
+
+export interface LaneClipViewData {
+  trackIndex: number
+  maxDur: number
+  selected: boolean
+  clip: {
+    id: string
+    fileName: string
+    offsetSeconds: number
+    duration: number
+    sourceStart: number
+    buffer: unknown
+  }
+}
+
+export function laneClipDataEqual(prev: LaneClipViewData, next: LaneClipViewData): boolean {
+  return (
+    prev.trackIndex === next.trackIndex &&
+    prev.maxDur === next.maxDur &&
+    prev.selected === next.selected &&
+    prev.clip.id === next.clip.id &&
+    prev.clip.fileName === next.clip.fileName &&
+    prev.clip.offsetSeconds === next.clip.offsetSeconds &&
+    prev.clip.duration === next.clip.duration &&
+    prev.clip.sourceStart === next.clip.sourceStart &&
+    prev.clip.buffer === next.clip.buffer
   )
 }
 

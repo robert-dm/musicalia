@@ -1,6 +1,6 @@
 import { memo, useRef } from 'react'
 import { ClipWaveform } from './ClipWaveform'
-import { trackLaneDataEqual } from './trackRenderMemo'
+import { laneClipDataEqual, trackLaneDataEqual } from './trackRenderMemo'
 
 export interface LaneClip {
   id: string
@@ -21,7 +21,6 @@ interface TrackLaneProps {
   selectedClipIds: Set<string>
   isLoopEnabled: boolean
   isDraggingLoopEdge: boolean
-  isDraggingClip: boolean
   loopStart: number | null
   loopEnd: number | null
   tempLoopStart: number | null
@@ -38,6 +37,73 @@ interface TrackLaneProps {
   onClipDragStart: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
 }
 
+interface LaneClipViewProps {
+  trackIndex: number
+  maxDur: number
+  clip: LaneClip
+  selected: boolean
+  onClipClick: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
+  onContextMenuTrack: (e: React.MouseEvent, trackIndex: number, clipId: string | null) => void
+  onResizeStart: (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
+  onClipDragStart: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
+}
+
+const LaneClipView = memo(function LaneClipView({
+  trackIndex,
+  maxDur,
+  clip,
+  selected,
+  onClipClick,
+  onContextMenuTrack,
+  onResizeStart,
+  onClipDragStart
+}: LaneClipViewProps) {
+  const renderCountRef = useRef(0)
+  renderCountRef.current += 1
+
+  return (
+    <div
+      data-clip-id={clip.id}
+      data-render-count={renderCountRef.current}
+      className={`clip-wrapper ${selected ? 'selected' : ''}`}
+      style={{
+        position: 'absolute',
+        left: `${(clip.offsetSeconds / maxDur) * 100}%`,
+        width: `${(clip.duration / maxDur) * 100}%`,
+        height: '100%'
+      }}
+      onClick={(e) => onClipClick(e, trackIndex, clip.id)}
+      onContextMenu={(e) => onContextMenuTrack(e, trackIndex, clip.id)}
+    >
+      <div
+        className="clip-trim-handle left"
+        onMouseDown={(e) => onResizeStart(e, trackIndex, clip.id, 'left')}
+        title="Arrastra para recortar desde el inicio"
+      />
+      <div
+        className="clip-body"
+        onMouseDown={(e) => onClipDragStart(e, trackIndex, clip.id)}
+        title="Arrastra para mover (clic derecho para editar, Alt+arrastrar para duplicar)"
+        style={{ cursor: 'move' }}
+      >
+        <div className="clip-info">
+          <span className="clip-filename">{clip.fileName}</span>
+        </div>
+        <ClipWaveform
+          buffer={clip.buffer}
+          sourceStart={clip.sourceStart}
+          duration={clip.duration}
+        />
+      </div>
+      <div
+        className="clip-trim-handle right"
+        onMouseDown={(e) => onResizeStart(e, trackIndex, clip.id, 'right')}
+        title="Arrastra para recortar desde el final"
+      />
+    </div>
+  )
+}, laneClipDataEqual)
+
 export const TrackLane = memo(function TrackLane({
   trackIndex,
   hasClips,
@@ -48,7 +114,6 @@ export const TrackLane = memo(function TrackLane({
   selectedClipIds,
   isLoopEnabled,
   isDraggingLoopEdge,
-  isDraggingClip,
   loopStart,
   loopEnd,
   tempLoopStart,
@@ -82,57 +147,26 @@ export const TrackLane = memo(function TrackLane({
         <div
           className="clip-region"
           onMouseDown={(e) => {
-            if (isLoopEnabled && e.button === 0 && !isDraggingLoopEdge && !isDraggingClip) {
+            if (isLoopEnabled && e.button === 0 && !isDraggingLoopEdge) {
               onLoopMouseDown(e)
             }
           }}
           onMouseMove={onLoopMouseMove}
           onMouseUp={onLoopMouseUp}
         >
-          {clips.map((clip) => {
-            const isSelected = selectedClipIds.has(clip.id)
-            return (
-              <div
-                key={clip.id}
-                data-clip-id={clip.id}
-                className={`clip-wrapper ${isSelected ? 'selected' : ''}`}
-                style={{
-                  position: 'absolute',
-                  left: `${(clip.offsetSeconds / maxDur) * 100}%`,
-                  width: `${(clip.duration / maxDur) * 100}%`,
-                  height: '100%'
-                }}
-                onClick={(e) => onClipClick(e, trackIndex, clip.id)}
-                onContextMenu={(e) => onContextMenuTrack(e, trackIndex, clip.id)}
-              >
-                <div
-                  className="clip-trim-handle left"
-                  onMouseDown={(e) => onResizeStart(e, trackIndex, clip.id, 'left')}
-                  title="Arrastra para recortar desde el inicio"
-                />
-                <div
-                  className="clip-body"
-                  onMouseDown={(e) => onClipDragStart(e, trackIndex, clip.id)}
-                  title="Arrastra para mover (clic derecho para editar, Alt+arrastrar para duplicar)"
-                  style={{ cursor: 'move' }}
-                >
-                  <div className="clip-info">
-                    <span className="clip-filename">{clip.fileName}</span>
-                  </div>
-                  <ClipWaveform
-                    buffer={clip.buffer}
-                    sourceStart={clip.sourceStart}
-                    duration={clip.duration}
-                  />
-                </div>
-                <div
-                  className="clip-trim-handle right"
-                  onMouseDown={(e) => onResizeStart(e, trackIndex, clip.id, 'right')}
-                  title="Arrastra para recortar desde el final"
-                />
-              </div>
-            )
-          })}
+          {clips.map((clip) => (
+            <LaneClipView
+              key={clip.id}
+              trackIndex={trackIndex}
+              maxDur={maxDur}
+              clip={clip}
+              selected={selectedClipIds.has(clip.id)}
+              onClipClick={onClipClick}
+              onContextMenuTrack={onContextMenuTrack}
+              onResizeStart={onResizeStart}
+              onClipDragStart={onClipDragStart}
+            />
+          ))}
           {(loopStart !== null || tempLoopStart !== null) && (
             <div
               className="loop-marker loop-start draggable"

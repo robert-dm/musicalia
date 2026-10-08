@@ -574,11 +574,25 @@
   color: #ccc;
 }
 
-.waveform-canvas {
+.waveform-window {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
   width: 100%;
   height: 100%;
-  display: block;
   min-height: 80px;
+  pointer-events: none;
+}
+
+.waveform-full {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+  transform-origin: left center;
+  will-change: transform, width;
 }
 
 .track-controls {

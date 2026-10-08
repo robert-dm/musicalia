@@ -25,6 +25,15 @@ import { detectBPM } from './bpmDetector'
 import { encodeAudioBufferWAV, audioBufferFromSerialized } from './wav'
 import { ClipWaveform } from './ClipWaveform'
 import { applySeekSnap, clickTimeFromX, isClickGesture } from './playheadSeek'
+import {
+  clampGroupTimeDelta,
+  clampGroupTrackDelta,
+  clientRectsIntersect,
+  marqueeClientRect,
+  mergeSelection,
+  packClipboard,
+  pastePlacement
+} from './clipSelection'
 
 const APP_VERSION = '0.0074b'
 
@@ -33,6 +42,8 @@ interface ClipboardClip {
   fileName: string
   sourceStart: number
   duration: number
+  relTime: number
+  relTrack: number
 }
 
 interface ContextMenuState {
@@ -96,10 +107,26 @@ function App() {
     tempOffset: 0,
     tempTrack: null as number | null,
     threshold: false,
-    distance: 0
+    distance: 0,
+    timeDelta: 0,
+    trackDelta: 0,
+    minOffset: 0,
+    minTrack: 0,
+    maxTrack: 0
   })
   const seekToPositionRef = useRef<(seconds: number, shiftKey?: boolean) => void>(() => {})
   const loopGestureRef = useRef({ x: 0, y: 0, distance: 0 })
+  const marqueeLiveRef = useRef({
+    active: false,
+    didDrag: false,
+    x0: 0,
+    y0: 0,
+    x1: 0,
+    y1: 0,
+    additive: false,
+    toggle: false
+  })
+  const [marqueeBox, setMarqueeBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const dragRafRef = useRef<number | null>(null)
   const resizeRafRef = useRef<number | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -149,8 +176,7 @@ function App() {
   const [draggedClipId, setDraggedClipId] = useState<string | null>(null)
   const [dragStartX, setDragStartX] = useState<number>(0)
   const [dragStartPosition, setDragStartPosition] = useState<number>(0)
-  const [tempDragOffset, setTempDragOffset] = useState<number>(0)
-  const [clipboard, setClipboard] = useState<ClipboardClip | null>(null)
+  const [clipboard, setClipboard] = useState<ClipboardClip[] | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const projectLoadGenRef = useRef<number>(0)
   const [selectedClipIds, setSelectedClipIds] = useState<Set<string>>(new Set())
@@ -159,7 +185,6 @@ function App() {
   const [resizeStartValue, setResizeStartValue] = useState<number>(0)
   const [snapEnabled, setSnapEnabled] = useState(true)
   const [dragStartY, setDragStartY] = useState<number>(0)
-  const [tempDragTrack, setTempDragTrack] = useState<number | null>(null)
   const [undoStack, setUndoStack] = useState<any[]>([])
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
@@ -1792,13 +1817,53 @@ function App() {
     return true
   }
 
-  const copyClipToClipboard = (clip: Clip) => {
-    setClipboard({
+  const collectSelectedClips = () => {
+    const items: { clip: Clip; trackIndex: number }[] = []
+    trackStates.forEach((track, trackIndex) => {
+      track.clips.forEach(clip => {
+        if (selectedClipIds.has(clip.id)) items.push({ clip, trackIndex })
+      })
+    })
+    return items
+  }
+
+  const copySelectedClips = () => {
+    const items = collectSelectedClips()
+    if (items.length === 0) return 0
+    setClipboard(packClipboard(items.map(({ clip, trackIndex }) => ({
       buffer: clip.buffer,
       fileName: clip.fileName,
       sourceStart: clip.sourceStart,
-      duration: clip.duration
-    })
+      duration: clip.duration,
+      offsetSeconds: clip.offsetSeconds,
+      trackIndex
+    }))).map(({ buffer, fileName, sourceStart, duration, relTime, relTrack }) => ({
+      buffer,
+      fileName,
+      sourceStart,
+      duration,
+      relTime,
+      relTrack
+    })))
+    return items.length
+  }
+
+  const copyClipToClipboard = (clip: Clip, trackIndex = 0) => {
+    setClipboard(packClipboard([{
+      buffer: clip.buffer,
+      fileName: clip.fileName,
+      sourceStart: clip.sourceStart,
+      duration: clip.duration,
+      offsetSeconds: clip.offsetSeconds,
+      trackIndex
+    }]).map(({ buffer, fileName, sourceStart, duration, relTime, relTrack }) => ({
+      buffer,
+      fileName,
+      sourceStart,
+      duration,
+      relTime,
+      relTrack
+    })))
   }
 
   const showClipToast = (message: string) => {
@@ -1808,7 +1873,7 @@ function App() {
   }
 
   const pasteClipAt = async (trackIndex: number, timeSeconds: number) => {
-    if (!clipboard) {
+    if (!clipboard || clipboard.length === 0) {
       setErrorMessage('No hay clip copiado')
       setTimeout(() => setErrorMessage(null), 2000)
       return
@@ -1816,32 +1881,34 @@ function App() {
     
     await ensureAudio()
     saveUndo()
-    
-    const player = new Tone.Player()
-    player.buffer = new Tone.ToneAudioBuffer(clipboard.buffer)
-    player.loop = false
-    player.connect(trackGainsRef.current[trackIndex])
-    
-    const newClip: Clip = {
-      player,
-      fileName: clipboard.fileName,
-      isPlaying: false,
-      buffer: clipboard.buffer,
-      startPosition: 0,
-      offsetSeconds: Math.max(0, snapToGrid(timeSeconds)),
-      id: `clip-${Date.now()}-${Math.random()}`,
-      sourceStart: clipboard.sourceStart,
-      duration: clipboard.duration
-    }
-    
-    const newTrackStates = [...trackStates]
-    newTrackStates[trackIndex] = {
-      ...newTrackStates[trackIndex],
-      clips: [...newTrackStates[trackIndex].clips, newClip]
-    }
+    const originTime = snapEnabled ? snapToGrid(timeSeconds) : timeSeconds
+    const newTrackStates = trackStates.map(track => ({ ...track, clips: [...track.clips] }))
+    const newIds = new Set<string>()
+
+    clipboard.forEach((item, i) => {
+      const place = pastePlacement(item.relTime, item.relTrack, originTime, trackIndex, trackStates.length)
+      const player = new Tone.Player()
+      player.buffer = new Tone.ToneAudioBuffer(item.buffer)
+      player.loop = false
+      player.connect(trackGainsRef.current[place.trackIndex])
+      const newClip: Clip = {
+        player,
+        fileName: item.fileName,
+        isPlaying: false,
+        buffer: item.buffer,
+        startPosition: 0,
+        offsetSeconds: place.offsetSeconds,
+        id: `clip-${Date.now()}-${i}-${Math.random()}`,
+        sourceStart: item.sourceStart,
+        duration: item.duration
+      }
+      newTrackStates[place.trackIndex].clips.push(newClip)
+      newIds.add(newClip.id)
+    })
+
     setTrackStates(newTrackStates)
-    setSelectedClipIds(new Set([newClip.id]))
-    showClipToast('Clip pegado')
+    setSelectedClipIds(newIds)
+    showClipToast(clipboard.length > 1 ? `${clipboard.length} clips pegados` : 'Clip pegado')
   }
 
   const handlePasteClip = async (trackIndex: number) => {
@@ -1913,7 +1980,7 @@ function App() {
     const percentage = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0
     const maxDur = getMaxDuration() || 100
     const time = Math.max(0, percentage * maxDur)
-    if (clipId) {
+    if (clipId && !selectedClipIds.has(clipId)) {
       setSelectedClipIds(new Set([clipId]))
     }
     setContextMenu({
@@ -1937,33 +2004,57 @@ function App() {
       await pasteClipAt(trackIndex, time)
       return
     }
+    if (action === 'cut') {
+      const n = selectedClipIds.size || (clip ? 1 : 0)
+      if (selectedClipIds.size > 0) {
+        copySelectedClips()
+        handleDeleteSelected(`${n > 1 ? n + ' clips cortados' : 'Clip cortado'}`)
+      } else if (clip) {
+        cutClip(clip)
+      }
+      return
+    }
+    if (action === 'copy') {
+      const n = selectedClipIds.size > 0 ? copySelectedClips() : 0
+      if (n === 0 && clip) {
+        copyClipToClipboard(clip, trackIndex)
+        showClipToast('Clip copiado')
+      } else if (n > 0) {
+        showClipToast(n > 1 ? `${n} clips copiados` : 'Clip copiado')
+      }
+      return
+    }
+    if (action === 'duplicate') {
+      if (selectedClipIds.size > 0) handleDuplicateSelected()
+      else if (clip) duplicateClipOnTrack(trackIndex, clip)
+      return
+    }
+    if (action === 'delete') {
+      if (selectedClipIds.size > 0) handleDeleteSelected()
+      else if (clip) {
+        deleteClipById(clip.id)
+        showClipToast('Clip eliminado')
+      }
+      return
+    }
     if (!clip) return
 
-    if (action === 'cut') {
-      cutClip(clip)
-    } else if (action === 'copy') {
-      copyClipToClipboard(clip)
-      showClipToast('Clip copiado')
-    } else if (action === 'split') {
+    if (action === 'split') {
       const splitTime = snapToGrid(time)
       if (splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration) {
         await splitClipAt(trackIndex, splitTime)
       }
-    } else if (action === 'duplicate') {
-      duplicateClipOnTrack(trackIndex, clip)
-    } else if (action === 'delete') {
-      deleteClipById(clip.id)
-      showClipToast('Clip eliminado')
     }
   }
 
   const handleClipClick = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
+    if (!isClickGesture(dragLiveRef.current.distance)) return
     
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
     if (!clip) return
     
-    if (e.altKey && !e.shiftKey) {
+    if (e.altKey && !e.shiftKey && !(e.ctrlKey || e.metaKey)) {
       const rect = e.currentTarget.getBoundingClientRect()
       const clickX = e.clientX - rect.left
       const percentage = clickX / rect.width
@@ -1976,32 +2067,25 @@ function App() {
       return
     }
 
-    if (!(e.target as HTMLElement).closest('.clip-trim-handle') && isClickGesture(dragLiveRef.current.distance)) {
-      const lane = (e.currentTarget as HTMLElement).closest('.track-content') as HTMLElement | null
-      if (lane) {
-        const rect = lane.getBoundingClientRect()
-        const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
-        seekToPositionRef.current(raw, e.shiftKey)
-      }
-      setIsDraggingClip(false)
-      setDraggedClipTrack(null)
-      setDraggedClipId(null)
-      setTempDragTrack(null)
-    }
-    
-    if (e.shiftKey) {
-      setSelectedClipIds(prev => {
-        const newSet = new Set(prev)
-        if (newSet.has(clipId)) {
-          newSet.delete(clipId)
-        } else {
-          newSet.add(clipId)
-        }
-        return newSet
-      })
+    const cmd = e.ctrlKey || e.metaKey
+    if (cmd) {
+      setSelectedClipIds(prev => mergeSelection(prev, [clipId], 'toggle'))
+    } else if (e.shiftKey) {
+      setSelectedClipIds(prev => mergeSelection(prev, [clipId], 'add'))
     } else {
       setSelectedClipIds(new Set([clipId]))
+      if (!(e.target as HTMLElement).closest('.clip-trim-handle')) {
+        const lane = (e.currentTarget as HTMLElement).closest('.track-content') as HTMLElement | null
+        if (lane) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, false)
+        }
+      }
     }
+    setIsDraggingClip(false)
+    setDraggedClipTrack(null)
+    setDraggedClipId(null)
   }
 
   const handleClipDragStart = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
@@ -2009,7 +2093,12 @@ function App() {
     if (e.button !== 0) return
     
     if (!selectedClipIds.has(clipId)) {
-      setSelectedClipIds(new Set([clipId]))
+      const cmd = e.ctrlKey || e.metaKey
+      if (e.shiftKey || cmd) {
+        setSelectedClipIds(prev => new Set(prev).add(clipId))
+      } else {
+        setSelectedClipIds(new Set([clipId]))
+      }
     }
     
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
@@ -2021,13 +2110,16 @@ function App() {
     setDragStartX(e.clientX)
     setDragStartY(e.clientY)
     setDragStartPosition(clip.offsetSeconds)
-    setTempDragOffset(clip.offsetSeconds)
-    setTempDragTrack(trackIndex)
     dragLiveRef.current = {
       tempOffset: clip.offsetSeconds,
       tempTrack: trackIndex,
       threshold: e.altKey,
-      distance: 0
+      distance: 0,
+      timeDelta: 0,
+      trackDelta: 0,
+      minOffset: clip.offsetSeconds,
+      minTrack: trackIndex,
+      maxTrack: trackIndex
     }
   }
 
@@ -2044,8 +2136,9 @@ function App() {
     setResizeStartValue(edge === 'left' ? clip.sourceStart : clip.duration)
   }
 
-  const handleDeleteSelected = () => {
+  const handleDeleteSelected = (toast?: string) => {
     if (selectedClipIds.size === 0) return
+    const n = selectedClipIds.size
     
     saveUndo()
     const newTrackStates = trackStates.map(track => ({
@@ -2060,9 +2153,7 @@ function App() {
     }))
     setTrackStates(newTrackStates)
     setSelectedClipIds(new Set())
-    setToastMessage('Clip eliminado')
-    setShowToast(true)
-    setTimeout(() => setShowToast(false), 2000)
+    showClipToast(toast ?? (n > 1 ? `${n} clips eliminados` : 'Clip eliminado'))
   }
 
   const handleDuplicateSelected = () => {
@@ -2100,13 +2191,72 @@ function App() {
     
     setTrackStates(newTrackStates)
     setSelectedClipIds(newSelectedIds)
-    setToastMessage('Clip duplicado')
-    setShowToast(true)
-    setTimeout(() => setShowToast(false), 2000)
+    showClipToast(newSelectedIds.size > 1 ? `${newSelectedIds.size} clips duplicados` : 'Clip duplicado')
   }
 
   useEffect(() => {
     if (!isDraggingClip || draggedClipTrack === null || draggedClipId === null) return
+
+    let minOffset = Infinity
+    let minTrack = Infinity
+    let maxTrack = -Infinity
+    trackStates.forEach((track, ti) => {
+      track.clips.forEach(clip => {
+        if (!selectedClipIds.has(clip.id)) return
+        minOffset = Math.min(minOffset, clip.offsetSeconds)
+        minTrack = Math.min(minTrack, ti)
+        maxTrack = Math.max(maxTrack, ti)
+      })
+    })
+    if (minOffset === Infinity) minOffset = 0
+    if (minTrack === Infinity) minTrack = draggedClipTrack
+    if (maxTrack === -Infinity) maxTrack = draggedClipTrack
+    dragLiveRef.current.minOffset = minOffset
+    dragLiveRef.current.minTrack = minTrack
+    dragLiveRef.current.maxTrack = maxTrack
+
+    const clearGroupDragPreview = () => {
+      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
+        const el = node as HTMLElement
+        el.style.transform = ''
+        el.style.zIndex = ''
+        el.style.willChange = ''
+      })
+      document.querySelectorAll('.track-content').forEach(node => {
+        const el = node as HTMLElement
+        el.style.zIndex = ''
+        el.style.overflow = ''
+      })
+    }
+
+    const applyGroupDragPreview = (timeDelta: number, trackDelta: number) => {
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      const laneWidth = (lanes[0] as HTMLElement).getBoundingClientRect().width
+      const layoutMax = timelineMaxRef.current || 100
+      const trackHeight = 88 * verticalZoom
+      const dx = (timeDelta / layoutMax) * laneWidth
+      const dy = trackDelta * trackHeight
+      const selectedTracks = new Set<number>()
+      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
+        const el = node as HTMLElement
+        const id = el.dataset.clipId
+        if (!id || !selectedClipIds.has(id)) return
+        el.style.willChange = 'transform'
+        el.style.transform = `translate(${dx}px, ${dy}px)`
+        el.style.zIndex = '20'
+        const lane = el.closest('.track-content')
+        if (lane) {
+          const idx = Array.prototype.indexOf.call(lanes, lane)
+          if (idx >= 0) selectedTracks.add(idx)
+        }
+      })
+      lanes.forEach((node, i) => {
+        const el = node as HTMLElement
+        el.style.overflow = 'visible'
+        el.style.zIndex = selectedTracks.has(i) ? String(25 + i) : '1'
+      })
+    }
 
     const handleMouseMove = (e: MouseEvent) => {
       const lanes = document.querySelectorAll('.track-content')
@@ -2123,7 +2273,6 @@ function App() {
       }
       
       if (live.threshold && distance < 5) {
-        live.distance = distance
         return
       }
       
@@ -2170,21 +2319,25 @@ function App() {
       const maxDuration = timelineMaxRef.current || 100
       const deltaTime = deltaPercentage * maxDuration
       
-      const rawOffset = Math.max(0, dragStartPosition + deltaTime)
+      const rawOffset = dragStartPosition + deltaTime
       const newOffset = snapEnabled && !e.shiftKey ? snapToGrid(rawOffset) : rawOffset
+      let timeDelta = newOffset - dragStartPosition
+      timeDelta = clampGroupTimeDelta(live.minOffset, timeDelta)
       const trackHeight = 88 * verticalZoom
-      const trackDelta = Math.round(deltaY / trackHeight)
-      const newTrack = Math.max(0, Math.min(trackStates.length - 1, draggedClipTrack + trackDelta))
+      const rawTrackDelta = Math.round(deltaY / trackHeight)
+      const trackDelta = clampGroupTrackDelta(live.minTrack, live.maxTrack, rawTrackDelta, trackStates.length)
+      const newTrack = draggedClipTrack + trackDelta
       
-      live.tempOffset = newOffset
+      live.tempOffset = dragStartPosition + timeDelta
       live.tempTrack = newTrack
+      live.timeDelta = timeDelta
+      live.trackDelta = trackDelta
       live.distance = distance
       
       if (dragRafRef.current == null) {
         dragRafRef.current = requestAnimationFrame(() => {
           dragRafRef.current = null
-          setTempDragOffset(dragLiveRef.current.tempOffset)
-          setTempDragTrack(dragLiveRef.current.tempTrack)
+          applyGroupDragPreview(dragLiveRef.current.timeDelta, dragLiveRef.current.trackDelta)
         })
       }
     }
@@ -2196,61 +2349,56 @@ function App() {
       }
       const live = dragLiveRef.current
       if (isClickGesture(live.distance)) {
+        clearGroupDragPreview()
         const lane = (e.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
           ?? (document.querySelector('.track-content') as HTMLElement | null)
-        if (lane) {
+        if (lane && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
           const rect = lane.getBoundingClientRect()
           const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
-          seekToPositionRef.current(raw, e.shiftKey)
+          seekToPositionRef.current(raw, false)
         }
         setIsDraggingClip(false)
         setDraggedClipTrack(null)
         setDraggedClipId(null)
-        setTempDragTrack(null)
         return
       }
       if (live.threshold && live.distance < 5) {
+        clearGroupDragPreview()
         setIsDraggingClip(false)
         setDraggedClipTrack(null)
         setDraggedClipId(null)
-        setTempDragTrack(null)
         return
       }
-      
-      const newTrackStates = [...trackStates]
-      const targetTrack = live.tempTrack ?? draggedClipTrack
+
+      const timeDelta = live.timeDelta
+      const trackDelta = live.trackDelta
       
       if (!live.threshold) {
         saveUndo()
       }
-      
-      selectedClipIds.forEach(id => {
-        for (let ti = 0; ti < trackStates.length; ti++) {
-          const clipIndex = trackStates[ti].clips.findIndex(c => c.id === id)
-          if (clipIndex !== -1) {
-            const clip = trackStates[ti].clips[clipIndex]
-            const timeDelta = live.tempOffset - dragStartPosition
-            const trackDelta = targetTrack - draggedClipTrack
-            
-            if (ti === draggedClipTrack && trackDelta !== 0) {
-              const movedClip = { ...clip, offsetSeconds: clip.offsetSeconds + timeDelta }
-              newTrackStates[ti].clips.splice(clipIndex, 1)
-              newTrackStates[targetTrack].clips.push(movedClip)
-            } else if (id === draggedClipId || ti !== draggedClipTrack) {
-              newTrackStates[ti].clips[clipIndex] = {
-                ...clip,
-                offsetSeconds: clip.offsetSeconds + timeDelta
-              }
-            }
-          }
-        }
+
+      const moved: { to: number; clip: Clip }[] = []
+      trackStates.forEach((track, ti) => {
+        track.clips.forEach(clip => {
+          if (!selectedClipIds.has(clip.id)) return
+          moved.push({
+            to: ti + trackDelta,
+            clip: { ...clip, offsetSeconds: Math.max(0, clip.offsetSeconds + timeDelta) }
+          })
+        })
       })
-      
+      const newTrackStates = trackStates.map(track => ({
+        ...track,
+        clips: track.clips.filter(clip => !selectedClipIds.has(clip.id))
+      }))
+      moved.forEach(({ to, clip }) => {
+        newTrackStates[to].clips.push(clip)
+      })
+      clearGroupDragPreview()
       setTrackStates(newTrackStates)
       setIsDraggingClip(false)
       setDraggedClipTrack(null)
       setDraggedClipId(null)
-      setTempDragTrack(null)
     }
 
     document.addEventListener('mousemove', handleMouseMove)
@@ -2267,6 +2415,7 @@ function App() {
         cancelAnimationFrame(dragRafRef.current)
         dragRafRef.current = null
       }
+      clearGroupDragPreview()
     }
   }, [isDraggingClip, draggedClipTrack, draggedClipId, dragStartX, dragStartY, dragStartPosition, selectedClipIds, snapEnabled, verticalZoom, trackStates])
 
@@ -2354,9 +2503,11 @@ function App() {
       const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey
       
       if (e.key === 'Escape') {
+        e.preventDefault()
         if (contextMenu) {
-          e.preventDefault()
           closeContextMenu()
+        } else if (selectedClipIds.size > 0) {
+          setSelectedClipIds(new Set())
         }
         return
       }
@@ -2389,20 +2540,14 @@ function App() {
         }
       } else if (e.key === 'x' && cmdOrCtrl && selectedClipIds.size > 0) {
         e.preventDefault()
-        const clipToCut = trackStates.flatMap(t => t.clips).find(c => selectedClipIds.has(c.id))
-        if (clipToCut) {
-          copyClipToClipboard(clipToCut)
-          handleDeleteSelected()
-          showClipToast('Clip cortado')
-        }
+        const n = selectedClipIds.size
+        copySelectedClips()
+        handleDeleteSelected(n > 1 ? `${n} clips cortados` : 'Clip cortado')
       } else if (e.key === 'c' && cmdOrCtrl && selectedClipIds.size > 0) {
         e.preventDefault()
-        const clipToCopy = trackStates.flatMap(t => t.clips).find(c => selectedClipIds.has(c.id))
-        if (clipToCopy) {
-          copyClipToClipboard(clipToCopy)
-          showClipToast('Clip copiado')
-        }
-      } else if (e.key === 'v' && cmdOrCtrl && clipboard) {
+        const n = copySelectedClips()
+        showClipToast(n > 1 ? `${n} clips copiados` : 'Clip copiado')
+      } else if (e.key === 'v' && cmdOrCtrl && clipboard && clipboard.length > 0) {
         e.preventDefault()
         const targetTrack = trackStates.findIndex(t => t.clips.some(c => selectedClipIds.has(c.id)))
         if (targetTrack !== -1) {
@@ -2873,7 +3018,11 @@ function App() {
     const target = e.target as HTMLElement
     if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
     if (isDraggingLoop || isDraggingLoopEdge || isDraggingClip) return
+    if (marqueeLiveRef.current.didDrag) return
     seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
+    if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      setSelectedClipIds(new Set())
+    }
   }
 
   const handleLaneDoubleClick = (trackIndex: number) => {
@@ -2891,7 +3040,97 @@ function App() {
     if (e.button !== 0) return
     const target = e.target as HTMLElement
     if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
+    if (isLoopEnabled && target.closest('.clip-region')) return
+
+    const scroller = lanesColumnRef.current?.querySelector('.lanes-scroll-content') as HTMLElement | null
+    const startX = e.clientX
+    const startY = e.clientY
+    marqueeLiveRef.current = {
+      active: true,
+      didDrag: false,
+      x0: startX,
+      y0: startY,
+      x1: startX,
+      y1: startY,
+      additive: e.shiftKey,
+      toggle: e.ctrlKey || e.metaKey
+    }
+
+    const updateBox = () => {
+      const live = marqueeLiveRef.current
+      if (!scroller || !live.active || isClickGesture(Math.hypot(live.x1 - live.x0, live.y1 - live.y0))) {
+        setMarqueeBox(null)
+        return
+      }
+      const sr = scroller.getBoundingClientRect()
+      const left = Math.min(live.x0, live.x1) - sr.left
+      const top = Math.min(live.y0, live.y1) - sr.top
+      setMarqueeBox({
+        left,
+        top,
+        width: Math.abs(live.x1 - live.x0),
+        height: Math.abs(live.y1 - live.y0)
+      })
+    }
+
+    const onMove = (ev: MouseEvent) => {
+      marqueeLiveRef.current.x1 = ev.clientX
+      marqueeLiveRef.current.y1 = ev.clientY
+      if (dragRafRef.current == null) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = null
+          updateBox()
+        })
+      }
+    }
+
+    const onUp = (ev: MouseEvent) => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      if (dragRafRef.current != null) {
+        cancelAnimationFrame(dragRafRef.current)
+        dragRafRef.current = null
+      }
+      const live = marqueeLiveRef.current
+      live.x1 = ev.clientX
+      live.y1 = ev.clientY
+      live.active = false
+      setMarqueeBox(null)
+      const distance = Math.hypot(live.x1 - live.x0, live.y1 - live.y0)
+      const lane = (ev.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
+        ?? (e.currentTarget as HTMLElement)
+
+      if (isClickGesture(distance)) {
+        live.didDrag = false
+        if (lane) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(ev.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, ev.shiftKey)
+        }
+        if (!live.additive && !live.toggle) {
+          setSelectedClipIds(new Set())
+        }
+        return
+      }
+
+      live.didDrag = true
+      const band = marqueeClientRect(live.x0, live.y0, live.x1, live.y1)
+      const hit: string[] = []
+      document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
+        const el = node as HTMLElement
+        const id = el.dataset.clipId
+        if (!id) return
+        const r = el.getBoundingClientRect()
+        if (clientRectsIntersect(r, band)) hit.push(id)
+      })
+      const mode = live.toggle ? 'toggle' : live.additive ? 'add' : 'replace'
+      setSelectedClipIds(prev => mergeSelection(prev, hit, mode))
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.style.userSelect = 'none'
   }
 
   const clearLoop = () => {
@@ -2985,6 +3224,18 @@ function App() {
       loopGestureRef.current.distance = Math.hypot(dx, dy)
     }
     if ((isDraggingLoop || isDraggingLoopEdge) && isClickGesture(loopGestureRef.current.distance)) {
+      if (e) {
+        const lane = (e.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
+          ?? (document.querySelector('.track-content') as HTMLElement | null)
+        if (lane) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, e.shiftKey)
+        }
+        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+          setSelectedClipIds(new Set())
+        }
+      }
       setTempLoopStart(null)
       setTempLoopEnd(null)
       setIsDraggingLoop(false)
@@ -3649,6 +3900,17 @@ function App() {
           onContextMenu={(e) => e.preventDefault()}
         >
           <div className="lanes-scroll-content">
+          {marqueeBox && (
+            <div
+              className="marquee-rect"
+              style={{
+                left: marqueeBox.left,
+                top: marqueeBox.top,
+                width: marqueeBox.width,
+                height: marqueeBox.height
+              }}
+            />
+          )}
           <div className="bar-ruler" onMouseDown={handleRulerMouseDown}>
             {rulerBars}
           </div>
@@ -3680,22 +3942,18 @@ function App() {
                   onMouseUp={handleLoopMouseUp}
                 >
                   {trackState.clips.map((clip) => {
-                    const clipOffset = (isDraggingClip && selectedClipIds.has(clip.id)) 
-                      ? (clip.offsetSeconds + (tempDragOffset - dragStartPosition))
-                      : clip.offsetSeconds
                     const isSelected = selectedClipIds.has(clip.id)
-                    const showOnDifferentTrack = isDraggingClip && tempDragTrack !== null && tempDragTrack !== trackIndex && selectedClipIds.has(clip.id) && draggedClipTrack === trackIndex
                     
                     return (
                       <div 
                         key={clip.id}
-                        className={`clip-wrapper ${isSelected ? 'selected' : ''} ${showOnDifferentTrack ? 'moving-away' : ''}`}
+                        data-clip-id={clip.id}
+                        className={`clip-wrapper ${isSelected ? 'selected' : ''}`}
                         style={{
                           position: 'absolute',
-                          left: `${(clipOffset / maxDur) * 100}%`,
+                          left: `${(clip.offsetSeconds / maxDur) * 100}%`,
                           width: `${(clip.duration / maxDur) * 100}%`,
-                          height: '100%',
-                          opacity: showOnDifferentTrack ? 0.3 : 1
+                          height: '100%'
                         }}
                         onClick={(e) => handleClipClick(e, trackIndex, clip.id)}
                         onContextMenu={(e) => openContextMenu(e, trackIndex, clip.id)}
@@ -3728,27 +3986,6 @@ function App() {
                       </div>
                     )
                   })}
-                  {isDraggingClip && tempDragTrack !== null && tempDragTrack !== draggedClipTrack && draggedClipTrack !== null && (
-                    trackStates[draggedClipTrack].clips
-                      .filter((clip: Clip) => selectedClipIds.has(clip.id))
-                      .map((clip: Clip) => {
-                        const clipOffset = clip.offsetSeconds + (tempDragOffset - dragStartPosition)
-                        return trackIndex === tempDragTrack ? (
-                          <div
-                            key={`ghost-${clip.id}`}
-                            className="clip-wrapper ghost"
-                            style={{
-                              position: 'absolute',
-                              left: `${(clipOffset / maxDur) * 100}%`,
-                              width: `${(clip.duration / maxDur) * 100}%`,
-                              height: '100%',
-                              opacity: 0.5,
-                              border: '2px dashed #0a5'
-                            }}
-                          />
-                        ) : null
-                      })
-                  )}
                   {(loopStart !== null || tempLoopStart !== null) && (
                     <div 
                       className="loop-marker loop-start draggable"
@@ -3814,8 +4051,8 @@ function App() {
                 <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('copy')}>Copiar</button>
                 <button
                   type="button"
-                  className={`context-menu-item ${clipboard ? '' : 'disabled'}`}
-                  disabled={!clipboard}
+                  className={`context-menu-item ${clipboard && clipboard.length ? '' : 'disabled'}`}
+                  disabled={!clipboard || clipboard.length === 0}
                   onClick={() => runContextMenuAction('paste')}
                 >
                   Pegar
@@ -3828,8 +4065,8 @@ function App() {
             ) : (
               <button
                 type="button"
-                className={`context-menu-item ${clipboard ? '' : 'disabled'}`}
-                disabled={!clipboard}
+                className={`context-menu-item ${clipboard && clipboard.length ? '' : 'disabled'}`}
+                disabled={!clipboard || clipboard.length === 0}
                 onClick={() => runContextMenuAction('paste')}
               >
                 Pegar aquí
@@ -3848,9 +4085,11 @@ function App() {
               <ul style={{ listStyle: 'none', padding: 0 }}>
                 <li>• <strong>Click derecho en un clip</strong> - Menú: Cortar, Copiar, Pegar, Dividir aquí, Duplicar, Eliminar</li>
                 <li>• <strong>Click derecho en una pista vacía</strong> - Pegar aquí (en la posición del cursor, con snap si está activo)</li>
-                <li>• <strong>Click</strong> - Seleccionar clip</li>
-                <li>• <strong>Shift+Click</strong> - Seleccionar múltiples clips</li>
-                <li>• <strong>Arrastrar clip</strong> - Mover horizontal y verticalmente</li>
+                <li>• <strong>Click</strong> - Seleccionar clip y mover playhead</li>
+                <li>• <strong>Cmd/Ctrl+Click</strong> - Añadir o quitar un clip de la selección</li>
+                <li>• <strong>Shift+Click</strong> - Añadir clip a la selección</li>
+                <li>• <strong>Arrastrar en área vacía</strong> - Selección rectangular (varios tracks). Shift añade, Ctrl/Cmd alterna. Con Loop activo, arrastrar marca el loop</li>
+                <li>• <strong>Arrastrar clip</strong> - Mover la selección junta (tiempo y pista)</li>
                 <li>• <strong>Alt+Click en clip</strong> - Dividir en el punto clickeado</li>
                 <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
@@ -3864,12 +4103,12 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+S</strong> - Guardar proyecto localmente</li>
                 <li>• <strong>Shift+Cmd/Ctrl+S</strong> - Guardar como... (nueva ubicación)</li>
                 <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead</li>
-                <li>• <strong>Cmd/Ctrl+X</strong> - Cortar clip seleccionado</li>
-                <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clip seleccionado</li>
-                <li>• <strong>Cmd/Ctrl+V</strong> - Pegar en playhead</li>
-                <li>• <strong>Cmd/Ctrl+D</strong> - Duplicar clip después del original</li>
+                <li>• <strong>Cmd/Ctrl+X</strong> - Cortar clips seleccionados</li>
+                <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clips seleccionados</li>
+                <li>• <strong>Cmd/Ctrl+V</strong> - Pegar selección en playhead (posiciones relativas)</li>
+                <li>• <strong>Cmd/Ctrl+D</strong> - Duplicar clips seleccionados</li>
                 <li>• <strong>Delete/Backspace</strong> - Eliminar clips seleccionados</li>
-                <li>• <strong>Escape</strong> - Cerrar menú contextual</li>
+                <li>• <strong>Escape</strong> - Cerrar menú o limpiar selección</li>
                 <li>• <strong>Cmd/Ctrl+A</strong> - Seleccionar todos los clips</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Shift+Z</strong> o <strong>Cmd/Ctrl+Y</strong> - Rehacer</li>

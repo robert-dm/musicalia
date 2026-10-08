@@ -11,18 +11,12 @@ import {
   login,
   verifyAuth,
   clearAuth,
-  listCloudProjects,
-  openProjectFromCloud,
-  deleteProjectFromCloud,
-  getStorageUsage,
-  migrateLegacyProjects,
   getAuthToken,
   hasAuth,
-  type ProjectMetadata,
   type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
-import { encodeAudioBufferWAV, audioBufferFromSerialized } from './wav'
+import { encodeAudioBufferWAV } from './wav'
 import { TrackHeader } from './TrackHeader'
 import { TrackLane } from './TrackLane'
 import { effectiveTrackGain, rampTrackGain } from './trackGain'
@@ -174,11 +168,8 @@ function App() {
   const [showAuth, setShowAuth] = useState(false)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [authLoading, setAuthLoading] = useState(false)
-  const [showCloudProjects, setShowCloudProjects] = useState(false)
-  const [cloudProjects, setCloudProjects] = useState<ProjectMetadata[]>([])
   const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
   const [uploadProgress, setUploadProgress] = useState(0)
-  const [storageUsage, setStorageUsage] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string>('')
   const [showExportDialog, setShowExportDialog] = useState(false)
@@ -663,23 +654,6 @@ function App() {
     setShowToast(true)
     setTimeout(() => setShowToast(false), 3000)
   }
-  
-  const handleMigrateLegacyProjects = async () => {
-    try {
-      const result = await migrateLegacyProjects()
-      setToastMessage(result.message)
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
-      
-      // Refresh project list after migration
-      const projects = await listCloudProjects()
-      setCloudProjects(projects)
-      const usage = await getStorageUsage()
-      setStorageUsage(usage)
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Error al migrar proyectos')
-    }
-  }
 
   const handleSaveToLocal = async (saveAs = false) => {
     try {
@@ -1042,177 +1016,6 @@ function App() {
     } finally {
       setUploadProgress(0)
       setExportProgress('')
-    }
-  }
-
-  const handleShowCloudProjects = async () => {
-    if (!currentUser) {
-      setShowAuth(true)
-      setAuthMode('login')
-      setErrorMessage('Inicia sesión para ver tus proyectos')
-      return
-    }
-    
-    try {
-      setErrorMessage(null)
-      const projects = await listCloudProjects()
-      setCloudProjects(projects)
-      const usage = await getStorageUsage()
-      setStorageUsage(usage)
-      setShowCloudProjects(true)
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Error al listar proyectos')
-    }
-  }
-  
-  const handleOpenCloudProject = async (pathname: string, name: string) => {
-    try {
-      setErrorMessage(null)
-      projectLoadGenRef.current++
-      console.log(`[Cloud Open] Starting cloud project load, gen=${projectLoadGenRef.current}`)
-      const state = await openProjectFromCloud(pathname)
-      
-      console.log(`[handleOpenCloudProject] Received state with ${state.tracks.length} tracks`)
-      state.tracks.forEach((t: any, i: number) => {
-        const clipCount = t.clips?.length || (t.clip ? 1 : 0)
-        console.log(`  Track ${i} (${t.name}): ${clipCount} clips`)
-      })
-      
-      await ensureAudio()
-      
-      setBpm(state.bpm)
-      setLoopStart(state.loopStart)
-      setLoopEnd(state.loopEnd)
-      commitPlayhead(state.playheadPosition)
-      if (state.metronomeEnabled !== undefined) setMetronomeEnabled(state.metronomeEnabled)
-      if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
-      
-      ensureTrackGains(state.tracks.length)
-      
-      const loadedTracks = state.tracks.map((t: any, i: number) => {
-        // Handle old format with single clip
-        if (t.clip) {
-          const buffer = audioBufferFromSerialized(t.clip.audioData)
-          
-          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-          const player = new Tone.Player()
-          player.buffer = toneBuffer
-          player.loop = true
-          
-          if (!trackGainsRef.current[i]) {
-            throw new Error(`Track gain ${i} no disponible. Reinicia la aplicación.`)
-          }
-          player.connect(trackGainsRef.current[i])
-          
-          return {
-            ...t,
-            name: resolveTrackName(t.name, i),
-            clips: [{
-              player,
-              fileName: t.clip.fileName,
-              isPlaying: false,
-              buffer,
-              startPosition: t.clip.startPosition,
-              offsetSeconds: t.clip.offsetSeconds ?? getCountInSeconds(),
-              id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`,
-              sourceStart: (t.clip as any).sourceStart ?? 0,
-              duration: (t.clip as any).duration ?? buffer.duration
-            }]
-          }
-        }
-        
-        // Handle new format with clips array
-        const loadedClips = (t.clips || []).map((clipData: any) => {
-          const buffer = audioBufferFromSerialized(clipData.audioData)
-          
-          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-          const player = new Tone.Player()
-          player.buffer = toneBuffer
-          player.loop = true
-          
-          if (!trackGainsRef.current[i]) {
-            throw new Error(`Track gain ${i} no disponible. Reinicia la aplicación.`)
-          }
-          player.connect(trackGainsRef.current[i])
-          
-          return {
-            player,
-            fileName: clipData.fileName,
-            isPlaying: false,
-            buffer,
-            startPosition: clipData.startPosition,
-            offsetSeconds: clipData.offsetSeconds ?? getCountInSeconds(),
-            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`,
-            sourceStart: clipData.sourceStart ?? 0,
-            duration: clipData.duration ?? buffer.duration
-          }
-        })
-        
-        return {
-          ...t,
-          name: resolveTrackName(t.name, i),
-          clips: loadedClips
-        }
-      })
-      
-      const newTrackStates = loadedTracks.length > 0
-        ? loadedTracks
-        : initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] }))
-      
-      console.log(`Setting ${newTrackStates.length} loaded tracks (no fixed cap)`)
-      if (newTrackStates[0]) console.log(`Track 0 clips:`, newTrackStates[0].clips.length)
-      if (newTrackStates[1]) console.log(`Track 1 clips:`, newTrackStates[1].clips.length)
-      
-      setTrackStates(newTrackStates)
-      setCurrentProjectName(name)
-      setShowCloudProjects(false)
-      
-      // Verify tracks actually have audio before showing success
-      const tracksWithAudio = newTrackStates.filter((t: any) => t.clips && t.clips.length > 0)
-      const totalClips = newTrackStates.reduce((sum: number, t: any) => sum + (t.clips?.length || 0), 0)
-      
-      console.log(`Loaded project "${name}": ${tracksWithAudio.length} tracks with ${totalClips} clips`)
-      
-      if (totalClips > 0) {
-        setToastMessage(`Proyecto abierto: ${totalClips} clips en ${tracksWithAudio.length} pistas`)
-        setShowToast(true)
-        setTimeout(() => setShowToast(false), 3000)
-      } else {
-        throw new Error('El proyecto se cargó pero no tiene audio. Los archivos pueden estar corruptos.')
-      }
-    } catch (err: any) {
-      console.error('Failed to open project:', err)
-      setErrorMessage(err.message || 'Error al abrir proyecto')
-    }
-  }
-  
-  const handleDeleteCloudProject = async (pathname: string, name: string) => {
-    if (!currentUser) {
-      setErrorMessage('Inicia sesión para eliminar proyectos')
-      return
-    }
-
-    if (!confirm(`¿Eliminar permanentemente "${name}"?`)) return
-    
-    try {
-      setErrorMessage(null)
-      await deleteProjectFromCloud(pathname)
-      
-      if (currentProjectName === name) {
-        await clearProject()
-        setCurrentProjectName('Proyecto sin título')
-      }
-      
-      const projects = await listCloudProjects()
-      setCloudProjects(projects)
-      const usage = await getStorageUsage()
-      setStorageUsage(usage)
-      
-      setToastMessage('Proyecto eliminado')
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Error al eliminar proyecto')
     }
   }
 
@@ -3552,14 +3355,6 @@ function App() {
           </button>
           <button 
             className="header-btn" 
-            onClick={handleShowCloudProjects}
-            title="Abrir proyectos anteriores guardados en la nube"
-            style={{ fontSize: '11px', padding: '8px 10px' }}
-          >
-            ☁️ Proyectos en la nube (anteriores)
-          </button>
-          <button 
-            className="header-btn" 
             onClick={handleOpenExportDialog}
             title="Exportar pistas seleccionadas"
           >
@@ -3953,45 +3748,6 @@ function App() {
         </div>
       )}
 
-      {showCloudProjects && (
-        <div className="drive-projects-modal">
-          <div className="modal-content">
-            <h2>Mis proyectos en la nube</h2>
-            <div className="storage-info">
-              Espacio usado: {(storageUsage / 1024 / 1024).toFixed(2)} MB
-              <button 
-                onClick={handleMigrateLegacyProjects}
-                style={{ marginLeft: '10px', padding: '4px 8px', fontSize: '12px' }}
-                title="Copiar proyectos compartidos antiguos a tu cuenta (no elimina los originales)"
-              >
-                📦 Copiar proyectos compartidos
-              </button>
-            </div>
-            <div className="projects-list">
-              {cloudProjects.length === 0 ? (
-                <p>No hay proyectos guardados</p>
-              ) : (
-                cloudProjects.map(project => (
-                  <div key={project.pathname} className="project-item">
-                    <div className="project-info">
-                      <div className="project-name">{project.name}</div>
-                      <div className="project-meta">
-                        {new Date(project.uploadedAt).toLocaleDateString()} · {(project.size / 1024 / 1024).toFixed(2)} MB
-                      </div>
-                    </div>
-                    <div className="project-actions">
-                      <button onClick={() => handleOpenCloudProject(project.pathname, project.name)}>Abrir</button>
-                      <button onClick={() => handleDeleteCloudProject(project.pathname, project.name)} className="delete-btn">Eliminar</button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-            <button className="modal-close" onClick={() => setShowCloudProjects(false)}>Cerrar</button>
-          </div>
-        </div>
-      )}
-      
       {isExporting && exportProgress && (
         <div className="export-progress-toast">
           {exportProgress}
@@ -4305,7 +4061,6 @@ function App() {
                 <li>• <strong>💾 Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe)</li>
                 <li>• <strong>📂 Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>
                 <li>• Los proyectos incluyen todo el audio y stems sin rehacer separación</li>
-                <li>• <strong>☁️ Proyectos en la nube (anteriores)</strong> - Abrir proyectos viejos de la nube</li>
               </ul>
               
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>

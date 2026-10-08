@@ -22,6 +22,10 @@ interface TrackHeaderProps {
   onDelete: (trackIndex: number) => void
   onMute: (trackIndex: number) => void
   onSolo: (trackIndex: number) => void
+  practiceActive?: boolean
+  isolated?: boolean
+  onPractice: (trackIndex: number) => void
+  onAislar: (trackIndex: number) => void
   onVolumeLive: (trackIndex: number, volume: number) => void
   onVolumeCommit: (trackIndex: number, volume: number) => void
   recordArmed?: boolean
@@ -50,6 +54,10 @@ export const TrackHeader = memo(function TrackHeader({
   onDelete,
   onMute,
   onSolo,
+  practiceActive = false,
+  isolated = false,
+  onPractice,
+  onAislar,
   onVolumeLive,
   onVolumeCommit,
   recordArmed = false,
@@ -107,6 +115,28 @@ export const TrackHeader = memo(function TrackHeader({
             {displayName}
           </div>
         )}
+        <button
+          type="button"
+          className={`control-button practice-button ${practiceActive ? 'active' : ''}`}
+          data-testid={`practice-${trackIndex}`}
+          onClick={() => onPractice(trackIndex)}
+          title="Practicar encima: silencia este instrumento y deja el resto"
+          aria-label="Practicar encima"
+          aria-pressed={practiceActive}
+        >
+          P
+        </button>
+        <button
+          type="button"
+          className={`control-button isolate-button ${isolated ? 'active' : ''}`}
+          data-testid={`aislar-${trackIndex}`}
+          onClick={() => onAislar(trackIndex)}
+          title="Aislar: solo este stem"
+          aria-label="Aislar"
+          aria-pressed={isolated}
+        >
+          Ais
+        </button>
         <button
           type="button"
           className="control-button track-delete-button"

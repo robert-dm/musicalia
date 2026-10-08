@@ -55,6 +55,14 @@ assert(
   !trackHeaderDataEqual(headerA, { ...headerA, autoOpen: true }),
   'automation open re-renders that header'
 )
+assert(
+  !trackHeaderDataEqual(headerA, { ...headerA, practiceActive: true }),
+  'practice toggle re-renders that header'
+)
+assert(
+  !trackHeaderDataEqual(headerA, { ...headerA, isolated: true }),
+  'aislar toggle re-renders that header'
+)
 
 const clips = [{ id: 'c1' }]
 const selected = new Set(['c1'])

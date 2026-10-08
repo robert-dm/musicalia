@@ -45,6 +45,35 @@ import {
   snapActiveDuringDrag
 } from './playheadSeek'
 import {
+  ContextMenuItem,
+  IconCircleHelp,
+  IconClipboardPaste,
+  IconCopy,
+  IconCopyPlus,
+  IconDownload,
+  IconFilePlus,
+  IconFolderOpen,
+  IconLogIn,
+  IconLogOut,
+  IconMagnet,
+  IconMetronome,
+  IconMoveHorizontal,
+  IconMoveVertical,
+  IconPause,
+  IconPencil,
+  IconPlay,
+  IconPlus,
+  IconRepeat,
+  IconSave,
+  IconScissors,
+  IconSkipBack,
+  IconSplit,
+  IconStop,
+  IconTrash,
+  IconVolume2,
+  IconYoutube
+} from './uiIcons'
+import {
   clampGroupTimeDelta,
   clampGroupTrackDelta,
   clientRectsIntersect,
@@ -3327,44 +3356,51 @@ function App() {
       
       <div className="transport-bar">
         <div className="transport-controls">
-          <button className="header-btn" onClick={handleNewProject} title="Nuevo proyecto">🆕</button>
+          <button className="header-btn icon-only" onClick={handleNewProject} title="Nuevo proyecto" aria-label="Nuevo proyecto">
+            <IconFilePlus />
+          </button>
           {currentUser ? (
-            <button 
-              className="header-btn" 
+            <button
+              className="header-btn"
               onClick={handleLogout}
               title={`Sesión: ${currentUser.username}`}
             >
-              👤 {currentUser.username}
+              <IconLogOut />
+              <span className="btn-label">{currentUser.username}</span>
             </button>
           ) : (
-            <button 
-              className="header-btn" 
+            <button
+              className="header-btn"
               onClick={() => { setShowAuth(true); setAuthMode('login') }}
               title="Iniciar sesión"
             >
-              🔑 Iniciar sesión
+              <IconLogIn />
+              <span className="btn-label">Sesión</span>
             </button>
           )}
-          <button 
-            className="header-btn" 
+          <button
+            className="header-btn"
             onClick={() => handleSaveToLocal(false)}
             title="Guardar proyecto (Cmd/Ctrl+S, Shift+Cmd/Ctrl+S para guardar como...)"
           >
-            💾 Guardar
+            <IconSave />
+            <span className="btn-label">Guardar</span>
           </button>
           <button
             className="header-btn"
             onClick={() => localFileInputRef.current?.click()}
             title="Abrir proyecto"
           >
-            📂 Abrir
+            <IconFolderOpen />
+            <span className="btn-label">Abrir</span>
           </button>
-          <button 
-            className="header-btn" 
+          <button
+            className="header-btn"
             onClick={handleOpenExportDialog}
             title="Exportar pistas seleccionadas"
           >
-            🎵 Exportar
+            <IconDownload />
+            <span className="btn-label">Exportar</span>
           </button>
           <button
             className="header-btn"
@@ -3383,10 +3419,12 @@ function App() {
             }}
             title="Importar desde YouTube"
           >
-            📺 YouTube
+            <IconYoutube />
+            <span className="btn-label">YouTube</span>
           </button>
           <button
-            className={`header-btn ${snapEnabled ? 'active' : ''}`}
+            className={`header-btn toggle-btn ${snapEnabled ? 'active' : ''}`}
+            aria-pressed={snapEnabled}
             onClick={() => {
               setSnapEnabled(prev => {
                 const next = !prev
@@ -3394,63 +3432,73 @@ function App() {
                 return next
               })
             }}
-            title="Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras"
+            title={`Snap ${snapEnabled ? 'ON' : 'OFF'}. Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras`}
           >
-            🧲 {snapEnabled ? 'Snap ON' : 'Snap OFF'}
+            <IconMagnet />
+            <span className="btn-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
           </button>
           <button
             className="header-btn"
             onClick={() => setShowHelp(true)}
             title="Atajos de teclado"
           >
-            ❓ Ayuda
+            <IconCircleHelp />
+            <span className="btn-label">Ayuda</span>
           </button>
         </div>
-        <div className="transport-playback">
+        <div className="transport-playback" role="group" aria-label="Transporte">
           <button
             className="transport-button icon-btn"
             onClick={handleJumpToStart}
             title="Ir al inicio"
+            aria-label="Ir al inicio"
           >
-            ⏮
+            <IconSkipBack size={15} />
           </button>
           <button
-            className={`transport-button icon-btn ${isPlaying ? 'active' : ''}`}
+            className={`transport-button icon-btn play-btn ${isPlaying ? 'active' : ''}`}
             onClick={handlePlay}
             disabled={isPlaying}
             title="Reproducir"
+            aria-label="Reproducir"
           >
-            ▶
+            <IconPlay size={14} />
           </button>
           <button
             className="transport-button icon-btn"
             onClick={handlePause}
             disabled={!isPlaying}
             title="Pausar"
+            aria-label="Pausar"
           >
-            ⏸
+            <IconPause size={14} />
           </button>
           <button
             className="transport-button icon-btn"
             onClick={handleStop}
             disabled={!isPlaying && !isPaused}
             title="Detener"
+            aria-label="Detener"
           >
-            ⏹
+            <IconStop size={13} />
           </button>
           <button
-            className={`transport-button ${metronomeEnabled ? 'active' : ''}`}
+            className={`transport-button toggle-btn ${metronomeEnabled ? 'active' : ''}`}
             onClick={() => setMetronomeEnabled(!metronomeEnabled)}
             title="Metrónomo (cuenta 2 compases antes)"
+            aria-label="Metrónomo"
+            aria-pressed={metronomeEnabled}
           >
-            🎵
+            <IconMetronome size={15} />
           </button>
           <button
-            className={`transport-button ${isLoopEnabled ? 'active' : ''}`}
+            className={`transport-button toggle-btn ${isLoopEnabled ? 'active' : ''}`}
             onClick={handleLoopToggle}
-            title="Activar loop - arrastra en el timeline para marcar zona"
+            title="Activar loop — arrastra en el timeline para marcar zona"
+            aria-label="Loop"
+            aria-pressed={isLoopEnabled}
           >
-            🔁
+            <IconRepeat size={15} />
           </button>
         </div>
         <div className="time-display">
@@ -3466,7 +3514,7 @@ function App() {
           </div>
         )}
         <div className="zoom-controls">
-          <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)">⬌</span>
+          <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)"><IconMoveHorizontal size={14} /></span>
           <input
             type="range"
             className="zoom-slider"
@@ -3477,7 +3525,7 @@ function App() {
             onChange={(e) => setHorizontalZoom(parseFloat(e.target.value))}
             title={`Zoom horizontal: ${(horizontalZoom * 100).toFixed(0)}%`}
           />
-          <span className="zoom-label" title="Zoom vertical (Shift+Rueda)">⬍</span>
+          <span className="zoom-label" title="Zoom vertical (Shift+Rueda)"><IconMoveVertical size={14} /></span>
           <input
             type="range"
             className="zoom-slider"
@@ -3507,7 +3555,9 @@ function App() {
             <span ref={meterDisplayRef} title="Output Level" className="level-inactive">
               -∞
             </span>
-            <button className="test-tone-btn" onClick={playTestTone} title="Test Tone (440Hz)">🔊</button>
+            <button className="test-tone-btn" onClick={playTestTone} title="Test Tone (440Hz)" aria-label="Tono de prueba">
+              <IconVolume2 size={13} />
+            </button>
           </div>
           <div className="version-badge">
             <span className="version-label">v{APP_VERSION}</span>
@@ -3553,36 +3603,20 @@ function App() {
             </p>
             <input
               type="text"
+              className="field-input"
               placeholder="https://youtube.com/watch?v=..."
               value={youtubeUrl}
               onChange={(e) => setYoutubeUrl(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '8px',
-                marginBottom: '12px',
-                fontSize: '14px',
-                borderRadius: '4px',
-                border: '1px solid #444',
-                background: '#2a2a2a',
-                color: '#fff'
-              }}
               disabled={isLoadingYoutube}
             />
             {youtubeError && (
-              <div style={{ color: '#ff6b6b', fontSize: '13px', marginBottom: '12px' }}>
+              <div style={{ color: 'var(--danger)', fontSize: '13px', margin: '12px 0' }}>
                 {youtubeError}
               </div>
             )}
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button 
-                className="modal-close" 
-                onClick={handleYoutubeImport}
-                disabled={isLoadingYoutube}
-              >
-                {isLoadingYoutube ? 'Cargando...' : 'Importar'}
-              </button>
-              <button 
-                className="modal-close" 
+            <div className="modal-actions">
+              <button
+                className="btn btn-ghost"
                 onClick={() => {
                   setShowYoutubeDialog(false)
                   setYoutubeUrl('')
@@ -3592,6 +3626,13 @@ function App() {
                 disabled={isLoadingYoutube}
               >
                 Cancelar
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={handleYoutubeImport}
+                disabled={isLoadingYoutube}
+              >
+                {isLoadingYoutube ? 'Cargando...' : 'Importar'}
               </button>
             </div>
           </div>
@@ -3651,9 +3692,9 @@ function App() {
                 )
               ))}
             </div>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '20px' }}>
-              <button className="modal-close" onClick={handleExport}>Exportar</button>
-              <button className="modal-close" onClick={() => setShowExportDialog(false)}>Cancelar</button>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setShowExportDialog(false)}>Cancelar</button>
+              <button className="btn btn-primary" onClick={handleExport}>Exportar</button>
             </div>
           </div>
         </div>
@@ -3673,31 +3714,31 @@ function App() {
                   formData.get('password') as string
                 )
               }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div className="modal-stack">
                   <input
                     type="email"
                     name="email"
+                    className="field-input"
                     placeholder="Email"
                     required
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
                     type="password"
                     name="password"
+                    className="field-input"
                     placeholder="Contraseña"
                     required
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
-                  <button type="submit" disabled={authLoading} style={{ padding: '8px' }}>
+                  <button type="submit" className="btn btn-primary" disabled={authLoading}>
                     {authLoading ? 'Iniciando sesión...' : 'Iniciar sesión'}
                   </button>
                   <button
                     type="button"
+                    className="btn btn-ghost"
                     onClick={() => { setAuthMode('register'); setErrorMessage(null) }}
                     disabled={authLoading}
-                    style={{ padding: '8px', background: '#444' }}
                   >
                     ¿No tienes cuenta? Crear una
                   </button>
@@ -3714,48 +3755,48 @@ function App() {
                   formData.get('password') as string
                 )
               }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div className="modal-stack">
                   <input
                     type="text"
                     name="username"
+                    className="field-input"
                     placeholder="Usuario"
                     required
                     minLength={3}
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
                     type="email"
                     name="email"
+                    className="field-input"
                     placeholder="Email"
                     required
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
                   <input
                     type="password"
                     name="password"
+                    className="field-input"
                     placeholder="Contraseña (mínimo 6 caracteres)"
                     required
                     minLength={6}
                     disabled={authLoading}
-                    style={{ padding: '8px', fontSize: '14px' }}
                   />
-                  <button type="submit" disabled={authLoading} style={{ padding: '8px' }}>
+                  <button type="submit" className="btn btn-primary" disabled={authLoading}>
                     {authLoading ? 'Creando cuenta...' : 'Crear cuenta'}
                   </button>
                   <button
                     type="button"
+                    className="btn btn-ghost"
                     onClick={() => { setAuthMode('login'); setErrorMessage(null) }}
                     disabled={authLoading}
-                    style={{ padding: '8px', background: '#444' }}
                   >
                     ¿Ya tienes cuenta? Iniciar sesión
                   </button>
                 </div>
               </form>
             )}
-            <button className="modal-close" onClick={() => { setShowAuth(false); setErrorMessage(null); setAuthLoading(false) }}>Cerrar</button>
+            <button className="btn btn-ghost" onClick={() => { setShowAuth(false); setErrorMessage(null); setAuthLoading(false) }}>Cerrar</button>
           </div>
         </div>
       )}
@@ -3773,7 +3814,7 @@ function App() {
             ref={sidebarScrollRef}
             onScroll={() => syncVerticalScroll('sidebar')}
           >
-            <div className="ruler-spacer" style={{ height: '32px', flexShrink: 0, borderBottom: '1px solid #333' }} />
+            <div className="ruler-spacer" />
             {trackStates.map((trackState, trackIndex) => (
               <TrackHeader
                 key={trackIndex}
@@ -3818,7 +3859,8 @@ function App() {
               })
             }}
           >
-            + Agregar pista
+            <IconPlus size={14} />
+            Agregar pista
           </button>
         </div>
         <div 
@@ -3917,73 +3959,46 @@ function App() {
           >
             {contextMenu.kind === 'header' ? (
               <>
-                <button
-                  type="button"
-                  className="context-menu-item"
-                  onClick={() => startRenameTrack(contextMenu.trackIndex)}
-                >
-                  Renombrar pista
-                </button>
-                <button
-                  type="button"
-                  className="context-menu-item"
-                  onClick={addEmptyTrack}
-                >
-                  Agregar pista
-                </button>
+                <ContextMenuItem icon={<IconPencil />} label="Renombrar pista" onClick={() => startRenameTrack(contextMenu.trackIndex)} />
+                <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
                 <div className="context-menu-sep" />
-                <button
-                  type="button"
-                  className={`context-menu-item danger ${trackStates.length <= 1 ? 'disabled' : ''}`}
+                <ContextMenuItem
+                  icon={<IconTrash />}
+                  label="Eliminar pista"
+                  danger
                   disabled={trackStates.length <= 1}
                   onClick={() => requestDeleteTrack(contextMenu.trackIndex)}
-                >
-                  Eliminar pista
-                </button>
+                />
               </>
             ) : contextMenu.kind === 'empty' ? (
-              <button
-                type="button"
-                className="context-menu-item"
-                onClick={addEmptyTrack}
-              >
-                Agregar pista
-              </button>
+              <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
             ) : contextMenu.clipId ? (
               <>
-                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('cut')}>Cortar</button>
-                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('copy')}>Copiar</button>
-                <button
-                  type="button"
-                  className={`context-menu-item ${clipboard && clipboard.length ? '' : 'disabled'}`}
+                <ContextMenuItem icon={<IconScissors />} label="Cortar" shortcut="Ctrl+X" onClick={() => runContextMenuAction('cut')} />
+                <ContextMenuItem icon={<IconCopy />} label="Copiar" shortcut="Ctrl+C" onClick={() => runContextMenuAction('copy')} />
+                <ContextMenuItem
+                  icon={<IconClipboardPaste />}
+                  label="Pegar"
+                  shortcut="Ctrl+V"
                   disabled={!clipboard || clipboard.length === 0}
                   onClick={() => runContextMenuAction('paste')}
-                >
-                  Pegar
-                </button>
+                />
                 <div className="context-menu-sep" />
-                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('split')}>Dividir aquí</button>
-                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('duplicate')}>Duplicar</button>
-                <button type="button" className="context-menu-item danger" onClick={() => runContextMenuAction('delete')}>Eliminar</button>
+                <ContextMenuItem icon={<IconSplit />} label="Dividir aquí" shortcut="S" onClick={() => runContextMenuAction('split')} />
+                <ContextMenuItem icon={<IconCopyPlus />} label="Duplicar" shortcut="Ctrl+D" onClick={() => runContextMenuAction('duplicate')} />
+                <ContextMenuItem icon={<IconTrash />} label="Eliminar" shortcut="Del" danger onClick={() => runContextMenuAction('delete')} />
               </>
             ) : (
               <>
-                <button
-                  type="button"
-                  className={`context-menu-item ${clipboard && clipboard.length ? '' : 'disabled'}`}
+                <ContextMenuItem
+                  icon={<IconClipboardPaste />}
+                  label="Pegar aquí"
+                  shortcut="Ctrl+V"
                   disabled={!clipboard || clipboard.length === 0}
                   onClick={() => runContextMenuAction('paste')}
-                >
-                  Pegar aquí
-                </button>
+                />
                 <div className="context-menu-sep" />
-                <button
-                  type="button"
-                  className="context-menu-item"
-                  onClick={addEmptyTrack}
-                >
-                  Agregar pista
-                </button>
+                <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
               </>
             )}
           </div>
@@ -4022,11 +4037,11 @@ function App() {
 
       {showHelp && (
         <div className="drive-projects-modal">
-          <div className="modal-content" style={{ maxWidth: '600px' }}>
+          <div className="modal-content help-modal" style={{ maxWidth: '600px' }}>
             <h2>Atajos de teclado y gestos</h2>
-            <div style={{ fontSize: '13px', color: '#ccc', lineHeight: '1.8', marginBottom: '16px' }}>
-              <h3 style={{ color: '#0a5', marginTop: '12px', marginBottom: '8px' }}>Edición de clips</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
+            <div>
+              <h3>Edición de clips</h3>
+              <ul>
                 <li>• <strong>Click derecho en un clip</strong> - Menú: Cortar, Copiar, Pegar, Dividir aquí, Duplicar, Eliminar</li>
                 <li>• <strong>Click derecho en una pista vacía</strong> - Pegar aquí (en la posición del cursor, con snap si está activo)</li>
                 <li>• <strong>Click</strong> - Seleccionar clip y mover playhead</li>
@@ -4038,12 +4053,12 @@ function App() {
                 <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
-                <li>• <strong>Botón 🧲 Snap</strong> - Empieza en OFF. Activa/desactiva el ajuste a cuadrícula (se recuerda)</li>
+                <li>• <strong>Botón Snap</strong> - Empieza en OFF. Activa/desactiva el ajuste a cuadrícula (se recuerda)</li>
                 <li>• <strong>Shift al arrastrar</strong> - Invierte el snap mientras arrastras (lo enciende si está OFF, lo apaga si está ON)</li>
               </ul>
 
-              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Pistas</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
+              <h3>Pistas</h3>
+              <ul>
                 <li>• <strong>Doble clic en el nombre</strong> - Renombrar pista (Enter o clic fuera guarda, Escape cancela)</li>
                 <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
                 <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar pista, Agregar pista, Eliminar pista</li>
@@ -4052,8 +4067,8 @@ function App() {
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
               </ul>
               
-              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Teclado</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
+              <h3>Teclado</h3>
+              <ul>
                 <li>• <strong>Cmd/Ctrl+S</strong> - Guardar proyecto localmente</li>
                 <li>• <strong>Shift+Cmd/Ctrl+S</strong> - Guardar como... (nueva ubicación)</li>
                 <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead</li>
@@ -4068,22 +4083,22 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+Shift+Z</strong> o <strong>Cmd/Ctrl+Y</strong> - Rehacer</li>
               </ul>
               
-              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Guardar y Abrir</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
-                <li>• <strong>💾 Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe)</li>
-                <li>• <strong>📂 Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>
+              <h3>Guardar y Abrir</h3>
+              <ul>
+                <li>• <strong>Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe)</li>
+                <li>• <strong>Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>
                 <li>• Los proyectos incluyen todo el audio y stems sin rehacer separación</li>
               </ul>
               
-              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>
-              <ul style={{ listStyle: 'none', padding: 0 }}>
+              <h3>Transporte</h3>
+              <ul>
                 <li>• <strong>Espacio</strong> - Reproducir/Pausar</li>
                 <li>• <strong>Click en timeline, regla o clip</strong> - Mover playhead (siempre visible, también en pausa)</li>
                 <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
                 <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>
               </ul>
             </div>
-            <button className="modal-close" onClick={() => setShowHelp(false)}>Cerrar</button>
+            <button className="btn btn-primary" onClick={() => setShowHelp(false)}>Cerrar</button>
           </div>
         </div>
       )}

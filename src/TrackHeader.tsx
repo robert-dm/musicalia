@@ -2,6 +2,7 @@ import { memo, useRef } from 'react'
 import { LiveParamSlider } from './LiveParamSlider'
 import { resolveTrackName } from './clipSelection'
 import { trackHeaderDataEqual } from './trackRenderMemo'
+import { IconTrash } from './uiIcons'
 
 interface TrackHeaderProps {
   trackIndex: number
@@ -105,12 +106,7 @@ export const TrackHeader = memo(function TrackHeader({
             onDelete(trackIndex)
           }}
         >
-          <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
-            <path
-              fill="currentColor"
-              d="M6.2 2h3.6l.4 1.2H14v1.2H2V3.2h3.8L6.2 2zM3.2 5.2h9.6l-.7 8.4c-.1.7-.7 1.2-1.4 1.2H5.3c-.7 0-1.3-.5-1.4-1.2l-.7-8.4zM6.4 6.4v6H5.2v-6h1.2zm4.4 0v6H9.6v-6h1.2z"
-            />
-          </svg>
+          <IconTrash size={13} />
         </button>
       </div>
       <div className="track-controls">
@@ -118,6 +114,7 @@ export const TrackHeader = memo(function TrackHeader({
           className={`control-button mute-button ${mute ? 'active' : ''}`}
           onClick={() => onMute(trackIndex)}
           title="Mute"
+          aria-pressed={mute}
         >
           M
         </button>
@@ -125,6 +122,7 @@ export const TrackHeader = memo(function TrackHeader({
           className={`control-button solo-button ${solo ? 'active' : ''}`}
           onClick={() => onSolo(trackIndex)}
           title="Solo"
+          aria-pressed={solo}
         >
           S
         </button>

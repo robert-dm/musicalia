@@ -32,6 +32,15 @@ export function getOrComputePeaks(buffer: AudioBuffer, peaksPerPixel = 4096): Fl
   return peaks
 }
 
+export function waveformVerticalLayout(height: number): { centerY: number; amp: number } {
+  const h = Math.max(1, Number.isFinite(height) ? height : 1)
+  const pad = Math.max(0, Math.min(h * 0.06, (h - 1) / 2))
+  return {
+    centerY: h / 2,
+    amp: Math.max(0.5, (h - pad * 2) / 2)
+  }
+}
+
 export function drawWaveform(
   canvas: HTMLCanvasElement,
   buffer: AudioBuffer,
@@ -51,11 +60,7 @@ export function drawWaveform(
   const endSample = Math.floor((sourceStart + clipDuration) * buffer.sampleRate)
   const sampleCount = Math.max(1, endSample - startSample)
 
-  const topPadding = 48
-  const bottomPadding = 16
-  const waveformHeight = height - topPadding - bottomPadding
-  const amp = waveformHeight / 2
-  const centerY = topPadding + waveformHeight / 2
+  const { centerY, amp } = waveformVerticalLayout(height)
 
   ctx.fillStyle = '#1a1a1a'
   ctx.fillRect(0, 0, width, height)

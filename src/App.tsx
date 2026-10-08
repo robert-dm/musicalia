@@ -139,7 +139,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0075b'
+const APP_VERSION = '0.0076b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -4684,6 +4684,7 @@ function App() {
                 <li>• <strong>+ Agregar pista</strong> - Añade una pista vacía al final (Pista 9, 10, …). También en una pista vacía o zona vacía (clic derecho). Se puede deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
+                <li>• <strong>Zoom vertical</strong> - La forma de onda queda centrada en el clip a cualquier altura (también al mínimo del slider)</li>
                 <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
                 <li>• <strong>Botón FX</strong> - Abre el rack de efectos de esa pista (EQ, compresor, filtro, delay, reverb y pan). Cada módulo tiene knobs y bypass On/Off</li>
                 <li>• <strong>Botón A (curva)</strong> - Muestra la pista de automatización. Elegí el parámetro (volumen, pan o un knob de efecto) y dibujá la curva</li>

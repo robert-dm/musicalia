@@ -11,8 +11,6 @@ import {
   login,
   verifyAuth,
   clearAuth,
-  getAuthToken,
-  hasAuth,
   type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
@@ -45,6 +43,14 @@ import {
   snapActiveDuringDrag
 } from './playheadSeek'
 import {
+  dataTransferHasFiles,
+  dropTimeOnLane,
+  ignoredAudioToast,
+  partitionDroppedFiles,
+  resolveDropPlacement,
+  trackIndexFromPoint
+} from './audioImport'
+import {
   ContextMenuItem,
   IconCircleHelp,
   IconClipboardPaste,
@@ -70,8 +76,7 @@ import {
   IconSplit,
   IconStop,
   IconTrash,
-  IconVolume2,
-  IconYoutube
+  IconVolume2
 } from './uiIcons'
 import {
   clampGroupTimeDelta,
@@ -140,10 +145,7 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const localFileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
-  const [showYoutubeDialog, setShowYoutubeDialog] = useState(false)
-  const [youtubeUrl, setYoutubeUrl] = useState('')
-  const [isLoadingYoutube, setIsLoadingYoutube] = useState(false)
-  const [youtubeError, setYoutubeError] = useState<string | null>(null)
+  const [fileDragActive, setFileDragActive] = useState(false)
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const audioInitializedRef = useRef(false)
   const [sidebarWidth, setSidebarWidth] = useState(220)
@@ -194,6 +196,11 @@ function App() {
   const [isProcessingStems, setIsProcessingStems] = useState(false)
   const stemAbortControllerRef = useRef<AbortController | null>(null)
   const pendingFileRef = useRef<File | null>(null)
+  const pendingOffsetRef = useRef(0)
+  const importQueueRef = useRef<Array<{ file: File; trackIndex: number; createNew: boolean; offsetSeconds: number }>>([])
+  const importUndoSavedRef = useRef(false)
+  const fileDragDepthRef = useRef(0)
+  const highlightedDropTrackRef = useRef<number | null>(null)
   const metronomePlayerRef = useRef<Tone.Player | null>(null)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() =>
     initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] }))
@@ -2449,27 +2456,109 @@ function App() {
     }
   }
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file || selectedTrack === null) return
+  const highlightDropTrack = (index: number | null) => {
+    if (highlightedDropTrackRef.current === index) return
+    document.querySelectorAll('.track-content.drop-target').forEach((el) => {
+      el.classList.remove('drop-target')
+    })
+    if (index != null) {
+      document.querySelector(`.track-content[data-track-index="${index}"]`)?.classList.add('drop-target')
+    }
+    highlightedDropTrackRef.current = index
+  }
 
-    // Check if stem separation is supported
-    const { supported, reason } = isStemSeparationSupported()
-    
-    if (!supported) {
-      console.warn('Stem separation not supported:', reason)
-      alert(`Separación de stems no disponible: ${reason}\n\nCargando como pista única.`)
-      await loadSingleTrack(file, selectedTrack)
-      setSelectedTrack(null)
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
+  const clearFileDrag = () => {
+    fileDragDepthRef.current = 0
+    setFileDragActive(false)
+    highlightDropTrack(null)
+  }
+
+  const beginImportUndo = () => {
+    if (importUndoSavedRef.current) return
+    saveUndo()
+    importUndoSavedRef.current = true
+  }
+
+  const finishImportBatchIfIdle = () => {
+    if (importQueueRef.current.length === 0 && !pendingFileRef.current) {
+      importUndoSavedRef.current = false
+    }
+  }
+
+  const appendTracksForImport = (count: number) => {
+    if (count <= 0) return
+    beginImportUndo()
+    const next = [...trackStatesRef.current]
+    for (let i = 0; i < count; i++) {
+      next.push({
+        ...createEmptyTrack(nextPistaName(next.map(t => t.name), next.length)),
+        clips: [] as Clip[]
+      })
+    }
+    ensureTrackGains(next.length)
+    trackStatesRef.current = next
+    setTrackStates(next)
+  }
+
+  const processNextImport = async () => {
+    if (pendingFileRef.current) return
+    const next = importQueueRef.current.shift()
+    if (!next) {
+      finishImportBatchIfIdle()
       return
     }
-
-    // Store the file and show dialog
-    pendingFileRef.current = file
+    beginImportUndo()
+    let trackIndex = next.trackIndex
+    if (next.createNew) {
+      appendTracksForImport(1)
+      trackIndex = trackStatesRef.current.length - 1
+    }
+    setSelectedTrack(trackIndex)
+    pendingOffsetRef.current = next.offsetSeconds
+    const { supported, reason } = isStemSeparationSupported()
+    if (!supported) {
+      console.warn('Stem separation not supported:', reason)
+      await loadSingleTrack(next.file, trackIndex, next.offsetSeconds)
+      setSelectedTrack(null)
+      void processNextImport()
+      return
+    }
+    pendingFileRef.current = next.file
     setShowStemDialog(true)
+  }
+
+  const enqueueAudioImports = (
+    files: File[],
+    hoverTrackIndex: number | null,
+    offsetSeconds: number
+  ) => {
+    if (files.length === 0) return
+    const placements = resolveDropPlacement(files.length, hoverTrackIndex, trackStatesRef.current.length)
+    importQueueRef.current.push(...files.map((file, i) => ({
+      file,
+      trackIndex: placements[i].trackIndex,
+      createNew: placements[i].createNew,
+      offsetSeconds
+    })))
+    void processNextImport()
+  }
+
+  const toastIgnoredFiles = (count: number) => {
+    const message = ignoredAudioToast(count)
+    if (!message) return
+    setErrorMessage(message)
+    setTimeout(() => setErrorMessage(null), 4000)
+  }
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const list = e.target.files
+    if (!list || list.length === 0) return
+    const { audio, ignored } = partitionDroppedFiles(Array.from(list))
+    toastIgnoredFiles(ignored.length)
+    if (audio.length > 0) {
+      enqueueAudioImports(audio, selectedTrack, getCountInSeconds())
+    }
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const handleStemDialogConfirm = async () => {
@@ -2481,20 +2570,17 @@ function App() {
 
     const file = pendingFileRef.current
     const track = selectedTrack
+    const offset = pendingOffsetRef.current
 
     try {
-      await processStemSeparation(file, track)
+      await processStemSeparation(file, track, offset)
     } catch (error) {
       console.error('Stem separation failed:', error)
       const errorMessage = error instanceof Error ? error.message : 'Error desconocido'
-      
-      // Show error message via toast/error system instead of alert
       setErrorMessage(`⚠️ Separación de stems no disponible: ${errorMessage}`)
       setTimeout(() => setErrorMessage(null), 5000)
-      
-      // Fall back to single track import
       try {
-        await loadSingleTrack(file, track)
+        await loadSingleTrack(file, track, offset)
         setToastMessage('Audio cargado como pista única')
         setShowToast(true)
         setTimeout(() => setShowToast(false), 3000)
@@ -2508,10 +2594,8 @@ function App() {
       stemAbortControllerRef.current = null
       pendingFileRef.current = null
       setSelectedTrack(null)
-      
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
+      if (fileInputRef.current) fileInputRef.current.value = ''
+      void processNextImport()
     }
   }
 
@@ -2522,158 +2606,80 @@ function App() {
     setShowStemDialog(false)
     setIsProcessingStems(false)
     setStemProgress(0)
-    
-    // Fall back to single track
     if (pendingFileRef.current && selectedTrack !== null) {
-      loadSingleTrack(pendingFileRef.current, selectedTrack).catch(console.error)
+      loadSingleTrack(pendingFileRef.current, selectedTrack, pendingOffsetRef.current).catch(console.error)
     }
-    
     pendingFileRef.current = null
     setSelectedTrack(null)
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    void processNextImport()
   }
 
   const handleStemDialogCancel = async () => {
     setShowStemDialog(false)
     if (!pendingFileRef.current || selectedTrack === null) return
-
-    await loadSingleTrack(pendingFileRef.current, selectedTrack)
-    
+    await loadSingleTrack(pendingFileRef.current, selectedTrack, pendingOffsetRef.current)
     pendingFileRef.current = null
     setSelectedTrack(null)
-    
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    void processNextImport()
   }
 
-  const handleYoutubeImport = async () => {
-    if (!youtubeUrl.trim()) {
-      setYoutubeError('Ingresa una URL de YouTube')
-      return
-    }
-
-    if (selectedTrack === null) {
-      setYoutubeError('Selecciona una pista primero')
-      return
-    }
-
-    setIsLoadingYoutube(true)
-    setYoutubeError(null)
-
-    try {
-      // Initial request to check if chunking is needed
-      const initialResponse = await fetch('/api/youtube-audio', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${getAuthToken()}`
-        },
-        body: JSON.stringify({ url: youtubeUrl })
-      })
-
-      if (!initialResponse.ok) {
-        const error = await initialResponse.json()
-        throw new Error(error.error || 'Error al obtener audio de YouTube')
-      }
-
-      const contentType = initialResponse.headers.get('Content-Type') || 'audio/mp4'
-      
-      // Check if response is JSON (chunking metadata) or binary (direct stream)
-      let audioBlob: Blob
-      let videoTitle = 'YouTube Audio'
-      
-      if (contentType.includes('application/json')) {
-        // Chunked response - fetch all chunks
-        const metadata = await initialResponse.json()
-        
-        if (!metadata.needsChunking) {
-          throw new Error('Respuesta inesperada del servidor')
-        }
-        
-        videoTitle = metadata.videoTitle
-        const chunks: Uint8Array[] = []
-        
-        console.log(`[YouTube] Fetching ${metadata.totalChunks} chunks (${(metadata.estimatedSize / 1024 / 1024).toFixed(1)}MB)`)
-        
-        // Fetch all chunks sequentially
-        for (let i = 0; i < metadata.totalChunks; i++) {
-          console.log(`[YouTube] Fetching chunk ${i + 1}/${metadata.totalChunks}`)
-          
-          const chunkResponse = await fetch('/api/youtube-audio', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${getAuthToken()}`
-            },
-            body: JSON.stringify({ url: youtubeUrl, chunkIndex: i })
-          })
-          
-          if (!chunkResponse.ok) {
-            throw new Error(`Error en chunk ${i + 1}: ${chunkResponse.statusText}`)
-          }
-          
-          const chunkData = await chunkResponse.arrayBuffer()
-          chunks.push(new Uint8Array(chunkData))
-          
-          // Optional: Update progress if we want to show it
-          // const progress = Math.round(((i + 1) / metadata.totalChunks) * 100)
-        }
-        
-        // Concatenate all chunks
-        const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0)
-        const combined = new Uint8Array(totalLength)
-        let offset = 0
-        for (const chunk of chunks) {
-          combined.set(chunk, offset)
-          offset += chunk.length
-        }
-        
-        audioBlob = new Blob([combined], { type: metadata.mimeType })
-        
-      } else {
-        // Direct streaming response (small file)
-        videoTitle = decodeURIComponent(initialResponse.headers.get('X-Video-Title') || 'YouTube Audio')
-        audioBlob = await initialResponse.blob()
-      }
-      
-      const file = new File([audioBlob], `${videoTitle}.${contentType.includes('webm') ? 'webm' : 'm4a'}`, { type: contentType })
-
-      // Close dialog
-      setShowYoutubeDialog(false)
-      setYoutubeUrl('')
-
-      // Check if stem separation is supported
-      const { supported, reason } = await isStemSeparationSupported()
-      
-      if (!supported) {
-        console.warn('Stem separation not supported:', reason)
-        alert(`Separación de stems no disponible: ${reason}\n\nCargando como pista única.`)
-        await loadSingleTrack(file, selectedTrack)
-        setSelectedTrack(null)
-        return
-      }
-
-      // Store the file and show dialog
-      pendingFileRef.current = file
-      setShowStemDialog(true)
-
-    } catch (error: any) {
-      console.error('YouTube import error:', error)
-      setYoutubeError(error.message || 'Error al importar desde YouTube')
-    } finally {
-      setIsLoadingYoutube(false)
-    }
+  const handleAppDragEnter = (e: React.DragEvent) => {
+    if (!dataTransferHasFiles(e.dataTransfer.types)) return
+    e.preventDefault()
+    fileDragDepthRef.current++
+    setFileDragActive(true)
   }
 
-  const loadSingleTrack = async (file: File, trackIndex: number) => {
+  const handleAppDragOver = (e: React.DragEvent) => {
+    if (!dataTransferHasFiles(e.dataTransfer.types)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    highlightDropTrack(trackIndexFromPoint(e.clientX, e.clientY))
+  }
+
+  const handleAppDragLeave = (e: React.DragEvent) => {
+    if (!dataTransferHasFiles(e.dataTransfer.types)) return
+    fileDragDepthRef.current--
+    if (fileDragDepthRef.current <= 0) clearFileDrag()
+  }
+
+  const handleAppDrop = (e: React.DragEvent) => {
+    if (!dataTransferHasFiles(e.dataTransfer.types)) return
+    e.preventDefault()
+    e.stopPropagation()
+    const hover = trackIndexFromPoint(e.clientX, e.clientY)
+    clearFileDrag()
+    const { audio, ignored } = partitionDroppedFiles(Array.from(e.dataTransfer.files || []))
+    toastIgnoredFiles(ignored.length)
+    if (audio.length === 0) return
+    let offset = getCountInSeconds()
+    if (hover != null) {
+      const lane = document.querySelector(`.track-content[data-track-index="${hover}"]`) as HTMLElement | null
+      if (lane) {
+        const rect = lane.getBoundingClientRect()
+        offset = dropTimeOnLane(
+          e.clientX,
+          rect.left,
+          rect.width,
+          timelineMaxRef.current || 100,
+          snapEnabled,
+          snapToGrid
+        )
+      }
+    }
+    enqueueAudioImports(audio, hover, offset)
+  }
+
+  const loadSingleTrack = async (file: File, trackIndex: number, offsetSeconds?: number) => {
     await ensureAudio()
+    beginImportUndo()
     console.log('[DEBUG] loadSingleTrack: trackIndex=', trackIndex, 'gain exists=', !!trackGainsRef.current[trackIndex])
 
     const url = URL.createObjectURL(file)
     const trackGain = trackGainsRef.current[trackIndex]
+    if (!trackGain) return
     
     const player = new Tone.Player()
     player.loop = false
@@ -2704,22 +2710,25 @@ function App() {
       isPlaying: false,
       buffer,
       startPosition: 0,
-      offsetSeconds: getCountInSeconds(),
+      offsetSeconds: offsetSeconds ?? getCountInSeconds(),
       id: `clip-${Date.now()}-${Math.random()}`,
       sourceStart: 0,
       duration: buffer.duration
     }
 
-    const newTrackStates = [...trackStates]
+    const newTrackStates = [...trackStatesRef.current]
+    if (!newTrackStates[trackIndex]) return
     newTrackStates[trackIndex] = {
       ...newTrackStates[trackIndex],
       clips: [...newTrackStates[trackIndex].clips, newClip]
     }
+    trackStatesRef.current = newTrackStates
     setTrackStates(newTrackStates)
   }
 
-  const processStemSeparation = async (file: File, startTrackIndex: number) => {
+  const processStemSeparation = async (file: File, startTrackIndex: number, offsetSeconds?: number) => {
     await ensureAudio()
+    beginImportUndo()
 
     const abortController = new AbortController()
     stemAbortControllerRef.current = abortController
@@ -2763,7 +2772,7 @@ function App() {
       console.log(`  ${stemNames[i]}: peak=${peak.toFixed(4)}, rms=${rms.toFixed(4)}, rms_dB=${(20 * Math.log10(rms)).toFixed(1)}`)
     })
     
-    const newTrackStates = [...trackStates]
+    const newTrackStates = [...trackStatesRef.current]
     const needed = startTrackIndex + stemBuffers.length
     while (newTrackStates.length < needed) {
       newTrackStates.push({
@@ -2772,7 +2781,7 @@ function App() {
       })
     }
     ensureTrackGains(newTrackStates.length)
-    const stemOffset = getCountInSeconds()
+    const stemOffset = offsetSeconds ?? getCountInSeconds()
 
     for (let i = 0; i < stemBuffers.length; i++) {
       const targetTrackIndex = startTrackIndex + i
@@ -2804,6 +2813,7 @@ function App() {
       }
     }
 
+    trackStatesRef.current = newTrackStates
     setTrackStates(newTrackStates)
   }
 
@@ -3330,11 +3340,19 @@ function App() {
   }, [bpm, trackStates])
 
   return (
-    <div className="app" data-app-commits={appCommitCountRef.current}>
+    <div
+      className={`app${fileDragActive ? ' file-drag' : ''}`}
+      data-app-commits={appCommitCountRef.current}
+      onDragEnter={handleAppDragEnter}
+      onDragOver={handleAppDragOver}
+      onDragLeave={handleAppDragLeave}
+      onDrop={handleAppDrop}
+    >
       <input
         ref={fileInputRef}
         type="file"
-        accept="audio/wav,audio/mpeg,audio/mp3,audio/ogg,audio/webm,audio/*"
+        accept="audio/wav,audio/mpeg,audio/mp3,audio/ogg,audio/webm,audio/flac,audio/aac,audio/x-m4a,.mp3,.wav,.ogg,.m4a,.flac,.aac"
+        multiple
         style={{ display: 'none' }}
         onChange={handleFileSelect}
       />
@@ -3401,26 +3419,6 @@ function App() {
           >
             <IconDownload />
             <span className="btn-label">Exportar</span>
-          </button>
-          <button
-            className="header-btn"
-            onClick={() => {
-              if (!hasAuth()) {
-                setErrorMessage('Inicia sesión para importar desde YouTube')
-                setTimeout(() => setErrorMessage(null), 3000)
-                return
-              }
-              let emptyIndex = trackStates.findIndex(t => t.clips.length === 0)
-              if (emptyIndex < 0) {
-                emptyIndex = addEmptyTrack()
-              }
-              setSelectedTrack(emptyIndex)
-              setShowYoutubeDialog(true)
-            }}
-            title="Importar desde YouTube"
-          >
-            <IconYoutube />
-            <span className="btn-label">YouTube</span>
           </button>
           <button
             className={`header-btn toggle-btn ${snapEnabled ? 'active' : ''}`}
@@ -3567,6 +3565,12 @@ function App() {
         </div>
       </div>
 
+      {fileDragActive && (
+        <div className="drop-overlay" data-testid="drop-overlay">
+          <span>Soltá archivos de audio</span>
+        </div>
+      )}
+
       {showStemDialog && (
         <StemSplitDialog
           onConfirm={handleStemDialogConfirm}
@@ -3596,51 +3600,6 @@ function App() {
         </div>
       )}
       
-      {showYoutubeDialog && (
-        <div className="drive-projects-modal">
-          <div className="modal-content">
-            <h2>Importar desde YouTube</h2>
-            <p style={{ fontSize: '13px', color: '#999', marginBottom: '16px' }}>
-              Pega la URL de un video de YouTube (máximo 10 minutos)
-            </p>
-            <input
-              type="text"
-              className="field-input"
-              placeholder="https://youtube.com/watch?v=..."
-              value={youtubeUrl}
-              onChange={(e) => setYoutubeUrl(e.target.value)}
-              disabled={isLoadingYoutube}
-            />
-            {youtubeError && (
-              <div style={{ color: 'var(--danger)', fontSize: '13px', margin: '12px 0' }}>
-                {youtubeError}
-              </div>
-            )}
-            <div className="modal-actions">
-              <button
-                className="btn btn-ghost"
-                onClick={() => {
-                  setShowYoutubeDialog(false)
-                  setYoutubeUrl('')
-                  setYoutubeError(null)
-                  setSelectedTrack(null)
-                }}
-                disabled={isLoadingYoutube}
-              >
-                Cancelar
-              </button>
-              <button
-                className="btn btn-primary"
-                onClick={handleYoutubeImport}
-                disabled={isLoadingYoutube}
-              >
-                {isLoadingYoutube ? 'Cargando...' : 'Importar'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {showExportDialog && (
         <div className="drive-projects-modal">
           <div className="modal-content">
@@ -4055,6 +4014,7 @@ function App() {
                 <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
+                <li>• <strong>Arrastrar archivos de audio</strong> - Soltalos en una pista para colocarlos ahí (con snap si está activo). Fuera de una pista se crea una pista nueva. Varios archivos: una pista por archivo</li>
                 <li>• <strong>Botón Snap</strong> - Empieza en OFF. Activa/desactiva el ajuste a cuadrícula (se recuerda)</li>
                 <li>• <strong>Shift al arrastrar</strong> - Invierte el snap mientras arrastras (lo enciende si está OFF, lo apaga si está ON)</li>
               </ul>

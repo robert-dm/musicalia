@@ -199,7 +199,7 @@ export const TrackLane = memo(function TrackLane({
         </div>
       ) : (
         <div className="empty-lane">
-          <span className="import-hint">Doble clic para importar audio</span>
+          <span className="import-hint">Doble clic o arrastrá un archivo de audio</span>
         </div>
       )}
     </div>

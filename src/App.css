@@ -76,6 +76,13 @@
   cursor: not-allowed;
 }
 
+.header-btn.active {
+  background: #0a5;
+  border-color: #0cf;
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(0, 204, 255, 0.3);
+}
+
 .transport-button {
   padding: 8px 16px;
   background: #2a2a2a;
@@ -411,62 +418,74 @@
 
 .clip-wrapper {
   display: flex;
-  flex-direction: column;
   background: #2a2a2a;
-  border: 1px solid #0a5;
+  border: 2px solid #0a5;
   border-radius: 3px;
   overflow: hidden;
+  transition: border-color 0.15s;
 }
 
-.clip-drag-handle {
+.clip-wrapper.selected {
+  border-color: #0cf;
+  box-shadow: 0 0 0 1px #0cf;
+}
+
+.clip-wrapper.moving-away {
+  opacity: 0.3 !important;
+}
+
+.clip-wrapper.ghost {
+  background: transparent;
+  border-style: dashed;
+}
+
+.clip-trim-handle {
   position: absolute;
   top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  z-index: 4;
+  background: rgba(0, 170, 85, 0.2);
+  transition: background 0.15s;
+}
+
+.clip-trim-handle.left {
   left: 0;
+  border-right: 1px solid rgba(0, 170, 85, 0.5);
+}
+
+.clip-trim-handle.right {
   right: 0;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 170, 85, 0.1);
+  border-left: 1px solid rgba(0, 170, 85, 0.5);
+}
+
+.clip-trim-handle:hover {
+  background: rgba(0, 170, 85, 0.4);
+}
+
+.clip-body {
+  flex: 1;
+  position: relative;
   cursor: move;
-  z-index: 3;
-  transition: background 0.2s;
-  border-bottom: 1px solid rgba(0, 170, 85, 0.2);
-}
-
-.clip-drag-handle:hover {
-  background: rgba(0, 170, 85, 0.25);
-}
-
-.drag-icon {
-  font-size: 14px;
-  color: #0a5;
-  user-select: none;
-  font-weight: bold;
+  display: flex;
+  flex-direction: column;
 }
 
 .clip-info {
   position: absolute;
-  top: 28px;
+  top: 8px;
   left: 12px;
   z-index: 2;
   padding: 3px 8px;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.8);
   border-radius: 2px;
   pointer-events: none;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
 }
 
 .clip-filename {
   font-size: 11px;
   color: #ccc;
-}
-
-.clip-hint {
-  font-size: 9px;
-  color: #888;
 }
 
 .waveform-canvas {

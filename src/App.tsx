@@ -23,7 +23,7 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 
-const APP_VERSION = '0.0068b'
+const APP_VERSION = '0.0069b'
 
 interface Clip {
   player: Tone.Player
@@ -33,6 +33,9 @@ interface Clip {
   startPosition: number
   offsetSeconds: number
   id: string
+  sourceStart: number
+  duration: number
+  selected?: boolean
 }
 
 interface TrackState {
@@ -117,11 +120,167 @@ function App() {
   const [tempDragOffset, setTempDragOffset] = useState<number>(0)
   const [clipboard, setClipboard] = useState<{buffer: AudioBuffer, fileName: string} | null>(null)
   const projectLoadGenRef = useRef<number>(0)
+  const [selectedClipIds, setSelectedClipIds] = useState<Set<string>>(new Set())
+  const [resizingClip, setResizingClip] = useState<{trackIndex: number, clipId: string, edge: 'left' | 'right'} | null>(null)
+  const [resizeStartX, setResizeStartX] = useState<number>(0)
+  const [resizeStartValue, setResizeStartValue] = useState<number>(0)
+  const [snapEnabled, setSnapEnabled] = useState(true)
+  const [dragStartY, setDragStartY] = useState<number>(0)
+  const [tempDragTrack, setTempDragTrack] = useState<number | null>(null)
+  const [undoStack, setUndoStack] = useState<any[]>([])
+  const [redoStack, setRedoStack] = useState<any[]>([])
+  const [showHelp, setShowHelp] = useState(false)
+  const [scissorsMode, setScissorsMode] = useState(false)
+  const [cutLinePreview, setCutLinePreview] = useState<{trackIndex: number, time: number} | null>(null)
+  const [isDraggingThreshold, setIsDraggingThreshold] = useState(false)
+  const [dragDistance, setDragDistance] = useState(0)
+  const waveformPeakCache = useRef<Map<AudioBuffer, Float32Array>>(new Map())
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
     const beatsPerBar = 4
     return countInBars * beatsPerBar * secondsPerBeat
+  }
+
+  const snapToGrid = (timeSeconds: number, forceSnap?: boolean): number => {
+    if (!snapEnabled && !forceSnap) return timeSeconds
+    const secondsPerBeat = 60 / bpm
+    const snapInterval = secondsPerBeat / 4
+    return Math.round(timeSeconds / snapInterval) * snapInterval
+  }
+
+  const saveUndo = () => {
+    const state = {
+      trackStates: trackStates.map(t => ({
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        name: t.name,
+        clips: t.clips.map(c => ({
+          fileName: c.fileName,
+          startPosition: c.startPosition,
+          offsetSeconds: c.offsetSeconds,
+          sourceStart: c.sourceStart,
+          duration: c.duration,
+          id: c.id,
+          selected: c.selected,
+          buffer: c.buffer,
+          playerBuffer: c.player.buffer
+        }))
+      })),
+      playheadPosition,
+      loopStart,
+      loopEnd
+    }
+    setUndoStack(prev => [...prev.slice(-49), state])
+    setRedoStack([])
+  }
+
+  const handleUndo = () => {
+    if (undoStack.length === 0) return
+    const currentState = {
+      trackStates: JSON.parse(JSON.stringify(trackStates.map(t => ({
+        ...t,
+        clips: t.clips.map(c => ({
+          fileName: c.fileName,
+          startPosition: c.startPosition,
+          offsetSeconds: c.offsetSeconds,
+          sourceStart: c.sourceStart,
+          duration: c.duration,
+          id: c.id,
+          selected: c.selected
+        }))
+      })))),
+      playheadPosition,
+      loopStart,
+      loopEnd
+    }
+    const prevState = undoStack[undoStack.length - 1]
+    setUndoStack(prev => prev.slice(0, -1))
+    setRedoStack(prev => [...prev, currentState])
+    restoreState(prevState)
+  }
+
+  const handleRedo = () => {
+    if (redoStack.length === 0) return
+    const currentState = {
+      trackStates: JSON.parse(JSON.stringify(trackStates.map(t => ({
+        ...t,
+        clips: t.clips.map(c => ({
+          fileName: c.fileName,
+          startPosition: c.startPosition,
+          offsetSeconds: c.offsetSeconds,
+          sourceStart: c.sourceStart,
+          duration: c.duration,
+          id: c.id,
+          selected: c.selected
+        }))
+      })))),
+      playheadPosition,
+      loopStart,
+      loopEnd
+    }
+    const nextState = redoStack[redoStack.length - 1]
+    setRedoStack(prev => prev.slice(0, -1))
+    setUndoStack(prev => [...prev, currentState])
+    restoreState(nextState)
+  }
+
+  const restoreState = async (state: any) => {
+    const currentClipMap = new Map<string, Clip>()
+    trackStates.forEach(t => {
+      t.clips.forEach(c => currentClipMap.set(c.id, c))
+    })
+    
+    const newTrackStates = await Promise.all(state.trackStates.map(async (t: any, trackIdx: number) => {
+      const clips = await Promise.all(t.clips.map(async (clipData: any) => {
+        const existingClip = currentClipMap.get(clipData.id)
+        if (existingClip) {
+          return {
+            ...existingClip,
+            offsetSeconds: clipData.offsetSeconds,
+            sourceStart: clipData.sourceStart,
+            duration: clipData.duration,
+            selected: clipData.selected
+          }
+        } else {
+          const player = new Tone.Player()
+          player.buffer = new Tone.ToneAudioBuffer(clipData.buffer)
+          player.loop = false
+          if (trackGainsRef.current[trackIdx]) {
+            player.connect(trackGainsRef.current[trackIdx])
+          }
+          return {
+            player,
+            fileName: clipData.fileName,
+            isPlaying: false,
+            buffer: clipData.buffer,
+            startPosition: clipData.startPosition,
+            offsetSeconds: clipData.offsetSeconds,
+            id: clipData.id,
+            sourceStart: clipData.sourceStart,
+            duration: clipData.duration,
+            selected: clipData.selected
+          }
+        }
+      }))
+      
+      const restoredClipIds = new Set(clips.map(c => c.id))
+      trackStates[trackIdx]?.clips.forEach(c => {
+        if (!restoredClipIds.has(c.id)) {
+          c.player.dispose()
+        }
+      })
+      
+      return {
+        ...t,
+        clips: clips.filter(c => c !== null)
+      }
+    }))
+    setTrackStates(newTrackStates as any)
+    setPlayheadPosition(state.playheadPosition)
+    setLoopStart(state.loopStart)
+    setLoopEnd(state.loopEnd)
   }
 
   // Verify authentication on mount
@@ -147,7 +306,9 @@ function App() {
             startPosition: clip.startPosition,
             audioBufferKey: bufferKey,
             offsetSeconds: clip.offsetSeconds,
-            id: clip.id
+            id: clip.id,
+            sourceStart: clip.sourceStart,
+            duration: clip.duration
           }
         }))
         
@@ -266,7 +427,9 @@ function App() {
               buffer,
               startPosition: t.clip.startPosition,
               offsetSeconds: t.clip.offsetSeconds || getCountInSeconds(),
-              id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
+              id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`,
+              sourceStart: (t.clip as any).sourceStart ?? 0,
+              duration: (t.clip as any).duration ?? buffer.duration
             }]
           }
         }
@@ -289,7 +452,9 @@ function App() {
             buffer,
             startPosition: clipData.startPosition,
             offsetSeconds: clipData.offsetSeconds || getCountInSeconds(),
-            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`
+            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`,
+            sourceStart: clipData.sourceStart ?? 0,
+            duration: clipData.duration ?? buffer.duration
           }
         }))
         
@@ -419,6 +584,8 @@ function App() {
           offsetSeconds: clip.offsetSeconds,
           id: clip.id,
           audioFile: `audio_${i}_${clipIdx}.wav`,
+          sourceStart: clip.sourceStart,
+          duration: clip.duration,
           audioData: {
             left: Array.from(clip.buffer.getChannelData(0)),
             right: Array.from(clip.buffer.getChannelData(1)),
@@ -549,7 +716,9 @@ function App() {
               buffer,
               startPosition: t.clip.startPosition,
               offsetSeconds: t.clip.offsetSeconds ?? getCountInSeconds(),
-              id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`
+              id: t.clip.id || `clip-${Date.now()}-${i}-${Math.random()}`,
+              sourceStart: (t.clip as any).sourceStart ?? 0,
+              duration: (t.clip as any).duration ?? buffer.duration
             }]
           }
         }
@@ -581,7 +750,9 @@ function App() {
             buffer,
             startPosition: clipData.startPosition,
             offsetSeconds: clipData.offsetSeconds ?? getCountInSeconds(),
-            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`
+            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`,
+            sourceStart: clipData.sourceStart ?? 0,
+            duration: clipData.duration ?? buffer.duration
           }
         })
         
@@ -702,7 +873,7 @@ function App() {
       
       const countInSeconds = exportIncludeCountIn ? getCountInSeconds() : 0
       const maxDuration = Math.max(...effectiveIndices.flatMap(i => 
-        trackStates[i].clips.map(clip => clip.offsetSeconds + clip.buffer.duration)
+        trackStates[i].clips.map(clip => clip.offsetSeconds + clip.duration)
       ))
       const totalDuration = maxDuration + countInSeconds
       const sampleRate = trackStates[effectiveIndices[0]].clips[0].buffer.sampleRate
@@ -730,7 +901,6 @@ function App() {
           }
         }
         
-        // Mix all selected tracks
         for (const i of effectiveIndices) {
           const track = trackStates[i]
           if (track.mute) continue
@@ -743,7 +913,7 @@ function App() {
             const source = offlineContext.createBufferSource()
             source.buffer = clip.buffer
             source.connect(gainNode)
-            source.start(clip.offsetSeconds + countInSeconds)
+            source.start(clip.offsetSeconds + countInSeconds, clip.sourceStart, clip.duration)
           }
         }
         
@@ -799,12 +969,11 @@ function App() {
           gainNode.gain.value = track.volume
           gainNode.connect(offlineContext.destination)
           
-          // Render all clips on this track
           for (const clip of track.clips) {
             const source = offlineContext.createBufferSource()
             source.buffer = clip.buffer
             source.connect(gainNode)
-            source.start(clip.offsetSeconds + countInSeconds)
+            source.start(clip.offsetSeconds + countInSeconds, clip.sourceStart, clip.duration)
           }
           
           const renderedBuffer = await offlineContext.startRendering()
@@ -990,14 +1159,50 @@ function App() {
     })
   }, [trackStates])
 
-  const drawWaveform = (canvas: HTMLCanvasElement, buffer: AudioBuffer) => {
+  const getOrComputePeaks = (buffer: AudioBuffer, peaksPerPixel = 4096): Float32Array => {
+    const cache = waveformPeakCache.current
+    if (cache.has(buffer)) {
+      return cache.get(buffer)!
+    }
+    
+    const data = buffer.getChannelData(0)
+    const peakCount = Math.ceil(data.length / peaksPerPixel)
+    const peaks = new Float32Array(peakCount * 2)
+    
+    for (let i = 0; i < peakCount; i++) {
+      const start = i * peaksPerPixel
+      const end = Math.min(start + peaksPerPixel, data.length)
+      let min = 1.0
+      let max = -1.0
+      
+      for (let j = start; j < end; j++) {
+        const sample = data[j]
+        if (sample < min) min = sample
+        if (sample > max) max = sample
+      }
+      
+      peaks[i * 2] = min
+      peaks[i * 2 + 1] = max
+    }
+    
+    cache.set(buffer, peaks)
+    return peaks
+  }
+
+  const drawWaveform = (canvas: HTMLCanvasElement, buffer: AudioBuffer, sourceStart = 0, duration?: number) => {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
     const width = canvas.width
     const height = canvas.height
-    const data = buffer.getChannelData(0)
-    const step = Math.ceil(data.length / width)
+    
+    const clipDuration = duration ?? buffer.duration
+    const peaksPerPixel = 4096
+    const peaks = getOrComputePeaks(buffer, peaksPerPixel)
+    
+    const startSample = Math.floor(sourceStart * buffer.sampleRate)
+    const endSample = Math.floor((sourceStart + clipDuration) * buffer.sampleRate)
+    const sampleCount = endSample - startSample
     
     const topPadding = 48
     const bottomPadding = 16
@@ -1013,13 +1218,20 @@ function App() {
     ctx.beginPath()
 
     for (let i = 0; i < width; i++) {
+      const sampleStart = startSample + Math.floor((i / width) * sampleCount)
+      const sampleEnd = startSample + Math.floor(((i + 1) / width) * sampleCount)
+      
       let min = 1.0
       let max = -1.0
       
-      for (let j = 0; j < step; j++) {
-        const datum = data[(i * step) + j]
-        if (datum < min) min = datum
-        if (datum > max) max = datum
+      const peakStart = Math.floor(sampleStart / peaksPerPixel)
+      const peakEnd = Math.ceil(sampleEnd / peaksPerPixel)
+      
+      for (let p = peakStart; p < peakEnd && p < peaks.length / 2; p++) {
+        const peakMin = peaks[p * 2]
+        const peakMax = peaks[p * 2 + 1]
+        if (peakMin < min) min = peakMin
+        if (peakMax > max) max = peakMax
       }
       
       const yMin = centerY + (min * amp)
@@ -1086,28 +1298,26 @@ function App() {
     
     const updatedStates = trackStates.map(track => {
       const updatedClips = track.clips.map(clip => {
-        if (!clip.isPlaying && startTime < clip.offsetSeconds + clip.buffer.duration) {
+        if (!clip.isPlaying && startTime < clip.offsetSeconds + clip.duration) {
           clip.player.loop = false
           
           const clipStartTime = clip.offsetSeconds
-          const clipEndTime = clip.offsetSeconds + clip.buffer.duration
+          const clipEndTime = clip.offsetSeconds + clip.duration
           
-          // Determine when to play this clip and what offset to use
           let when = Tone.now()
           let offset = 0
           
           if (startTime < clipStartTime) {
-            // Playhead is before clip starts - schedule for later
             when = Tone.now() + (clipStartTime - startTime)
-            offset = 0
+            offset = clip.sourceStart
           } else if (startTime >= clipStartTime && startTime < clipEndTime) {
-            // Playhead is inside clip - start immediately with offset
             when = Tone.now()
-            offset = startTime - clipStartTime
+            offset = clip.sourceStart + (startTime - clipStartTime)
           }
           
           if (when >= Tone.now() && offset < clip.buffer.duration) {
-            clip.player.start(when, offset)
+            const duration = clip.duration - (offset - clip.sourceStart)
+            clip.player.start(when, offset, duration)
             return { ...clip, isPlaying: true }
           }
         }
@@ -1135,35 +1345,33 @@ function App() {
         // Detect loop: if current time jumped backwards, restart players
         if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
           if (currentTime < lastLoopCheck && lastLoopCheck > loopStart) {
-            // Transport looped, restart players at loop start
             trackStates.forEach(track => {
               track.clips.forEach(clip => {
                 if (clip.player.state === 'started') {
                   clip.player.stop()
                 }
                 
-                // Restart clips that overlap with loop region
-                if (loopStart < clip.offsetSeconds + clip.buffer.duration) {
+                if (loopStart < clip.offsetSeconds + clip.duration) {
                   let when = Tone.now()
-                  let offset = 0
+                  let offset = clip.sourceStart
                   
                   if (loopStart < clip.offsetSeconds) {
                     when = Tone.now() + (clip.offsetSeconds - loopStart)
-                    offset = 0
+                    offset = clip.sourceStart
                   } else if (loopStart >= clip.offsetSeconds) {
                     when = Tone.now()
-                    offset = loopStart - clip.offsetSeconds
+                    offset = clip.sourceStart + (loopStart - clip.offsetSeconds)
                   }
                   
                   if (offset < clip.buffer.duration) {
-                    clip.player.start(when, offset)
+                    const duration = clip.duration - (offset - clip.sourceStart)
+                    clip.player.start(when, offset, duration)
                   }
                 }
               })
             })
           }
         } else if (!isLoopEnabled && maxDuration > 0 && currentTime >= maxDuration) {
-          // End of timeline, restart from beginning
           Tone.getTransport().seconds = 0
           trackStates.forEach(track => {
             track.clips.forEach(clip => {
@@ -1171,7 +1379,7 @@ function App() {
                 clip.player.stop()
               }
               const when = Tone.now() + clip.offsetSeconds
-              clip.player.start(when, 0)
+              clip.player.start(when, clip.sourceStart, clip.duration)
             })
           })
         }
@@ -1248,12 +1456,12 @@ function App() {
     if (track.clips.length === 0) return
     
     await ensureAudio()
+    saveUndo()
     
     const splitTime = playheadPosition
     
-    // Find the clip that contains the playhead
     const clipToSplit = track.clips.find(clip => 
-      splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.buffer.duration
+      splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration
     )
     
     if (!clipToSplit) {
@@ -1263,70 +1471,50 @@ function App() {
     }
     
     const splitOffset = splitTime - clipToSplit.offsetSeconds
-    const originalBuffer = clipToSplit.buffer
-    const sampleRate = originalBuffer.sampleRate
-    
-    const firstPartLength = Math.floor(splitOffset * sampleRate)
-    const secondPartLength = originalBuffer.length - firstPartLength
-    
-    const firstBuffer = new AudioBuffer({
-      numberOfChannels: originalBuffer.numberOfChannels,
-      length: firstPartLength,
-      sampleRate: sampleRate
-    })
-    
-    const secondBuffer = new AudioBuffer({
-      numberOfChannels: originalBuffer.numberOfChannels,
-      length: secondPartLength,
-      sampleRate: sampleRate
-    })
-    
-    for (let ch = 0; ch < originalBuffer.numberOfChannels; ch++) {
-      const originalData = originalBuffer.getChannelData(ch)
-      firstBuffer.getChannelData(ch).set(originalData.slice(0, firstPartLength))
-      secondBuffer.getChannelData(ch).set(originalData.slice(firstPartLength))
-    }
-    
-    clipToSplit.player.dispose()
     
     const firstPlayer = new Tone.Player()
-    firstPlayer.buffer = new Tone.ToneAudioBuffer(firstBuffer)
+    firstPlayer.buffer = clipToSplit.player.buffer
     firstPlayer.loop = false
     firstPlayer.connect(trackGainsRef.current[trackIndex])
     
     const secondPlayer = new Tone.Player()
-    secondPlayer.buffer = new Tone.ToneAudioBuffer(secondBuffer)
+    secondPlayer.buffer = clipToSplit.player.buffer
     secondPlayer.loop = false
     secondPlayer.connect(trackGainsRef.current[trackIndex])
     
     const newTrackStates = [...trackStates]
     const updatedClips = track.clips.map(clip => {
       if (clip.id === clipToSplit.id) {
-        return null // Will be replaced with two clips
+        return null
       }
       return clip
     }).filter(c => c !== null) as Clip[]
     
-    // Add the two new clips
     updatedClips.push({
       player: firstPlayer,
       fileName: clipToSplit.fileName,
       isPlaying: false,
-      buffer: firstBuffer,
+      buffer: clipToSplit.buffer,
       startPosition: clipToSplit.startPosition,
       offsetSeconds: clipToSplit.offsetSeconds,
-      id: `${clipToSplit.id}-part1`
+      id: `${clipToSplit.id}-part1`,
+      sourceStart: clipToSplit.sourceStart,
+      duration: splitOffset
     })
     
     updatedClips.push({
       player: secondPlayer,
       fileName: clipToSplit.fileName,
       isPlaying: false,
-      buffer: secondBuffer,
+      buffer: clipToSplit.buffer,
       startPosition: 0,
       offsetSeconds: splitTime,
-      id: `${clipToSplit.id}-part2`
+      id: `${clipToSplit.id}-part2`,
+      sourceStart: clipToSplit.sourceStart + splitOffset,
+      duration: clipToSplit.duration - splitOffset
     })
+    
+    clipToSplit.player.dispose()
     
     newTrackStates[trackIndex] = {
       ...newTrackStates[trackIndex],
@@ -1334,9 +1522,81 @@ function App() {
     }
     
     setTrackStates(newTrackStates)
-    setToastMessage('Audio importado')
+    setToastMessage('Clip dividido')
     setShowToast(true)
     setTimeout(() => setShowToast(false), 2000)
+  }
+
+  const splitClipAt = async (trackIndex: number, splitTime: number) => {
+    const track = trackStates[trackIndex]
+    if (track.clips.length === 0) return false
+    
+    await ensureAudio()
+    
+    const clipToSplit = track.clips.find(clip => 
+      splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration
+    )
+    
+    if (!clipToSplit) return false
+    
+    saveUndo()
+    
+    const splitOffset = splitTime - clipToSplit.offsetSeconds
+    
+    const firstPlayer = new Tone.Player()
+    firstPlayer.buffer = clipToSplit.player.buffer
+    firstPlayer.loop = false
+    firstPlayer.connect(trackGainsRef.current[trackIndex])
+    
+    const secondPlayer = new Tone.Player()
+    secondPlayer.buffer = clipToSplit.player.buffer
+    secondPlayer.loop = false
+    secondPlayer.connect(trackGainsRef.current[trackIndex])
+    
+    const newTrackStates = [...trackStates]
+    const updatedClips = track.clips.map(clip => {
+      if (clip.id === clipToSplit.id) {
+        return null
+      }
+      return clip
+    }).filter(c => c !== null) as Clip[]
+    
+    updatedClips.push({
+      player: firstPlayer,
+      fileName: clipToSplit.fileName,
+      isPlaying: false,
+      buffer: clipToSplit.buffer,
+      startPosition: clipToSplit.startPosition,
+      offsetSeconds: clipToSplit.offsetSeconds,
+      id: `${clipToSplit.id}-part1`,
+      sourceStart: clipToSplit.sourceStart,
+      duration: splitOffset
+    })
+    
+    updatedClips.push({
+      player: secondPlayer,
+      fileName: clipToSplit.fileName,
+      isPlaying: false,
+      buffer: clipToSplit.buffer,
+      startPosition: 0,
+      offsetSeconds: splitTime,
+      id: `${clipToSplit.id}-part2`,
+      sourceStart: clipToSplit.sourceStart + splitOffset,
+      duration: clipToSplit.duration - splitOffset
+    })
+    
+    clipToSplit.player.dispose()
+    
+    newTrackStates[trackIndex] = {
+      ...newTrackStates[trackIndex],
+      clips: updatedClips
+    }
+    
+    setTrackStates(newTrackStates)
+    setToastMessage('Clip dividido')
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 2000)
+    return true
   }
 
   const handleCopyClip = (trackIndex: number) => {
@@ -1380,7 +1640,9 @@ function App() {
       buffer: clipboard.buffer,
       startPosition: 0,
       offsetSeconds: playheadPosition,
-      id: `clip-${Date.now()}-${Math.random()}`
+      id: `clip-${Date.now()}-${Math.random()}`,
+      sourceStart: 0,
+      duration: clipboard.buffer.duration
     }
     
     const newTrackStates = [...trackStates]
@@ -1395,18 +1657,137 @@ function App() {
     setTimeout(() => setShowToast(false), 2000)
   }
 
-  const handleClipDragStart = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
+  const handleClipClick = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
     
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
     if (!clip) return
     
+    if (scissorsMode || (e.altKey && !e.shiftKey)) {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const clickX = e.clientX - rect.left
+      const percentage = clickX / rect.width
+      const clipTime = clip.offsetSeconds + (percentage * clip.duration)
+      const splitTime = (scissorsMode && snapEnabled && !e.shiftKey) || (e.altKey && snapEnabled && !e.shiftKey) 
+        ? snapToGrid(clipTime) 
+        : clipTime
+      
+      if (splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration) {
+        splitClipAt(trackIndex, splitTime)
+      }
+      return
+    }
+    
+    if (e.shiftKey) {
+      setSelectedClipIds(prev => {
+        const newSet = new Set(prev)
+        if (newSet.has(clipId)) {
+          newSet.delete(clipId)
+        } else {
+          newSet.add(clipId)
+        }
+        return newSet
+      })
+    } else {
+      setSelectedClipIds(new Set([clipId]))
+    }
+  }
+
+  const handleClipDragStart = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
+    e.stopPropagation()
+    
+    if (scissorsMode) return
+    
+    if (!selectedClipIds.has(clipId)) {
+      setSelectedClipIds(new Set([clipId]))
+    }
+    
+    const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
+    if (!clip) return
+    
+    setIsDraggingThreshold(e.altKey)
+    setDragDistance(0)
     setIsDraggingClip(true)
     setDraggedClipTrack(trackIndex)
     setDraggedClipId(clipId)
     setDragStartX(e.clientX)
+    setDragStartY(e.clientY)
     setDragStartPosition(clip.offsetSeconds)
     setTempDragOffset(clip.offsetSeconds)
+    setTempDragTrack(trackIndex)
+  }
+
+  const handleResizeStart = (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => {
+    e.stopPropagation()
+    
+    const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
+    if (!clip) return
+    
+    saveUndo()
+    setResizingClip({ trackIndex, clipId, edge })
+    setResizeStartX(e.clientX)
+    setResizeStartValue(edge === 'left' ? clip.sourceStart : clip.duration)
+  }
+
+  const handleDeleteSelected = () => {
+    if (selectedClipIds.size === 0) return
+    
+    saveUndo()
+    const newTrackStates = trackStates.map(track => ({
+      ...track,
+      clips: track.clips.filter(clip => {
+        if (selectedClipIds.has(clip.id)) {
+          clip.player.dispose()
+          return false
+        }
+        return true
+      })
+    }))
+    setTrackStates(newTrackStates)
+    setSelectedClipIds(new Set())
+    setToastMessage('Clip eliminado')
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 2000)
+  }
+
+  const handleDuplicateSelected = () => {
+    if (selectedClipIds.size === 0) return
+    
+    saveUndo()
+    const newTrackStates = [...trackStates]
+    const newSelectedIds = new Set<string>()
+    
+    selectedClipIds.forEach(id => {
+      for (let ti = 0; ti < trackStates.length; ti++) {
+        const sourceClip = trackStates[ti].clips.find(c => c.id === id)
+        if (sourceClip) {
+          const player = new Tone.Player()
+          player.buffer = sourceClip.player.buffer
+          player.loop = false
+          player.connect(trackGainsRef.current[ti])
+          
+          const newClip: Clip = {
+            player,
+            fileName: sourceClip.fileName,
+            isPlaying: false,
+            buffer: sourceClip.buffer,
+            startPosition: sourceClip.startPosition,
+            offsetSeconds: sourceClip.offsetSeconds + sourceClip.duration,
+            id: `clip-${Date.now()}-${Math.random()}`,
+            sourceStart: sourceClip.sourceStart,
+            duration: sourceClip.duration
+          }
+          newTrackStates[ti].clips.push(newClip)
+          newSelectedIds.add(newClip.id)
+        }
+      }
+    })
+    
+    setTrackStates(newTrackStates)
+    setSelectedClipIds(newSelectedIds)
+    setToastMessage('Clip duplicado')
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 2000)
   }
 
   useEffect(() => {
@@ -1416,36 +1797,163 @@ function App() {
       const lanes = document.querySelectorAll('.track-content')
       if (lanes.length === 0) return
       
+      const deltaX = e.clientX - dragStartX
+      const deltaY = e.clientY - dragStartY
+      const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
+      
+      if (isDraggingThreshold && distance < 5) {
+        return
+      }
+      
+      if (isDraggingThreshold && distance >= 5) {
+        saveUndo()
+        const newTrackStates = [...trackStates]
+        selectedClipIds.forEach(id => {
+          for (let ti = 0; ti < trackStates.length; ti++) {
+            const sourceClip = trackStates[ti].clips.find(c => c.id === id)
+            if (sourceClip) {
+              const player = new Tone.Player()
+              player.buffer = sourceClip.player.buffer
+              player.loop = false
+              player.connect(trackGainsRef.current[ti])
+              
+              const newClip: Clip = {
+                player,
+                fileName: sourceClip.fileName,
+                isPlaying: false,
+                buffer: sourceClip.buffer,
+                startPosition: sourceClip.startPosition,
+                offsetSeconds: sourceClip.offsetSeconds + 0.001,
+                id: `clip-${Date.now()}-${Math.random()}`,
+                sourceStart: sourceClip.sourceStart,
+                duration: sourceClip.duration,
+                selected: true
+              }
+              newTrackStates[ti].clips.push(newClip)
+              setSelectedClipIds(prev => {
+                const newSet = new Set(prev)
+                newSet.add(newClip.id)
+                return newSet
+              })
+            }
+          }
+        })
+        setTrackStates(newTrackStates)
+        setIsDraggingThreshold(false)
+      }
+      
       const firstLane = lanes[0] as HTMLElement
       const rect = firstLane.getBoundingClientRect()
-      const deltaX = e.clientX - dragStartX
       const deltaPercentage = deltaX / rect.width
       const maxDuration = getMaxDuration() || 100
       const deltaTime = deltaPercentage * maxDuration
       
-      const newOffset = Math.max(0, dragStartPosition + deltaTime)
+      const rawOffset = Math.max(0, dragStartPosition + deltaTime)
+      const newOffset = snapEnabled && !e.shiftKey ? snapToGrid(rawOffset) : rawOffset
       setTempDragOffset(newOffset)
+      
+      const trackHeight = 88
+      const trackDelta = Math.round(deltaY / trackHeight)
+      const newTrack = Math.max(0, Math.min(trackStates.length - 1, draggedClipTrack + trackDelta))
+      setTempDragTrack(newTrack)
+      
+      setDragDistance(distance)
     }
 
     const handleMouseUp = () => {
-      // Update the actual state only on mouseup
-      const newTrackStates = [...trackStates]
-      const track = newTrackStates[draggedClipTrack]
-      const updatedClips = track.clips.map(clip => {
-        if (clip.id === draggedClipId) {
-          return { ...clip, offsetSeconds: tempDragOffset }
-        }
-        return clip
-      })
-      newTrackStates[draggedClipTrack] = {
-        ...track,
-        clips: updatedClips
+      if (isDraggingThreshold && dragDistance < 5) {
+        setIsDraggingClip(false)
+        setDraggedClipTrack(null)
+        setDraggedClipId(null)
+        setTempDragTrack(null)
+        setIsDraggingThreshold(false)
+        return
       }
-      setTrackStates(newTrackStates)
       
+      const newTrackStates = [...trackStates]
+      const targetTrack = tempDragTrack ?? draggedClipTrack
+      
+      if (!isDraggingThreshold) {
+        saveUndo()
+      }
+      
+      selectedClipIds.forEach(id => {
+        for (let ti = 0; ti < trackStates.length; ti++) {
+          const clipIndex = trackStates[ti].clips.findIndex(c => c.id === id)
+          if (clipIndex !== -1) {
+            const clip = trackStates[ti].clips[clipIndex]
+            const timeDelta = tempDragOffset - dragStartPosition
+            const trackDelta = targetTrack - draggedClipTrack
+            
+            if (ti === draggedClipTrack && trackDelta !== 0) {
+              const movedClip = { ...clip, offsetSeconds: clip.offsetSeconds + timeDelta }
+              newTrackStates[ti].clips.splice(clipIndex, 1)
+              newTrackStates[targetTrack].clips.push(movedClip)
+            } else if (id === draggedClipId || ti !== draggedClipTrack) {
+              newTrackStates[ti].clips[clipIndex] = {
+                ...clip,
+                offsetSeconds: clip.offsetSeconds + timeDelta
+              }
+            }
+          }
+        }
+      })
+      
+      setTrackStates(newTrackStates)
       setIsDraggingClip(false)
       setDraggedClipTrack(null)
       setDraggedClipId(null)
+      setTempDragTrack(null)
+      setIsDraggingThreshold(false)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'move'
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+  }, [isDraggingClip, draggedClipTrack, draggedClipId, dragStartX, dragStartY, dragStartPosition, tempDragOffset, tempDragTrack, selectedClipIds, snapEnabled, isDraggingThreshold, dragDistance])
+
+  useEffect(() => {
+    if (!resizingClip) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const lanes = document.querySelectorAll('.track-content')
+      if (lanes.length === 0) return
+      
+      const firstLane = lanes[0] as HTMLElement
+      const rect = firstLane.getBoundingClientRect()
+      const deltaX = e.clientX - resizeStartX
+      const deltaPercentage = deltaX / rect.width
+      const maxDuration = getMaxDuration() || 100
+      const deltaTime = deltaPercentage * maxDuration
+      
+      const newTrackStates = [...trackStates]
+      const clip = newTrackStates[resizingClip.trackIndex].clips.find(c => c.id === resizingClip.clipId)
+      if (!clip) return
+      
+      if (resizingClip.edge === 'left') {
+        const newSourceStart = Math.max(0, Math.min(clip.buffer.duration - 0.1, resizeStartValue + deltaTime))
+        const sourceDelta = newSourceStart - clip.sourceStart
+        clip.sourceStart = newSourceStart
+        clip.duration = Math.max(0.1, clip.duration - sourceDelta)
+        clip.offsetSeconds = Math.max(0, clip.offsetSeconds + sourceDelta)
+      } else {
+        const newDuration = Math.max(0.1, Math.min(clip.buffer.duration - clip.sourceStart, resizeStartValue + deltaTime))
+        clip.duration = newDuration
+      }
+      
+      setTrackStates(newTrackStates)
+    }
+
+    const handleMouseUp = () => {
+      setResizingClip(null)
     }
 
     document.addEventListener('mousemove', handleMouseMove)
@@ -1459,7 +1967,71 @@ function App() {
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
     }
-  }, [isDraggingClip, draggedClipTrack, draggedClipId, dragStartX, dragStartPosition, tempDragOffset])
+  }, [resizingClip, resizeStartX, resizeStartValue])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
+      const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey
+      
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIds.size > 0) {
+        e.preventDefault()
+        handleDeleteSelected()
+      } else if (e.key === 's' && !cmdOrCtrl && !e.shiftKey) {
+        e.preventDefault()
+        const trackWithClip = trackStates.findIndex(t => t.clips.some(c => 
+          playheadPosition >= c.offsetSeconds && playheadPosition < c.offsetSeconds + c.duration
+        ))
+        if (trackWithClip !== -1) {
+          handleSplitClip(trackWithClip)
+        }
+      } else if (e.key === 'e' && cmdOrCtrl && selectedClipIds.size === 0) {
+        e.preventDefault()
+        const trackWithClip = trackStates.findIndex(t => t.clips.some(c => 
+          playheadPosition >= c.offsetSeconds && playheadPosition < c.offsetSeconds + c.duration
+        ))
+        if (trackWithClip !== -1) {
+          handleSplitClip(trackWithClip)
+        }
+      } else if (e.key === 'c' && cmdOrCtrl && selectedClipIds.size > 0) {
+        e.preventDefault()
+        const clipToCopy = trackStates.flatMap(t => t.clips).find(c => selectedClipIds.has(c.id))
+        if (clipToCopy) {
+          setClipboard({ buffer: clipToCopy.buffer, fileName: clipToCopy.fileName })
+          setToastMessage('Clip copiado')
+          setShowToast(true)
+          setTimeout(() => setShowToast(false), 2000)
+        }
+      } else if (e.key === 'v' && cmdOrCtrl && clipboard) {
+        e.preventDefault()
+        const targetTrack = trackStates.findIndex(t => t.clips.some(c => selectedClipIds.has(c.id)))
+        if (targetTrack !== -1) {
+          handlePasteClip(targetTrack)
+        } else {
+          handlePasteClip(0)
+        }
+      } else if (e.key === 'd' && cmdOrCtrl && selectedClipIds.size > 0) {
+        e.preventDefault()
+        handleDuplicateSelected()
+      } else if (e.key === 'z' && cmdOrCtrl && !e.shiftKey) {
+        e.preventDefault()
+        handleUndo()
+      } else if ((e.key === 'z' && cmdOrCtrl && e.shiftKey) || (e.key === 'y' && cmdOrCtrl)) {
+        e.preventDefault()
+        handleRedo()
+      } else if (e.key === 'a' && cmdOrCtrl) {
+        e.preventDefault()
+        const allClipIds = new Set(trackStates.flatMap(t => t.clips.map(c => c.id)))
+        setSelectedClipIds(allClipIds)
+      }
+    }
+    
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [selectedClipIds, trackStates, playheadPosition, clipboard, undoStack, redoStack])
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
@@ -1735,7 +2307,9 @@ function App() {
       buffer,
       startPosition: 0,
       offsetSeconds: getCountInSeconds(),
-      id: `clip-${Date.now()}-${Math.random()}`
+      id: `clip-${Date.now()}-${Math.random()}`,
+      sourceStart: 0,
+      duration: buffer.duration
     }
 
     const newTrackStates = [...trackStates]
@@ -1813,7 +2387,9 @@ function App() {
         buffer: stemBuffers[i],
         startPosition: 0,
         offsetSeconds: stemOffset,
-        id: `clip-${Date.now()}-${i}-${Math.random()}`
+        id: `clip-${Date.now()}-${i}-${Math.random()}`,
+        sourceStart: 0,
+        duration: stemBuffers[i].duration
       }
 
       newTrackStates[targetTrackIndex] = {
@@ -1878,16 +2454,16 @@ function App() {
         }
         if (isPlaying) {
           const clipStartTime = clip.offsetSeconds
-          const clipEndTime = clip.offsetSeconds + clip.buffer.duration
+          const clipEndTime = clip.offsetSeconds + clip.duration
           
           if (clampedSeconds >= clipStartTime && clampedSeconds < clipEndTime) {
-            const offset = clampedSeconds - clipStartTime
-            clip.player.start(Tone.now(), offset)
+            const offset = clip.sourceStart + (clampedSeconds - clipStartTime)
+            const duration = clip.duration - (clampedSeconds - clipStartTime)
+            clip.player.start(Tone.now(), offset, duration)
             clip.isPlaying = true
           } else if (clampedSeconds < clipStartTime) {
-            // Will be scheduled later by the normal playback logic
             const when = Tone.now() + (clipStartTime - clampedSeconds)
-            clip.player.start(when, 0)
+            clip.player.start(when, clip.sourceStart, clip.duration)
             clip.isPlaying = true
           }
         }
@@ -2174,6 +2750,27 @@ function App() {
             title="Importar desde YouTube"
           >
             📺 YouTube
+          </button>
+          <button
+            className={`header-btn ${snapEnabled ? 'active' : ''}`}
+            onClick={() => setSnapEnabled(!snapEnabled)}
+            title="Ajuste a cuadrícula (Shift para desactivar temporalmente)"
+          >
+            🧲 {snapEnabled ? 'Snap ON' : 'Snap OFF'}
+          </button>
+          <button
+            className={`header-btn ${scissorsMode ? 'active' : ''}`}
+            onClick={() => setScissorsMode(!scissorsMode)}
+            title="Herramienta de corte: click en un clip para dividirlo"
+          >
+            ✂️ {scissorsMode ? 'Cortar' : 'Cortar'}
+          </button>
+          <button
+            className="header-btn"
+            onClick={() => setShowHelp(true)}
+            title="Atajos de teclado"
+          >
+            ❓ Ayuda
           </button>
         </div>
         <div className="transport-playback">
@@ -2669,45 +3266,93 @@ function App() {
                   onMouseUp={handleLoopMouseUp}
                 >
                   {trackState.clips.map((clip) => {
-                    const clipOffset = (isDraggingClip && draggedClipTrack === trackIndex && draggedClipId === clip.id) 
-                      ? tempDragOffset 
+                    const clipOffset = (isDraggingClip && selectedClipIds.has(clip.id)) 
+                      ? (clip.offsetSeconds + (tempDragOffset - dragStartPosition))
                       : clip.offsetSeconds
+                    const isSelected = selectedClipIds.has(clip.id)
+                    const showOnDifferentTrack = isDraggingClip && tempDragTrack !== null && tempDragTrack !== trackIndex && selectedClipIds.has(clip.id) && draggedClipTrack === trackIndex
                     
                     return (
                       <div 
                         key={clip.id}
-                        className="clip-wrapper"
+                        className={`clip-wrapper ${isSelected ? 'selected' : ''} ${showOnDifferentTrack ? 'moving-away' : ''}`}
                         style={{
                           position: 'absolute',
                           left: `${(clipOffset / maxDur) * 100}%`,
-                          width: `${(clip.buffer.duration / maxDur) * 100}%`,
-                          height: '100%'
+                          width: `${(clip.duration / maxDur) * 100}%`,
+                          height: '100%',
+                          opacity: showOnDifferentTrack ? 0.3 : 1
                         }}
+                        onClick={(e) => handleClipClick(e, trackIndex, clip.id)}
                       >
                         <div 
-                          className="clip-drag-handle"
+                          className="clip-trim-handle left"
+                          onMouseDown={(e) => handleResizeStart(e, trackIndex, clip.id, 'left')}
+                          title="Arrastra para recortar desde el inicio"
+                        />
+                        <div 
+                          className="clip-body"
                           onMouseDown={(e) => handleClipDragStart(e, trackIndex, clip.id)}
-                          title="Arrastra para mover el clip en el tiempo"
-                        >
-                          <span className="drag-icon">↔</span>
-                        </div>
-                        <div className="clip-info">
-                          <span className="clip-filename">{clip.fileName}</span>
-                        </div>
-                        <canvas
-                          className="waveform-canvas"
-                          ref={(el) => {
-                            if (el && !el.dataset.drawn) {
-                              el.width = el.offsetWidth * 2
-                              el.height = el.offsetHeight * 2
-                              drawWaveform(el, clip.buffer)
-                              el.dataset.drawn = 'true'
+                          onMouseMove={(e) => {
+                            if (scissorsMode) {
+                              const rect = e.currentTarget.getBoundingClientRect()
+                              const mouseX = e.clientX - rect.left
+                              const percentage = mouseX / rect.width
+                              const time = clip.offsetSeconds + (percentage * clip.duration)
+                              setCutLinePreview({ trackIndex, time })
                             }
                           }}
+                          onMouseLeave={() => {
+                            if (scissorsMode) {
+                              setCutLinePreview(null)
+                            }
+                          }}
+                          title={scissorsMode ? "Click para dividir el clip" : "Arrastra para mover (Alt+arrastrar para duplicar)"}
+                          style={{ cursor: scissorsMode ? 'crosshair' : 'move' }}
+                        >
+                          <div className="clip-info">
+                            <span className="clip-filename">{clip.fileName}</span>
+                          </div>
+                          <canvas
+                            className="waveform-canvas"
+                            ref={(el) => {
+                              if (el) {
+                                el.width = el.offsetWidth * 2
+                                el.height = el.offsetHeight * 2
+                                drawWaveform(el, clip.buffer, clip.sourceStart, clip.duration)
+                              }
+                            }}
+                          />
+                        </div>
+                        <div 
+                          className="clip-trim-handle right"
+                          onMouseDown={(e) => handleResizeStart(e, trackIndex, clip.id, 'right')}
+                          title="Arrastra para recortar desde el final"
                         />
                       </div>
                     )
                   })}
+                  {isDraggingClip && tempDragTrack !== null && tempDragTrack !== draggedClipTrack && draggedClipTrack !== null && (
+                    trackStates[draggedClipTrack].clips
+                      .filter((clip: Clip) => selectedClipIds.has(clip.id))
+                      .map((clip: Clip) => {
+                        const clipOffset = clip.offsetSeconds + (tempDragOffset - dragStartPosition)
+                        return trackIndex === tempDragTrack ? (
+                          <div
+                            key={`ghost-${clip.id}`}
+                            className="clip-wrapper ghost"
+                            style={{
+                              position: 'absolute',
+                              left: `${(clipOffset / maxDur) * 100}%`,
+                              width: `${(clip.duration / maxDur) * 100}%`,
+                              height: '100%',
+                              opacity: 0.5,
+                              border: '2px dashed #0a5'
+                            }}
+                          />
+                        ) : null
+                      })
+                  )}
                   {(loopStart !== null || tempLoopStart !== null) && (
                     <div 
                       className="loop-marker loop-start draggable"
@@ -2737,6 +3382,22 @@ function App() {
                       }}
                     />
                   )}
+                  {cutLinePreview && cutLinePreview.trackIndex === trackIndex && (
+                    <div
+                      className="cut-line-preview"
+                      style={{
+                        position: 'absolute',
+                        left: `${(cutLinePreview.time / maxDur) * 100}%`,
+                        top: 0,
+                        bottom: 0,
+                        width: '2px',
+                        background: '#f00',
+                        pointerEvents: 'none',
+                        zIndex: 10,
+                        boxShadow: '0 0 4px rgba(255, 0, 0, 0.5)'
+                      }}
+                    />
+                  )}
                   {(isPlaying || isPaused) && (
                     <div 
                       className="playhead"
@@ -2758,6 +3419,50 @@ function App() {
           })()}
         </div>
       </div>
+
+      {showHelp && (
+        <div className="drive-projects-modal">
+          <div className="modal-content" style={{ maxWidth: '600px' }}>
+            <h2>Atajos de teclado y gestos</h2>
+            <div style={{ fontSize: '13px', color: '#ccc', lineHeight: '1.8', marginBottom: '16px' }}>
+              <h3 style={{ color: '#0a5', marginTop: '12px', marginBottom: '8px' }}>Edición de clips</h3>
+              <ul style={{ listStyle: 'none', padding: 0 }}>
+                <li>• <strong>Click</strong> - Seleccionar clip</li>
+                <li>• <strong>Shift+Click</strong> - Seleccionar múltiples clips</li>
+                <li>• <strong>Arrastrar clip</strong> - Mover horizontal y verticalmente</li>
+                <li>• <strong>Alt+Click en clip</strong> - Dividir en el punto clickeado</li>
+                <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
+                <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
+                <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
+                <li>• <strong>Shift al arrastrar</strong> - Desactivar snap temporalmente</li>
+                <li>• <strong>Botón ✂️ Cortar</strong> - Activa modo tijeras (click en clip para dividir)</li>
+                <li>• <strong>Botón 🧲 Snap</strong> - Activa/desactiva ajuste a cuadrícula</li>
+              </ul>
+              
+              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Teclado</h3>
+              <ul style={{ listStyle: 'none', padding: 0 }}>
+                <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead</li>
+                <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clip seleccionado</li>
+                <li>• <strong>Cmd/Ctrl+V</strong> - Pegar en playhead</li>
+                <li>• <strong>Cmd/Ctrl+D</strong> - Duplicar clip después del original</li>
+                <li>• <strong>Delete/Backspace</strong> - Eliminar clips seleccionados</li>
+                <li>• <strong>Cmd/Ctrl+A</strong> - Seleccionar todos los clips</li>
+                <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer</li>
+                <li>• <strong>Cmd/Ctrl+Shift+Z</strong> o <strong>Cmd/Ctrl+Y</strong> - Rehacer</li>
+              </ul>
+              
+              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>
+              <ul style={{ listStyle: 'none', padding: 0 }}>
+                <li>• <strong>Espacio</strong> - Reproducir/Pausar</li>
+                <li>• <strong>Click en timeline</strong> - Mover playhead</li>
+                <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
+                <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>
+              </ul>
+            </div>
+            <button className="modal-close" onClick={() => setShowHelp(false)}>Cerrar</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react'
 import * as Tone from 'tone'
 import JSZip from 'jszip'
 import './App.css'
@@ -23,8 +23,24 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 import { encodeAudioBufferWAV, audioBufferFromSerialized } from './wav'
+import { ClipWaveform } from './ClipWaveform'
 
-const APP_VERSION = '0.0072b'
+const APP_VERSION = '0.0073b'
+
+interface ClipboardClip {
+  buffer: AudioBuffer
+  fileName: string
+  sourceStart: number
+  duration: number
+}
+
+interface ContextMenuState {
+  x: number
+  y: number
+  trackIndex: number
+  clipId: string | null
+  time: number
+}
 
 interface Clip {
   player: Tone.Player
@@ -69,10 +85,23 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(220)
   const [isResizing, setIsResizing] = useState(false)
   const [playheadPosition, setPlayheadPosition] = useState(0)
+  const playheadPositionRef = useRef(0)
+  const playheadElRef = useRef<HTMLDivElement>(null)
+  const timeDisplayRef = useRef<HTMLSpanElement>(null)
+  const meterDisplayRef = useRef<HTMLSpanElement>(null)
+  const timelineMaxRef = useRef(100)
   const playheadAnimationRef = useRef<number | null>(null)
+  const dragLiveRef = useRef({
+    tempOffset: 0,
+    tempTrack: null as number | null,
+    threshold: false,
+    distance: 0
+  })
+  const dragRafRef = useRef<number | null>(null)
+  const resizeRafRef = useRef<number | null>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
   const [loopStart, setLoopStart] = useState<number | null>(null)
   const [loopEnd, setLoopEnd] = useState<number | null>(null)
-  const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
   const [tempLoopStart, setTempLoopStart] = useState<number | null>(null)
   const [tempLoopEnd, setTempLoopEnd] = useState<number | null>(null)
   const [horizontalZoom, setHorizontalZoom] = useState(1)
@@ -93,7 +122,6 @@ function App() {
       name: `Track ${i + 1}`
     }))
   )
-  const [audioLevel, setAudioLevel] = useState(0)
   const meterRef = useRef<Tone.Meter | null>(null)
   const [showToast, setShowToast] = useState(false)
   const [currentUser, setCurrentUser] = useState<User | null>(null)
@@ -119,7 +147,8 @@ function App() {
   const [dragStartX, setDragStartX] = useState<number>(0)
   const [dragStartPosition, setDragStartPosition] = useState<number>(0)
   const [tempDragOffset, setTempDragOffset] = useState<number>(0)
-  const [clipboard, setClipboard] = useState<{buffer: AudioBuffer, fileName: string} | null>(null)
+  const [clipboard, setClipboard] = useState<ClipboardClip | null>(null)
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const projectLoadGenRef = useRef<number>(0)
   const [selectedClipIds, setSelectedClipIds] = useState<Set<string>>(new Set())
   const [resizingClip, setResizingClip] = useState<{trackIndex: number, clipId: string, edge: 'left' | 'right'} | null>(null)
@@ -131,12 +160,7 @@ function App() {
   const [undoStack, setUndoStack] = useState<any[]>([])
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
-  const [scissorsMode, setScissorsMode] = useState(false)
   const [currentFileHandle, setCurrentFileHandle] = useState<any>(null)
-  const [cutLinePreview, setCutLinePreview] = useState<{trackIndex: number, time: number} | null>(null)
-  const [isDraggingThreshold, setIsDraggingThreshold] = useState(false)
-  const [dragDistance, setDragDistance] = useState(0)
-  const waveformPeakCache = useRef<Map<AudioBuffer, Float32Array>>(new Map())
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -280,7 +304,7 @@ function App() {
       }
     }))
     setTrackStates(newTrackStates as any)
-    setPlayheadPosition(state.playheadPosition)
+    commitPlayhead(state.playheadPosition)
     setLoopStart(state.loopStart)
     setLoopEnd(state.loopEnd)
   }
@@ -404,7 +428,7 @@ function App() {
       setBpm(state.bpm)
       setLoopStart(state.loopStart)
       setLoopEnd(state.loopEnd)
-      setPlayheadPosition(state.playheadPosition)
+      commitPlayhead(state.playheadPosition)
       if (state.metronomeEnabled !== undefined) setMetronomeEnabled(state.metronomeEnabled)
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
       
@@ -894,7 +918,7 @@ function App() {
       Tone.getTransport().bpm.value = projectData.bpm || 120
       setLoopStart(projectData.loopStart ?? null)
       setLoopEnd(projectData.loopEnd ?? null)
-      setPlayheadPosition(projectData.playheadPosition || 0)
+      commitPlayhead(projectData.playheadPosition || 0)
       setTrackStates(newTrackStates)
       setCurrentProjectName(projectData.name || 'Proyecto sin título')
       
@@ -952,7 +976,7 @@ function App() {
       setBpm(state.bpm)
       setLoopStart(state.loopStart)
       setLoopEnd(state.loopEnd)
-      setPlayheadPosition(state.playheadPosition)
+      commitPlayhead(state.playheadPosition)
       if (state.metronomeEnabled !== undefined) setMetronomeEnabled(state.metronomeEnabled)
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
       
@@ -1298,9 +1322,12 @@ function App() {
         Tone.getDestination().connect(meterRef.current)
         
         setInterval(() => {
-          if (meterRef.current) {
-            setAudioLevel(meterRef.current.getValue() as number)
-          }
+          if (!meterRef.current) return
+          const level = meterRef.current.getValue() as number
+          const el = meterDisplayRef.current
+          if (!el) return
+          el.textContent = level > -100 ? `${level.toFixed(0)}dB` : '-∞'
+          el.className = level > -60 ? 'level-active' : 'level-inactive'
         }, 100)
       }
       
@@ -1362,6 +1389,28 @@ function App() {
     return maxDuration > 0 ? maxDuration : 0
   }
 
+  const syncPlayheadDom = (seconds: number) => {
+    playheadPositionRef.current = seconds
+    const layoutMax = timelineMaxRef.current || 100
+    const left = `${Math.min((seconds / layoutMax) * 100, 100)}%`
+    if (playheadElRef.current) {
+      playheadElRef.current.style.left = left
+    }
+    if (timeDisplayRef.current) {
+      timeDisplayRef.current.textContent = `${formatTime(seconds)} / ${formatTime(timelineMaxRef.current)}`
+    }
+  }
+
+  const commitPlayhead = (seconds: number) => {
+    syncPlayheadDom(seconds)
+    setPlayheadPosition(seconds)
+  }
+
+  useLayoutEffect(() => {
+    timelineMaxRef.current = getMaxDuration()
+    syncPlayheadDom(playheadPositionRef.current)
+  }, [trackStates, horizontalZoom])
+
   useEffect(() => {
     const anySolo = trackStates.some(ts => ts.solo)
     
@@ -1380,99 +1429,6 @@ function App() {
       gainNode.gain.value = gain
     })
   }, [trackStates])
-
-  const getOrComputePeaks = (buffer: AudioBuffer, peaksPerPixel = 4096): Float32Array => {
-    const cache = waveformPeakCache.current
-    if (cache.has(buffer)) {
-      return cache.get(buffer)!
-    }
-    
-    const channelCount = buffer.numberOfChannels
-    const dataLength = buffer.length
-    const peakCount = Math.ceil(dataLength / peaksPerPixel)
-    const peaks = new Float32Array(peakCount * 2)
-    
-    for (let i = 0; i < peakCount; i++) {
-      const start = i * peaksPerPixel
-      const end = Math.min(start + peaksPerPixel, dataLength)
-      let min = 1.0
-      let max = -1.0
-      
-      for (let ch = 0; ch < channelCount; ch++) {
-        const data = buffer.getChannelData(ch)
-        for (let j = start; j < end; j++) {
-          const sample = data[j]
-          if (sample < min) min = sample
-          if (sample > max) max = sample
-        }
-      }
-      
-      peaks[i * 2] = min
-      peaks[i * 2 + 1] = max
-    }
-    
-    cache.set(buffer, peaks)
-    return peaks
-  }
-
-  const drawWaveform = (canvas: HTMLCanvasElement, buffer: AudioBuffer, sourceStart = 0, duration?: number) => {
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const width = canvas.width
-    const height = canvas.height
-    
-    const clipDuration = duration ?? buffer.duration
-    const peaksPerPixel = 4096
-    const peaks = getOrComputePeaks(buffer, peaksPerPixel)
-    
-    const startSample = Math.floor(sourceStart * buffer.sampleRate)
-    const endSample = Math.floor((sourceStart + clipDuration) * buffer.sampleRate)
-    const sampleCount = endSample - startSample
-    
-    const topPadding = 48
-    const bottomPadding = 16
-    const waveformHeight = height - topPadding - bottomPadding
-    const amp = waveformHeight / 2
-    const centerY = topPadding + waveformHeight / 2
-
-    ctx.fillStyle = '#1a1a1a'
-    ctx.fillRect(0, 0, width, height)
-
-    ctx.strokeStyle = '#0a5'
-    ctx.lineWidth = 1.5
-    ctx.beginPath()
-
-    for (let i = 0; i < width; i++) {
-      const sampleStart = startSample + Math.floor((i / width) * sampleCount)
-      const sampleEnd = startSample + Math.floor(((i + 1) / width) * sampleCount)
-      
-      let min = 1.0
-      let max = -1.0
-      
-      const peakStart = Math.floor(sampleStart / peaksPerPixel)
-      const peakEnd = Math.ceil(sampleEnd / peaksPerPixel)
-      
-      for (let p = peakStart; p < peakEnd && p < peaks.length / 2; p++) {
-        const peakMin = peaks[p * 2]
-        const peakMax = peaks[p * 2 + 1]
-        if (peakMin < min) min = peakMin
-        if (peakMax > max) max = peakMax
-      }
-      
-      const yMin = centerY + (min * amp)
-      const yMax = centerY + (max * amp)
-      
-      if (i === 0) {
-        ctx.moveTo(i, yMin)
-      }
-      
-      ctx.lineTo(i, yMin)
-      ctx.lineTo(i, yMax)
-    }
-
-    ctx.stroke()
-  }
 
   const handlePlay = async () => {
     await Tone.start()
@@ -1611,7 +1567,7 @@ function App() {
         }
         
         lastLoopCheck = currentTime
-        setPlayheadPosition(currentTime)
+        syncPlayheadDom(currentTime)
         playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
       }
     }
@@ -1625,6 +1581,8 @@ function App() {
       cancelAnimationFrame(playheadAnimationRef.current)
       playheadAnimationRef.current = null
     }
+    
+    commitPlayhead(Tone.getTransport().seconds)
     
     setTrackStates(prev => prev.map(track => ({
       ...track,
@@ -1652,7 +1610,7 @@ function App() {
     }
     
     // Preserve playhead position where playback stopped
-    setPlayheadPosition(currentPosition)
+    commitPlayhead(currentPosition)
     Tone.getTransport().seconds = currentPosition
     
     setTrackStates(prev => prev.map(track => ({
@@ -1672,7 +1630,7 @@ function App() {
   const handleJumpToStart = () => {
     seekToPosition(0)
     if (!isPlaying) {
-      setPlayheadPosition(0)
+      commitPlayhead(0)
       Tone.getTransport().seconds = 0
     }
   }
@@ -1684,7 +1642,7 @@ function App() {
     await ensureAudio()
     saveUndo()
     
-    const splitTime = playheadPosition
+    const splitTime = playheadPositionRef.current
     
     const clipToSplit = track.clips.find(clip => 
       splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration
@@ -1825,27 +1783,22 @@ function App() {
     return true
   }
 
-  const handleCopyClip = (trackIndex: number) => {
-    const track = trackStates[trackIndex]
-    if (track.clips.length === 0) return
-    
-    // Find clip under playhead, or use first clip
-    const clipToCopy = track.clips.find(clip =>
-      playheadPosition >= clip.offsetSeconds && 
-      playheadPosition < clip.offsetSeconds + clip.buffer.duration
-    ) || track.clips[0]
-    
+  const copyClipToClipboard = (clip: Clip) => {
     setClipboard({
-      buffer: clipToCopy.buffer,
-      fileName: clipToCopy.fileName
+      buffer: clip.buffer,
+      fileName: clip.fileName,
+      sourceStart: clip.sourceStart,
+      duration: clip.duration
     })
-    
-    setToastMessage('Clip dividido')
+  }
+
+  const showClipToast = (message: string) => {
+    setToastMessage(message)
     setShowToast(true)
     setTimeout(() => setShowToast(false), 2000)
   }
 
-  const handlePasteClip = async (trackIndex: number) => {
+  const pasteClipAt = async (trackIndex: number, timeSeconds: number) => {
     if (!clipboard) {
       setErrorMessage('No hay clip copiado')
       setTimeout(() => setErrorMessage(null), 2000)
@@ -1853,6 +1806,7 @@ function App() {
     }
     
     await ensureAudio()
+    saveUndo()
     
     const player = new Tone.Player()
     player.buffer = new Tone.ToneAudioBuffer(clipboard.buffer)
@@ -1865,10 +1819,10 @@ function App() {
       isPlaying: false,
       buffer: clipboard.buffer,
       startPosition: 0,
-      offsetSeconds: playheadPosition,
+      offsetSeconds: Math.max(0, snapToGrid(timeSeconds)),
       id: `clip-${Date.now()}-${Math.random()}`,
-      sourceStart: 0,
-      duration: clipboard.buffer.duration
+      sourceStart: clipboard.sourceStart,
+      duration: clipboard.duration
     }
     
     const newTrackStates = [...trackStates]
@@ -1877,10 +1831,121 @@ function App() {
       clips: [...newTrackStates[trackIndex].clips, newClip]
     }
     setTrackStates(newTrackStates)
+    setSelectedClipIds(new Set([newClip.id]))
+    showClipToast('Clip pegado')
+  }
+
+  const handlePasteClip = async (trackIndex: number) => {
+    await pasteClipAt(trackIndex, playheadPositionRef.current)
+  }
+
+  const deleteClipById = (clipId: string) => {
+    saveUndo()
+    const newTrackStates = trackStates.map(track => ({
+      ...track,
+      clips: track.clips.filter(clip => {
+        if (clip.id === clipId) {
+          clip.player.dispose()
+          return false
+        }
+        return true
+      })
+    }))
+    setTrackStates(newTrackStates)
+    setSelectedClipIds(prev => {
+      const next = new Set(prev)
+      next.delete(clipId)
+      return next
+    })
+  }
+
+  const cutClip = (clip: Clip) => {
+    copyClipToClipboard(clip)
+    deleteClipById(clip.id)
+    showClipToast('Clip cortado')
+  }
+
+  const duplicateClipOnTrack = (trackIndex: number, clip: Clip) => {
+    saveUndo()
+    const player = new Tone.Player()
+    player.buffer = clip.player.buffer
+    player.loop = false
+    player.connect(trackGainsRef.current[trackIndex])
     
-    setToastMessage('Clip copiado')
-    setShowToast(true)
-    setTimeout(() => setShowToast(false), 2000)
+    const newClip: Clip = {
+      player,
+      fileName: clip.fileName,
+      isPlaying: false,
+      buffer: clip.buffer,
+      startPosition: clip.startPosition,
+      offsetSeconds: clip.offsetSeconds + clip.duration,
+      id: `clip-${Date.now()}-${Math.random()}`,
+      sourceStart: clip.sourceStart,
+      duration: clip.duration
+    }
+    
+    const newTrackStates = [...trackStates]
+    newTrackStates[trackIndex] = {
+      ...newTrackStates[trackIndex],
+      clips: [...newTrackStates[trackIndex].clips, newClip]
+    }
+    setTrackStates(newTrackStates)
+    setSelectedClipIds(new Set([newClip.id]))
+    showClipToast('Clip duplicado')
+  }
+
+  const closeContextMenu = () => setContextMenu(null)
+
+  const openContextMenu = (e: React.MouseEvent, trackIndex: number, clipId: string | null) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const trackEl = (e.currentTarget.closest('.track-content') as HTMLElement) || (e.currentTarget as HTMLElement)
+    const rect = trackEl.getBoundingClientRect()
+    const percentage = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0
+    const maxDur = getMaxDuration() || 100
+    const time = Math.max(0, percentage * maxDur)
+    if (clipId) {
+      setSelectedClipIds(new Set([clipId]))
+    }
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      trackIndex,
+      clipId,
+      time
+    })
+  }
+
+  const runContextMenuAction = async (action: string) => {
+    if (!contextMenu) return
+    const { trackIndex, clipId, time } = contextMenu
+    closeContextMenu()
+    const clip = clipId
+      ? trackStates[trackIndex]?.clips.find(c => c.id === clipId)
+      : undefined
+
+    if (action === 'paste') {
+      await pasteClipAt(trackIndex, time)
+      return
+    }
+    if (!clip) return
+
+    if (action === 'cut') {
+      cutClip(clip)
+    } else if (action === 'copy') {
+      copyClipToClipboard(clip)
+      showClipToast('Clip copiado')
+    } else if (action === 'split') {
+      const splitTime = snapToGrid(time)
+      if (splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration) {
+        await splitClipAt(trackIndex, splitTime)
+      }
+    } else if (action === 'duplicate') {
+      duplicateClipOnTrack(trackIndex, clip)
+    } else if (action === 'delete') {
+      deleteClipById(clip.id)
+      showClipToast('Clip eliminado')
+    }
   }
 
   const handleClipClick = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
@@ -1889,14 +1954,12 @@ function App() {
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
     if (!clip) return
     
-    if (scissorsMode || (e.altKey && !e.shiftKey)) {
+    if (e.altKey && !e.shiftKey) {
       const rect = e.currentTarget.getBoundingClientRect()
       const clickX = e.clientX - rect.left
       const percentage = clickX / rect.width
       const clipTime = clip.offsetSeconds + (percentage * clip.duration)
-      const splitTime = (scissorsMode && snapEnabled && !e.shiftKey) || (e.altKey && snapEnabled && !e.shiftKey) 
-        ? snapToGrid(clipTime) 
-        : clipTime
+      const splitTime = snapEnabled && !e.shiftKey ? snapToGrid(clipTime) : clipTime
       
       if (splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration) {
         splitClipAt(trackIndex, splitTime)
@@ -1921,8 +1984,7 @@ function App() {
 
   const handleClipDragStart = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
-    
-    if (scissorsMode) return
+    if (e.button !== 0) return
     
     if (!selectedClipIds.has(clipId)) {
       setSelectedClipIds(new Set([clipId]))
@@ -1931,8 +1993,6 @@ function App() {
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
     if (!clip) return
     
-    setIsDraggingThreshold(e.altKey)
-    setDragDistance(0)
     setIsDraggingClip(true)
     setDraggedClipTrack(trackIndex)
     setDraggedClipId(clipId)
@@ -1941,10 +2001,17 @@ function App() {
     setDragStartPosition(clip.offsetSeconds)
     setTempDragOffset(clip.offsetSeconds)
     setTempDragTrack(trackIndex)
+    dragLiveRef.current = {
+      tempOffset: clip.offsetSeconds,
+      tempTrack: trackIndex,
+      threshold: e.altKey,
+      distance: 0
+    }
   }
 
   const handleResizeStart = (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => {
     e.stopPropagation()
+    if (e.button !== 0) return
     
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
     if (!clip) return
@@ -2026,12 +2093,14 @@ function App() {
       const deltaX = e.clientX - dragStartX
       const deltaY = e.clientY - dragStartY
       const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
+      const live = dragLiveRef.current
       
-      if (isDraggingThreshold && distance < 5) {
+      if (live.threshold && distance < 5) {
+        live.distance = distance
         return
       }
       
-      if (isDraggingThreshold && distance >= 5) {
+      if (live.threshold && distance >= 5) {
         saveUndo()
         const newTrackStates = [...trackStates]
         selectedClipIds.forEach(id => {
@@ -2065,41 +2134,52 @@ function App() {
           }
         })
         setTrackStates(newTrackStates)
-        setIsDraggingThreshold(false)
+        live.threshold = false
       }
       
       const firstLane = lanes[0] as HTMLElement
       const rect = firstLane.getBoundingClientRect()
       const deltaPercentage = deltaX / rect.width
-      const maxDuration = getMaxDuration() || 100
+      const maxDuration = timelineMaxRef.current || 100
       const deltaTime = deltaPercentage * maxDuration
       
       const rawOffset = Math.max(0, dragStartPosition + deltaTime)
       const newOffset = snapEnabled && !e.shiftKey ? snapToGrid(rawOffset) : rawOffset
-      setTempDragOffset(newOffset)
-      
-      const trackHeight = 88
+      const trackHeight = 88 * verticalZoom
       const trackDelta = Math.round(deltaY / trackHeight)
       const newTrack = Math.max(0, Math.min(trackStates.length - 1, draggedClipTrack + trackDelta))
-      setTempDragTrack(newTrack)
       
-      setDragDistance(distance)
+      live.tempOffset = newOffset
+      live.tempTrack = newTrack
+      live.distance = distance
+      
+      if (dragRafRef.current == null) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = null
+          setTempDragOffset(dragLiveRef.current.tempOffset)
+          setTempDragTrack(dragLiveRef.current.tempTrack)
+        })
+      }
     }
 
     const handleMouseUp = () => {
-      if (isDraggingThreshold && dragDistance < 5) {
+      if (dragRafRef.current != null) {
+        cancelAnimationFrame(dragRafRef.current)
+        dragRafRef.current = null
+      }
+      const live = dragLiveRef.current
+      if (live.threshold && live.distance < 5) {
         setIsDraggingClip(false)
         setDraggedClipTrack(null)
         setDraggedClipId(null)
         setTempDragTrack(null)
-        setIsDraggingThreshold(false)
         return
       }
       
       const newTrackStates = [...trackStates]
-      const targetTrack = tempDragTrack ?? draggedClipTrack
+      const targetTrack = live.tempTrack ?? draggedClipTrack
       
-      if (!isDraggingThreshold) {
+      if (!live.threshold) {
         saveUndo()
       }
       
@@ -2108,7 +2188,7 @@ function App() {
           const clipIndex = trackStates[ti].clips.findIndex(c => c.id === id)
           if (clipIndex !== -1) {
             const clip = trackStates[ti].clips[clipIndex]
-            const timeDelta = tempDragOffset - dragStartPosition
+            const timeDelta = live.tempOffset - dragStartPosition
             const trackDelta = targetTrack - draggedClipTrack
             
             if (ti === draggedClipTrack && trackDelta !== 0) {
@@ -2130,7 +2210,6 @@ function App() {
       setDraggedClipTrack(null)
       setDraggedClipId(null)
       setTempDragTrack(null)
-      setIsDraggingThreshold(false)
     }
 
     document.addEventListener('mousemove', handleMouseMove)
@@ -2143,42 +2222,68 @@ function App() {
       document.removeEventListener('mouseup', handleMouseUp)
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
+      if (dragRafRef.current != null) {
+        cancelAnimationFrame(dragRafRef.current)
+        dragRafRef.current = null
+      }
     }
-  }, [isDraggingClip, draggedClipTrack, draggedClipId, dragStartX, dragStartY, dragStartPosition, tempDragOffset, tempDragTrack, selectedClipIds, snapEnabled, isDraggingThreshold, dragDistance])
+  }, [isDraggingClip, draggedClipTrack, draggedClipId, dragStartX, dragStartY, dragStartPosition, selectedClipIds, snapEnabled, verticalZoom, trackStates])
 
   useEffect(() => {
     if (!resizingClip) return
 
-    const handleMouseMove = (e: MouseEvent) => {
+    const applyResize = (clientX: number) => {
       const lanes = document.querySelectorAll('.track-content')
       if (lanes.length === 0) return
       
       const firstLane = lanes[0] as HTMLElement
       const rect = firstLane.getBoundingClientRect()
-      const deltaX = e.clientX - resizeStartX
+      const deltaX = clientX - resizeStartX
       const deltaPercentage = deltaX / rect.width
-      const maxDuration = getMaxDuration() || 100
+      const maxDuration = timelineMaxRef.current || 100
       const deltaTime = deltaPercentage * maxDuration
       
-      const newTrackStates = [...trackStates]
-      const clip = newTrackStates[resizingClip.trackIndex].clips.find(c => c.id === resizingClip.clipId)
-      if (!clip) return
-      
-      if (resizingClip.edge === 'left') {
-        const newSourceStart = Math.max(0, Math.min(clip.buffer.duration - 0.1, resizeStartValue + deltaTime))
-        const sourceDelta = newSourceStart - clip.sourceStart
-        clip.sourceStart = newSourceStart
-        clip.duration = Math.max(0.1, clip.duration - sourceDelta)
-        clip.offsetSeconds = Math.max(0, clip.offsetSeconds + sourceDelta)
-      } else {
-        const newDuration = Math.max(0.1, Math.min(clip.buffer.duration - clip.sourceStart, resizeStartValue + deltaTime))
-        clip.duration = newDuration
-      }
-      
+      const newTrackStates = trackStates.map((track, i) => {
+        if (i !== resizingClip.trackIndex) return track
+        return {
+          ...track,
+          clips: track.clips.map(c => {
+            if (c.id !== resizingClip.clipId) return c
+            if (resizingClip.edge === 'left') {
+              const newSourceStart = Math.max(0, Math.min(c.buffer.duration - 0.1, resizeStartValue + deltaTime))
+              const sourceDelta = newSourceStart - c.sourceStart
+              return {
+                ...c,
+                sourceStart: newSourceStart,
+                duration: Math.max(0.1, c.duration - sourceDelta),
+                offsetSeconds: Math.max(0, c.offsetSeconds + sourceDelta)
+              }
+            }
+            return {
+              ...c,
+              duration: Math.max(0.1, Math.min(c.buffer.duration - c.sourceStart, resizeStartValue + deltaTime))
+            }
+          })
+        }
+      })
       setTrackStates(newTrackStates)
     }
 
+    const handleMouseMove = (e: MouseEvent) => {
+      const x = e.clientX
+      if (resizeRafRef.current == null) {
+        resizeRafRef.current = requestAnimationFrame(() => {
+          resizeRafRef.current = null
+          applyResize(x)
+        })
+      }
+    }
+
     const handleMouseUp = () => {
+      if (resizeRafRef.current != null) {
+        cancelAnimationFrame(resizeRafRef.current)
+        resizeRafRef.current = null
+      }
       setResizingClip(null)
     }
 
@@ -2192,6 +2297,10 @@ function App() {
       document.removeEventListener('mouseup', handleMouseUp)
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
+      if (resizeRafRef.current != null) {
+        cancelAnimationFrame(resizeRafRef.current)
+        resizeRafRef.current = null
+      }
     }
   }, [resizingClip, resizeStartX, resizeStartValue])
 
@@ -2203,6 +2312,13 @@ function App() {
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
       const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey
       
+      if (e.key === 'Escape') {
+        if (contextMenu) {
+          e.preventDefault()
+          closeContextMenu()
+        }
+        return
+      }
       if (e.key === 's' && cmdOrCtrl && e.shiftKey) {
         e.preventDefault()
         handleSaveToLocal(true)
@@ -2214,28 +2330,36 @@ function App() {
         handleDeleteSelected()
       } else if (e.key === 's' && !cmdOrCtrl && !e.shiftKey) {
         e.preventDefault()
+        const head = playheadPositionRef.current
         const trackWithClip = trackStates.findIndex(t => t.clips.some(c => 
-          playheadPosition >= c.offsetSeconds && playheadPosition < c.offsetSeconds + c.duration
+          head >= c.offsetSeconds && head < c.offsetSeconds + c.duration
         ))
         if (trackWithClip !== -1) {
           handleSplitClip(trackWithClip)
         }
       } else if (e.key === 'e' && cmdOrCtrl && selectedClipIds.size === 0) {
         e.preventDefault()
+        const head = playheadPositionRef.current
         const trackWithClip = trackStates.findIndex(t => t.clips.some(c => 
-          playheadPosition >= c.offsetSeconds && playheadPosition < c.offsetSeconds + c.duration
+          head >= c.offsetSeconds && head < c.offsetSeconds + c.duration
         ))
         if (trackWithClip !== -1) {
           handleSplitClip(trackWithClip)
+        }
+      } else if (e.key === 'x' && cmdOrCtrl && selectedClipIds.size > 0) {
+        e.preventDefault()
+        const clipToCut = trackStates.flatMap(t => t.clips).find(c => selectedClipIds.has(c.id))
+        if (clipToCut) {
+          copyClipToClipboard(clipToCut)
+          handleDeleteSelected()
+          showClipToast('Clip cortado')
         }
       } else if (e.key === 'c' && cmdOrCtrl && selectedClipIds.size > 0) {
         e.preventDefault()
         const clipToCopy = trackStates.flatMap(t => t.clips).find(c => selectedClipIds.has(c.id))
         if (clipToCopy) {
-          setClipboard({ buffer: clipToCopy.buffer, fileName: clipToCopy.fileName })
-          setToastMessage('Clip copiado')
-          setShowToast(true)
-          setTimeout(() => setShowToast(false), 2000)
+          copyClipToClipboard(clipToCopy)
+          showClipToast('Clip copiado')
         }
       } else if (e.key === 'v' && cmdOrCtrl && clipboard) {
         e.preventDefault()
@@ -2263,7 +2387,7 @@ function App() {
     
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedClipIds, trackStates, playheadPosition, clipboard, undoStack, redoStack])
+  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu])
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
@@ -2667,15 +2791,16 @@ function App() {
     })
   }
 
-  const handlePlayheadMouseDown = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    setIsDraggingPlayhead(true)
+  const timeFromClientX = (clientX: number, el: HTMLElement) => {
+    const rect = el.getBoundingClientRect()
+    const percentage = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0
+    return percentage * (getMaxDuration() || 0)
   }
 
   const seekToPosition = (seconds: number) => {
     const maxDuration = getMaxDuration()
     const clampedSeconds = Math.max(0, Math.min(seconds, maxDuration))
-    setPlayheadPosition(clampedSeconds)
+    commitPlayhead(clampedSeconds)
     Tone.getTransport().seconds = clampedSeconds
     
     trackStates.forEach(track => {
@@ -2714,13 +2839,20 @@ function App() {
       return
     }
 
-    const rect = e.currentTarget.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
-    const percentage = clickX / rect.width
-    const maxDuration = getMaxDuration()
-    const clickTime = percentage * maxDuration
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
+  }
 
-    seekToPosition(clickTime)
+  const handleRulerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
+  }
+
+  const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>, trackIndex: number) => {
+    if (e.button !== 0) return
+    const target = e.target as HTMLElement
+    if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
+    if (isLoopEnabled && trackStates[trackIndex]?.clips.length > 0) return
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
   }
 
   const clearLoop = () => {
@@ -2842,39 +2974,29 @@ function App() {
     }
   }, [isResizing])
 
+  useLayoutEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) return
+    const menu = contextMenuRef.current
+    const rect = menu.getBoundingClientRect()
+    let x = contextMenu.x
+    let y = contextMenu.y
+    if (x + rect.width > window.innerWidth - 8) x = Math.max(8, window.innerWidth - rect.width - 8)
+    if (y + rect.height > window.innerHeight - 8) y = Math.max(8, window.innerHeight - rect.height - 8)
+    menu.style.left = `${x}px`
+    menu.style.top = `${y}px`
+  }, [contextMenu])
+
   useEffect(() => {
-    if (!isDraggingPlayhead) return
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      
-      const firstLane = lanes[0] as HTMLElement
-      const rect = firstLane.getBoundingClientRect()
-      const clickX = e.clientX - rect.left
-      const percentage = Math.max(0, Math.min(1, clickX / rect.width))
-      const maxDuration = getMaxDuration()
-      const newTime = percentage * maxDuration
-      
-      seekToPosition(newTime)
-    }
-
-    const handleMouseUp = () => {
-      setIsDraggingPlayhead(false)
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'ew-resize'
-
+    if (!contextMenu) return
+    const close = () => closeContextMenu()
+    const onScroll = () => close()
+    window.addEventListener('scroll', onScroll, true)
+    document.addEventListener('wheel', onScroll, { passive: true })
     return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
+      window.removeEventListener('scroll', onScroll, true)
+      document.removeEventListener('wheel', onScroll)
     }
-  }, [isDraggingPlayhead, trackStates, isPlaying])
+  }, [contextMenu])
 
   const rulerBars = useMemo(() => {
     const maxDuration = getMaxDuration()
@@ -3014,13 +3136,6 @@ function App() {
             🧲 {snapEnabled ? 'Snap ON' : 'Snap OFF'}
           </button>
           <button
-            className={`header-btn ${scissorsMode ? 'active' : ''}`}
-            onClick={() => setScissorsMode(!scissorsMode)}
-            title="Herramienta de corte: click en un clip para dividirlo"
-          >
-            ✂️ {scissorsMode ? 'Cortar' : 'Cortar'}
-          </button>
-          <button
             className="header-btn"
             onClick={() => setShowHelp(true)}
             title="Atajos de teclado"
@@ -3077,7 +3192,7 @@ function App() {
         </div>
         <div className="time-display">
           <span className="time-label">Time</span>
-          <span className="time-value">
+          <span className="time-value" ref={timeDisplayRef}>
             {formatTime(playheadPosition)} / {formatTime(getMaxDuration())}
           </span>
         </div>
@@ -3126,8 +3241,8 @@ function App() {
           <div className="audio-diagnostics">
             <span title="Context State">{Tone.getContext().state}</span>
             <span title="Sample Rate">{Tone.getContext().sampleRate}Hz</span>
-            <span title="Output Level" className={audioLevel > -60 ? 'level-active' : 'level-inactive'}>
-              {audioLevel > -100 ? `${audioLevel.toFixed(0)}dB` : '-∞'}
+            <span ref={meterDisplayRef} title="Output Level" className="level-inactive">
+              -∞
             </span>
             <button className="test-tone-btn" onClick={playTestTone} title="Test Tone (440Hz)">🔊</button>
           </div>
@@ -3459,31 +3574,6 @@ function App() {
                   title={`Volume: ${Math.round(trackState.volume * 100)}%`}
                 />
               </div>
-              {trackState.clips.length > 0 && (
-                <div className="track-actions">
-                  <button
-                    className="action-button"
-                    onClick={() => handleSplitClip(trackIndex)}
-                    title="Dividir clip en el playhead"
-                  >
-                    ✂️
-                  </button>
-                  <button
-                    className="action-button"
-                    onClick={() => handleCopyClip(trackIndex)}
-                    title="Copiar clip"
-                  >
-                    📋
-                  </button>
-                  <button
-                    className="action-button"
-                    onClick={() => handlePasteClip(trackIndex)}
-                    title="Pegar clip"
-                  >
-                    📄
-                  </button>
-                </div>
-              )}
             </div>
           ))}
         </div>
@@ -3492,8 +3582,14 @@ function App() {
           onMouseDown={() => setIsResizing(true)}
           title="Drag to resize sidebar"
         />
-        <div className="lanes-column" ref={lanesColumnRef} style={{ minWidth: `${100 * horizontalZoom}%` }}>
-          <div className="bar-ruler">
+        <div
+          className="lanes-column"
+          ref={lanesColumnRef}
+          style={{ minWidth: `${100 * horizontalZoom}%` }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div className="lanes-scroll-content">
+          <div className="bar-ruler" onMouseDown={handleRulerMouseDown}>
             {rulerBars}
           </div>
           {(() => {
@@ -3508,6 +3604,8 @@ function App() {
               className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
               style={{ height: `${88 * verticalZoom}px` }}
               onClick={(e) => handleWaveformClick(e, trackIndex)}
+              onMouseDown={(e) => handleTrackMouseDown(e, trackIndex)}
+              onContextMenu={(e) => openContextMenu(e, trackIndex, null)}
             >
               {hasClips ? (
                 <div 
@@ -3539,6 +3637,7 @@ function App() {
                           opacity: showOnDifferentTrack ? 0.3 : 1
                         }}
                         onClick={(e) => handleClipClick(e, trackIndex, clip.id)}
+                        onContextMenu={(e) => openContextMenu(e, trackIndex, clip.id)}
                       >
                         <div 
                           className="clip-trim-handle left"
@@ -3548,35 +3647,16 @@ function App() {
                         <div 
                           className="clip-body"
                           onMouseDown={(e) => handleClipDragStart(e, trackIndex, clip.id)}
-                          onMouseMove={(e) => {
-                            if (scissorsMode) {
-                              const rect = e.currentTarget.getBoundingClientRect()
-                              const mouseX = e.clientX - rect.left
-                              const percentage = mouseX / rect.width
-                              const time = clip.offsetSeconds + (percentage * clip.duration)
-                              setCutLinePreview({ trackIndex, time })
-                            }
-                          }}
-                          onMouseLeave={() => {
-                            if (scissorsMode) {
-                              setCutLinePreview(null)
-                            }
-                          }}
-                          title={scissorsMode ? "Click para dividir el clip" : "Arrastra para mover (Alt+arrastrar para duplicar)"}
-                          style={{ cursor: scissorsMode ? 'crosshair' : 'move' }}
+                          title="Arrastra para mover (clic derecho para editar, Alt+arrastrar para duplicar)"
+                          style={{ cursor: 'move' }}
                         >
                           <div className="clip-info">
                             <span className="clip-filename">{clip.fileName}</span>
                           </div>
-                          <canvas
-                            className="waveform-canvas"
-                            ref={(el) => {
-                              if (el) {
-                                el.width = el.offsetWidth * 2
-                                el.height = el.offsetHeight * 2
-                                drawWaveform(el, clip.buffer, clip.sourceStart, clip.duration)
-                              }
-                            }}
+                          <ClipWaveform
+                            buffer={clip.buffer}
+                            sourceStart={clip.sourceStart}
+                            duration={clip.duration}
                           />
                         </div>
                         <div 
@@ -3637,31 +3717,6 @@ function App() {
                       }}
                     />
                   )}
-                  {cutLinePreview && cutLinePreview.trackIndex === trackIndex && (
-                    <div
-                      className="cut-line-preview"
-                      style={{
-                        position: 'absolute',
-                        left: `${(cutLinePreview.time / maxDur) * 100}%`,
-                        top: 0,
-                        bottom: 0,
-                        width: '2px',
-                        background: '#f00',
-                        pointerEvents: 'none',
-                        zIndex: 10,
-                        boxShadow: '0 0 4px rgba(255, 0, 0, 0.5)'
-                      }}
-                    />
-                  )}
-                  {(isPlaying || isPaused) && (
-                    <div 
-                      className="playhead"
-                      style={{ 
-                        left: `${Math.min((playheadPosition / maxDur) * 100, 100)}%` 
-                      }}
-                      onMouseDown={handlePlayheadMouseDown}
-                    />
-                  )}
                 </div>
               ) : (
                 <div className="empty-lane">
@@ -3672,8 +3727,56 @@ function App() {
             )
             })
           })()}
+            <div className="playhead" ref={playheadElRef} aria-hidden="true">
+              <span className="playhead-cap" />
+            </div>
+          </div>
         </div>
       </div>
+
+      {contextMenu && (
+        <>
+          <div
+            className="context-menu-backdrop"
+            onMouseDown={closeContextMenu}
+            onContextMenu={(e) => { e.preventDefault(); closeContextMenu() }}
+          />
+          <div
+            ref={contextMenuRef}
+            className="context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            {contextMenu.clipId ? (
+              <>
+                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('cut')}>Cortar</button>
+                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('copy')}>Copiar</button>
+                <button
+                  type="button"
+                  className={`context-menu-item ${clipboard ? '' : 'disabled'}`}
+                  disabled={!clipboard}
+                  onClick={() => runContextMenuAction('paste')}
+                >
+                  Pegar
+                </button>
+                <div className="context-menu-sep" />
+                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('split')}>Dividir aquí</button>
+                <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('duplicate')}>Duplicar</button>
+                <button type="button" className="context-menu-item danger" onClick={() => runContextMenuAction('delete')}>Eliminar</button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className={`context-menu-item ${clipboard ? '' : 'disabled'}`}
+                disabled={!clipboard}
+                onClick={() => runContextMenuAction('paste')}
+              >
+                Pegar aquí
+              </button>
+            )}
+          </div>
+        </>
+      )}
 
       {showHelp && (
         <div className="drive-projects-modal">
@@ -3682,6 +3785,8 @@ function App() {
             <div style={{ fontSize: '13px', color: '#ccc', lineHeight: '1.8', marginBottom: '16px' }}>
               <h3 style={{ color: '#0a5', marginTop: '12px', marginBottom: '8px' }}>Edición de clips</h3>
               <ul style={{ listStyle: 'none', padding: 0 }}>
+                <li>• <strong>Click derecho en un clip</strong> - Menú: Cortar, Copiar, Pegar, Dividir aquí, Duplicar, Eliminar</li>
+                <li>• <strong>Click derecho en una pista vacía</strong> - Pegar aquí (en la posición del cursor, con snap si está activo)</li>
                 <li>• <strong>Click</strong> - Seleccionar clip</li>
                 <li>• <strong>Shift+Click</strong> - Seleccionar múltiples clips</li>
                 <li>• <strong>Arrastrar clip</strong> - Mover horizontal y verticalmente</li>
@@ -3690,7 +3795,6 @@ function App() {
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
                 <li>• <strong>Shift al arrastrar</strong> - Desactivar snap temporalmente</li>
-                <li>• <strong>Botón ✂️ Cortar</strong> - Activa modo tijeras (click en clip para dividir)</li>
                 <li>• <strong>Botón 🧲 Snap</strong> - Activa/desactiva ajuste a cuadrícula</li>
               </ul>
               
@@ -3699,10 +3803,12 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+S</strong> - Guardar proyecto localmente</li>
                 <li>• <strong>Shift+Cmd/Ctrl+S</strong> - Guardar como... (nueva ubicación)</li>
                 <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead</li>
+                <li>• <strong>Cmd/Ctrl+X</strong> - Cortar clip seleccionado</li>
                 <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clip seleccionado</li>
                 <li>• <strong>Cmd/Ctrl+V</strong> - Pegar en playhead</li>
                 <li>• <strong>Cmd/Ctrl+D</strong> - Duplicar clip después del original</li>
                 <li>• <strong>Delete/Backspace</strong> - Eliminar clips seleccionados</li>
+                <li>• <strong>Escape</strong> - Cerrar menú contextual</li>
                 <li>• <strong>Cmd/Ctrl+A</strong> - Seleccionar todos los clips</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Shift+Z</strong> o <strong>Cmd/Ctrl+Y</strong> - Rehacer</li>
@@ -3719,7 +3825,7 @@ function App() {
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>
               <ul style={{ listStyle: 'none', padding: 0 }}>
                 <li>• <strong>Espacio</strong> - Reproducir/Pausar</li>
-                <li>• <strong>Click en timeline</strong> - Mover playhead</li>
+                <li>• <strong>Click en timeline o regla</strong> - Mover playhead (siempre visible, también en pausa y al arrastrar)</li>
                 <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
                 <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>
               </ul>

@@ -266,19 +266,50 @@
   flex-direction: column;
   justify-content: center;
   background: #242424;
-  padding: 0 12px 0 16px;
+  padding: 6px 10px 8px 12px;
   flex-shrink: 0;
   height: 88px;
   box-sizing: border-box;
   border-bottom: 1px solid #2a2a2a;
-  gap: 4px;
+  gap: 6px;
+  overflow: visible;
+  min-width: 0;
+}
+
+.track-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .track-name {
   font-size: 13px;
   color: #ccc;
-  margin-bottom: 4px;
   font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track-delete-button {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  color: #aaa;
+}
+
+.track-delete-button:hover:not(:disabled) {
+  color: #fff;
+  background: #c44;
+  border-color: #e66;
+}
+
+.track-delete-button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .resize-handle {
@@ -518,6 +549,12 @@
   background: #333;
   border-color: #555;
   color: #ccc;
+}
+
+.control-button.track-delete-button:hover:not(:disabled) {
+  color: #fff;
+  background: #c44;
+  border-color: #e66;
 }
 
 .control-button.active {
@@ -853,4 +890,70 @@
   height: 1px;
   margin: 4px 8px;
   background: #3a3a3a;
+}
+
+.confirm-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10050;
+}
+
+.confirm-dialog {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 22px 24px;
+  width: min(420px, 92vw);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
+.confirm-dialog h2 {
+  margin: 0 0 12px 0;
+  color: #4ade80;
+  font-size: 18px;
+}
+
+.confirm-dialog p {
+  margin: 0 0 20px 0;
+  color: #ccc;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-cancel,
+.confirm-danger {
+  padding: 8px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.confirm-cancel {
+  background: #333;
+  border: 1px solid #555;
+  color: #eee;
+}
+
+.confirm-cancel:hover {
+  background: #3d3d3d;
+}
+
+.confirm-danger {
+  background: #c44;
+  border: 1px solid #e66;
+  color: #fff;
+}
+
+.confirm-danger:hover {
+  background: #d55;
 }

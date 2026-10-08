@@ -61,6 +61,21 @@ export function pastePlacement(
   }
 }
 
+export function deleteTrackFromList<T extends { clips: { id: string }[] }>(
+  tracks: T[],
+  index: number,
+  selectedIds: Set<string>
+): { tracks: T[]; selectedIds: Set<string> } | null {
+  if (tracks.length <= 1 || index < 0 || index >= tracks.length) return null
+  const removedIds = new Set(tracks[index].clips.map(c => c.id))
+  const nextSelected = new Set(selectedIds)
+  removedIds.forEach(id => nextSelected.delete(id))
+  return {
+    tracks: tracks.filter((_, i) => i !== index),
+    selectedIds: nextSelected
+  }
+}
+
 export function mergeSelection(
   current: Set<string>,
   incoming: string[],

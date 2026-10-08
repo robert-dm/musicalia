@@ -29,6 +29,7 @@ import {
   clampGroupTimeDelta,
   clampGroupTrackDelta,
   clientRectsIntersect,
+  deleteTrackFromList,
   marqueeClientRect,
   mergeSelection,
   packClipboard,
@@ -52,6 +53,7 @@ interface ContextMenuState {
   trackIndex: number
   clipId: string | null
   time: number
+  kind?: 'header' | 'timeline'
 }
 
 interface Clip {
@@ -189,6 +191,11 @@ function App() {
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
   const [currentFileHandle, setCurrentFileHandle] = useState<any>(null)
+  const [trackDeleteConfirm, setTrackDeleteConfirm] = useState<{
+    trackIndex: number
+    name: string
+    clipCount: number
+  } | null>(null)
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -286,6 +293,12 @@ function App() {
       t.clips.forEach(c => currentClipMap.set(c.id, c))
     })
     
+    for (let extra = state.trackStates.length; extra < trackStates.length; extra++) {
+      trackStates[extra].clips.forEach(c => {
+        try { c.player.dispose() } catch { /* already disposed */ }
+      })
+    }
+
     const newTrackStates = await Promise.all(state.trackStates.map(async (t: any, trackIdx: number) => {
       const clips = await Promise.all(t.clips.map(async (clipData: any) => {
         const existingClip = currentClipMap.get(clipData.id)
@@ -331,10 +344,30 @@ function App() {
         clips: clips.filter(c => c !== null)
       }
     }))
+    reconnectAllClips(newTrackStates as TrackState[])
     setTrackStates(newTrackStates as any)
     commitPlayhead(state.playheadPosition)
     setLoopStart(state.loopStart)
     setLoopEnd(state.loopEnd)
+  }
+
+  const reconnectAllClips = (tracks: TrackState[]) => {
+    while (trackGainsRef.current.length < tracks.length) {
+      trackGainsRef.current.push(new Tone.Gain(0.8).toDestination())
+    }
+    tracks.forEach((track, i) => {
+      const gain = trackGainsRef.current[i]
+      if (!gain) return
+      track.clips.forEach(clip => {
+        try { clip.player.disconnect() } catch { /* already disconnected */ }
+        clip.player.connect(gain)
+      })
+    })
+    while (trackGainsRef.current.length > tracks.length) {
+      const gain = trackGainsRef.current.pop()
+      try { gain?.disconnect() } catch { /* already disconnected */ }
+      gain?.dispose()
+    }
   }
 
   // Verify authentication on mount
@@ -1988,7 +2021,8 @@ function App() {
       y: e.clientY,
       trackIndex,
       clipId,
-      time
+      time,
+      kind: 'timeline'
     })
   }
 
@@ -2504,7 +2538,9 @@ function App() {
       
       if (e.key === 'Escape') {
         e.preventDefault()
-        if (contextMenu) {
+        if (trackDeleteConfirm) {
+          setTrackDeleteConfirm(null)
+        } else if (contextMenu) {
           closeContextMenu()
         } else if (selectedClipIds.size > 0) {
           setSelectedClipIds(new Set())
@@ -2573,7 +2609,7 @@ function App() {
     
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu])
+  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm])
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
@@ -2974,6 +3010,59 @@ function App() {
         volume
       }
       return newStates
+    })
+  }
+
+  const requestDeleteTrack = (trackIndex: number) => {
+    closeContextMenu()
+    if (trackIndex < 0 || trackIndex >= trackStates.length) return
+    if (trackStates.length <= 1) {
+      showClipToast('Debe quedar al menos una pista')
+      return
+    }
+    const track = trackStates[trackIndex]
+    const name = track.name || `Track ${trackIndex + 1}`
+    if (track.clips.length > 0) {
+      setTrackDeleteConfirm({ trackIndex, name, clipCount: track.clips.length })
+      return
+    }
+    deleteTrackAt(trackIndex)
+  }
+
+  const deleteTrackAt = (trackIndex: number) => {
+    const planned = deleteTrackFromList(trackStates, trackIndex, selectedClipIds)
+    if (!planned) {
+      showClipToast('Debe quedar al menos una pista')
+      setTrackDeleteConfirm(null)
+      return
+    }
+    saveUndo()
+    const removed = trackStates[trackIndex]
+    removed.clips.forEach(clip => {
+      if (clip.isPlaying || clip.player.state === 'started') {
+        try { clip.player.stop() } catch { /* already stopped */ }
+      }
+      clip.player.dispose()
+    })
+    reconnectAllClips(planned.tracks)
+    setTrackStates(planned.tracks)
+    setSelectedClipIds(planned.selectedIds)
+    if (selectedTrack === trackIndex) setSelectedTrack(null)
+    else if (selectedTrack !== null && selectedTrack > trackIndex) setSelectedTrack(selectedTrack - 1)
+    setTrackDeleteConfirm(null)
+    showClipToast('Pista eliminada')
+  }
+
+  const openTrackHeaderMenu = (e: React.MouseEvent, trackIndex: number) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      trackIndex,
+      clipId: null,
+      time: 0,
+      kind: 'header'
     })
   }
 
@@ -3857,8 +3946,33 @@ function App() {
         <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
           <div className="ruler-spacer" style={{ height: '32px', flexShrink: 0, borderBottom: '1px solid #333' }} />
           {trackStates.map((trackState, trackIndex) => (
-            <div key={trackIndex} className="track-header" style={{ height: `${88 * verticalZoom}px` }}>
-              <div className="track-name">{trackState.name || `Track ${trackIndex + 1}`}</div>
+            <div
+              key={trackIndex}
+              className="track-header"
+              style={{ height: `${88 * verticalZoom}px` }}
+              onContextMenu={(e) => openTrackHeaderMenu(e, trackIndex)}
+            >
+              <div className="track-name-row">
+                <div className="track-name">{trackState.name || `Track ${trackIndex + 1}`}</div>
+                <button
+                  type="button"
+                  className="control-button track-delete-button"
+                  title={trackStates.length <= 1 ? 'Debe quedar al menos una pista' : 'Eliminar pista'}
+                  aria-label="Eliminar pista"
+                  disabled={trackStates.length <= 1}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    requestDeleteTrack(trackIndex)
+                  }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      d="M6.2 2h3.6l.4 1.2H14v1.2H2V3.2h3.8L6.2 2zM3.2 5.2h9.6l-.7 8.4c-.1.7-.7 1.2-1.4 1.2H5.3c-.7 0-1.3-.5-1.4-1.2l-.7-8.4zM6.4 6.4v6H5.2v-6h1.2zm4.4 0v6H9.6v-6h1.2z"
+                    />
+                  </svg>
+                </button>
+              </div>
               <div className="track-controls">
                 <button
                   className={`control-button mute-button ${trackState.mute ? 'active' : ''}`}
@@ -4045,7 +4159,16 @@ function App() {
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onMouseDown={(e) => e.stopPropagation()}
           >
-            {contextMenu.clipId ? (
+            {contextMenu.kind === 'header' ? (
+              <button
+                type="button"
+                className={`context-menu-item danger ${trackStates.length <= 1 ? 'disabled' : ''}`}
+                disabled={trackStates.length <= 1}
+                onClick={() => requestDeleteTrack(contextMenu.trackIndex)}
+              >
+                Eliminar pista
+              </button>
+            ) : contextMenu.clipId ? (
               <>
                 <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('cut')}>Cortar</button>
                 <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('copy')}>Copiar</button>
@@ -4076,6 +4199,36 @@ function App() {
         </>
       )}
 
+      {trackDeleteConfirm && (
+        <div
+          className="confirm-modal"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setTrackDeleteConfirm(null)
+          }}
+        >
+          <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="track-delete-title">
+            <h2 id="track-delete-title">Eliminar pista</h2>
+            <p>
+              ¿Eliminar la pista «{trackDeleteConfirm.name}» y {trackDeleteConfirm.clipCount === 1
+                ? 'su clip'
+                : `sus ${trackDeleteConfirm.clipCount} clips`}? Esta acción se puede deshacer.
+            </p>
+            <div className="confirm-actions">
+              <button type="button" className="confirm-cancel" onClick={() => setTrackDeleteConfirm(null)}>
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="confirm-danger"
+                onClick={() => deleteTrackAt(trackDeleteConfirm.trackIndex)}
+              >
+                Eliminar pista
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showHelp && (
         <div className="drive-projects-modal">
           <div className="modal-content" style={{ maxWidth: '600px' }}>
@@ -4096,6 +4249,13 @@ function App() {
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
                 <li>• <strong>Shift al arrastrar</strong> - Desactivar snap temporalmente</li>
                 <li>• <strong>Botón 🧲 Snap</strong> - Activa/desactiva ajuste a cuadrícula</li>
+              </ul>
+
+              <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Pistas</h3>
+              <ul style={{ listStyle: 'none', padding: 0 }}>
+                <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
+                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Eliminar pista</li>
+                <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer la eliminación (restaura clips, volumen, mute y solo)</li>
               </ul>
               
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Teclado</h3>

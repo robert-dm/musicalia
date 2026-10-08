@@ -2,6 +2,7 @@ import {
   clampGroupTimeDelta,
   clampGroupTrackDelta,
   clientRectsIntersect,
+  deleteTrackFromList,
   marqueeClientRect,
   mergeSelection,
   packClipboard,
@@ -50,6 +51,20 @@ const added = mergeSelection(new Set(['a']), ['b'], 'add')
 assert(added.has('a') && added.has('b'), 'shift-add keeps existing')
 const toggled = mergeSelection(new Set(['a', 'b']), ['b', 'c'], 'toggle')
 assert(toggled.has('a') && !toggled.has('b') && toggled.has('c'), 'ctrl-toggle adds and removes')
+
+const del = deleteTrackFromList(
+  [
+    { clips: [{ id: 'a' }] },
+    { clips: [{ id: 'b' }, { id: 'c' }] },
+    { clips: [{ id: 'd' }] }
+  ],
+  1,
+  new Set(['a', 'b', 'd'])
+)
+assert(!!del && del.tracks.length === 2, 'deleting a track leaves the others')
+assert(!!del && del.tracks[1].clips[0].id === 'd', 'later tracks shift down')
+assert(!!del && del.selectedIds.has('a') && del.selectedIds.has('d') && !del.selectedIds.has('b'), 'selection drops clips from the removed track')
+assert(deleteTrackFromList([{ clips: [] }], 0, new Set()) === null, 'cannot delete the last track')
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

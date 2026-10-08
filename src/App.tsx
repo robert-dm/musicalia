@@ -69,6 +69,12 @@ import {
   type PcmCapture
 } from './audioRecord'
 import {
+  isSpaceKey,
+  modalHasTextField,
+  spacePlaybackDecision,
+  spaceToggleAction
+} from './spacePlayback'
+import {
   ContextMenuItem,
   IconCircleHelp,
   IconClipboardPaste,
@@ -239,6 +245,8 @@ function App() {
   const isRecordingRef = useRef(false)
   const lastRecordLayoutRef = useRef(0)
   const stopRecordingRef = useRef<(opts?: { then?: 'stop' | 'pause' | 'keep'; commit?: boolean }) => Promise<void>>(async () => {})
+  const handlePlayRef = useRef<() => void | Promise<void>>(async () => {})
+  const handlePauseRef = useRef<() => void>(() => {})
   const metronomePlayerRef = useRef<Tone.Player | null>(null)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() =>
     initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] }))
@@ -1636,6 +1644,8 @@ function App() {
     setIsPlaying(false)
     setIsPaused(true)
   }
+  handlePlayRef.current = handlePlay
+  handlePauseRef.current = handlePause
 
   const handleStop = () => {
     if (isRecordingRef.current) {
@@ -2728,21 +2738,44 @@ function App() {
         e.preventDefault()
         const allClipIds = new Set(trackStates.flatMap(t => t.clips.map(c => c.id)))
         setSelectedClipIds(allClipIds)
-      } else if (e.code === 'Space' || e.key === ' ') {
-        e.preventDefault()
-        if (isRecordingRef.current) {
-          void stopRecordingRef.current({ then: 'stop' })
-        } else if (Tone.getTransport().state === 'started') {
-          handlePause()
-        } else {
-          void handlePlay()
-        }
       }
     }
     
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm])
+
+  useEffect(() => {
+    const onSpace = (e: KeyboardEvent) => {
+      if (!isSpaceKey(e)) return
+      const decision = spacePlaybackDecision(e, { modalHasTextField: modalHasTextField() })
+      if (decision === 'ignore') return
+      e.preventDefault()
+      if (typeof e.stopPropagation === 'function') e.stopPropagation()
+      if (e.type !== 'keydown' || decision !== 'toggle') return
+      const action = spaceToggleAction(
+        isRecordingRef.current,
+        Tone.getTransport().state === 'started'
+      )
+      if (action === 'stop-record') void stopRecordingRef.current({ then: 'stop' })
+      else if (action === 'pause') handlePauseRef.current()
+      else void handlePlayRef.current()
+    }
+    const blurButtons = (e: MouseEvent) => {
+      const target = e.target
+      if (!(target instanceof Element)) return
+      const button = target.closest('button')
+      if (button instanceof HTMLButtonElement) button.blur()
+    }
+    window.addEventListener('keydown', onSpace, true)
+    window.addEventListener('keyup', onSpace, true)
+    window.addEventListener('mouseup', blurButtons, true)
+    return () => {
+      window.removeEventListener('keydown', onSpace, true)
+      window.removeEventListener('keyup', onSpace, true)
+      window.removeEventListener('mouseup', blurButtons, true)
+    }
+  }, [])
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
@@ -4410,6 +4443,7 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+A</strong> - Seleccionar todos los clips</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Shift+Z</strong> o <strong>Cmd/Ctrl+Y</strong> - Rehacer</li>
+                <li>• <strong>Espacio</strong> - Play/Pausa. No hace nada si estás escribiendo en un campo</li>
               </ul>
               
               <h3>Guardar y Abrir</h3>
@@ -4421,7 +4455,7 @@ function App() {
               
               <h3>Transporte</h3>
               <ul>
-                <li>• <strong>Espacio</strong> - Reproducir/Pausar. Durante una grabación, la detiene</li>
+                <li>• <strong>Espacio</strong> - Play/Pausa (el playhead se queda donde paró; la próxima vez sigue desde ahí o desde donde hiciste click). Si hay una grabación en curso, la detiene. No desplaza la página ni activa el botón enfocado</li>
                 <li>• <strong>Click en timeline, regla o clip</strong> - Mover playhead (siempre visible, también en pausa)</li>
                 <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
                 <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>

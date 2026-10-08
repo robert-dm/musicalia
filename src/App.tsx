@@ -27,6 +27,13 @@ import { TrackHeader } from './TrackHeader'
 import { TrackLane } from './TrackLane'
 import { effectiveTrackGain, rampTrackGain } from './trackGain'
 import { clipBufferSignature } from './trackRenderMemo'
+import {
+  DEFAULT_TRACK_VOLUME,
+  appendEmptyTrack,
+  createEmptyTrack,
+  initialEmptyTracks,
+  nextPistaName
+} from './trackList'
 import { applySeekSnap, clickTimeFromX, isClickGesture } from './playheadSeek'
 import {
   clampGroupTimeDelta,
@@ -58,7 +65,7 @@ interface ContextMenuState {
   trackIndex: number
   clipId: string | null
   time: number
-  kind?: 'header' | 'timeline'
+  kind?: 'header' | 'timeline' | 'empty'
 }
 
 interface Clip {
@@ -150,14 +157,8 @@ function App() {
   const stemAbortControllerRef = useRef<AbortController | null>(null)
   const pendingFileRef = useRef<File | null>(null)
   const metronomePlayerRef = useRef<Tone.Player | null>(null)
-  const [trackStates, setTrackStates] = useState<TrackState[]>(() => 
-    Array.from({ length: 8 }, (_, i) => ({
-      mute: false,
-      solo: false,
-      volume: 0.8,
-      clips: [],
-      name: `Track ${i + 1}`
-    }))
+  const [trackStates, setTrackStates] = useState<TrackState[]>(() =>
+    initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] }))
   )
   const meterRef = useRef<Tone.Meter | null>(null)
   const [showToast, setShowToast] = useState(false)
@@ -207,6 +208,9 @@ function App() {
   const trackStatesRef = useRef(trackStates)
   trackStatesRef.current = trackStates
   const lastClipBufferSigRef = useRef<string | null>(null)
+  const sidebarScrollRef = useRef<HTMLDivElement>(null)
+  const lanesScrollRef = useRef<HTMLDivElement>(null)
+  const syncingVerticalScroll = useRef(false)
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -362,10 +366,14 @@ function App() {
     setLoopEnd(state.loopEnd)
   }
 
-  const reconnectAllClips = (tracks: TrackState[]) => {
-    while (trackGainsRef.current.length < tracks.length) {
-      trackGainsRef.current.push(new Tone.Gain(0.8).toDestination())
+  const ensureTrackGains = (count: number) => {
+    while (trackGainsRef.current.length < count) {
+      trackGainsRef.current.push(new Tone.Gain(DEFAULT_TRACK_VOLUME).toDestination())
     }
+  }
+
+  const reconnectAllClips = (tracks: TrackState[]) => {
+    ensureTrackGains(tracks.length)
     tracks.forEach((track, i) => {
       const gain = trackGainsRef.current[i]
       if (!gain) return
@@ -504,6 +512,7 @@ function App() {
       }
       
       await ensureAudio()
+      ensureTrackGains(state.tracks.length)
       
       setBpm(state.bpm)
       setLoopStart(state.loopStart)
@@ -927,6 +936,7 @@ function App() {
       setExportProgress('Cargando audio...')
       
       await ensureAudio()
+      ensureTrackGains((projectData.tracks || []).length)
       
       projectLoadGenRef.current++
       const loadGen = projectLoadGenRef.current
@@ -1062,13 +1072,7 @@ function App() {
       if (state.metronomeEnabled !== undefined) setMetronomeEnabled(state.metronomeEnabled)
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
       
-      // Ensure trackGainsRef has enough entries for all loaded tracks
-      const neededTracks = Math.max(state.tracks.length, 8)
-      while (trackGainsRef.current.length < neededTracks) {
-        const gain = new Tone.Gain(0.8).toDestination()
-        trackGainsRef.current.push(gain)
-        console.log(`Created gain node for track ${trackGainsRef.current.length - 1}`)
-      }
+      ensureTrackGains(state.tracks.length)
       
       const loadedTracks = state.tracks.map((t: any, i: number) => {
         // Handle old format with single clip
@@ -1136,23 +1140,13 @@ function App() {
         }
       })
       
-      // Pad to 8 tracks while preserving loaded tracks at correct indices
-      const newTrackStates = Array.from({ length: 8 }, (_, i) => {
-        if (i < loadedTracks.length) {
-          return loadedTracks[i]
-        }
-        return {
-          name: `Track ${i + 1}`,
-          mute: false,
-          solo: false,
-          volume: 0.8,
-          clips: []
-        }
-      })
+      const newTrackStates = loadedTracks.length > 0
+        ? loadedTracks
+        : initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] }))
       
-      console.log(`Setting ${loadedTracks.length} loaded tracks, padded to ${newTrackStates.length} total`)
-      console.log(`Track 0 clips:`, newTrackStates[0].clips.length)
-      console.log(`Track 1 clips:`, newTrackStates[1].clips.length)
+      console.log(`Setting ${newTrackStates.length} loaded tracks (no fixed cap)`)
+      if (newTrackStates[0]) console.log(`Track 0 clips:`, newTrackStates[0].clips.length)
+      if (newTrackStates[1]) console.log(`Track 1 clips:`, newTrackStates[1].clips.length)
       
       setTrackStates(newTrackStates)
       setCurrentProjectName(name)
@@ -1390,9 +1384,12 @@ function App() {
       await Tone.start()
       
       if (trackGainsRef.current.length === 0) {
-        trackGainsRef.current = Array.from({ length: 8 }, () => 
-          new Tone.Gain(0.8).toDestination()
+        const n = Math.max(trackStatesRef.current.length, 1)
+        trackGainsRef.current = Array.from({ length: n }, () =>
+          new Tone.Gain(DEFAULT_TRACK_VOLUME).toDestination()
         )
+      } else {
+        ensureTrackGains(trackStatesRef.current.length)
       }
       
       if (!metronomePlayerRef.current) {
@@ -2962,11 +2959,18 @@ function App() {
     })
     
     const newTrackStates = [...trackStates]
+    const needed = startTrackIndex + stemBuffers.length
+    while (newTrackStates.length < needed) {
+      newTrackStates.push({
+        ...createEmptyTrack(nextPistaName(newTrackStates.map(t => t.name), newTrackStates.length)),
+        clips: []
+      })
+    }
+    ensureTrackGains(newTrackStates.length)
     const stemOffset = getCountInSeconds()
 
     for (let i = 0; i < stemBuffers.length; i++) {
       const targetTrackIndex = startTrackIndex + i
-      if (targetTrackIndex >= trackStates.length) break
 
       const player = new Tone.Player()
       player.loop = false
@@ -3085,6 +3089,31 @@ function App() {
     else if (selectedTrack !== null && selectedTrack > trackIndex) setSelectedTrack(selectedTrack - 1)
     setTrackDeleteConfirm(null)
     showClipToast('Pista eliminada')
+  }
+
+  const addEmptyTrack = () => {
+    closeContextMenu()
+    saveUndo()
+    const next = appendEmptyTrack(trackStatesRef.current, (name) => ({
+      ...createEmptyTrack(name),
+      clips: [] as Clip[]
+    }))
+    ensureTrackGains(next.length)
+    setTrackStates(next)
+    showClipToast('Pista agregada')
+    return next.length - 1
+  }
+
+  const syncVerticalScroll = (source: 'sidebar' | 'lanes') => {
+    if (syncingVerticalScroll.current) return
+    const from = source === 'sidebar' ? sidebarScrollRef.current : lanesScrollRef.current
+    const to = source === 'sidebar' ? lanesScrollRef.current : sidebarScrollRef.current
+    if (!from || !to || to.scrollTop === from.scrollTop) return
+    syncingVerticalScroll.current = true
+    to.scrollTop = from.scrollTop
+    requestAnimationFrame(() => {
+      syncingVerticalScroll.current = false
+    })
   }
 
   const openTrackHeaderMenu = (e: React.MouseEvent, trackIndex: number) => {
@@ -3577,13 +3606,12 @@ function App() {
                 setTimeout(() => setErrorMessage(null), 3000)
                 return
               }
-              if (trackStates.some(t => t.clips.length === 0)) {
-                setSelectedTrack(trackStates.findIndex(t => t.clips.length === 0))
-                setShowYoutubeDialog(true)
-              } else {
-                setErrorMessage('Todas las pistas están ocupadas')
-                setTimeout(() => setErrorMessage(null), 3000)
+              let emptyIndex = trackStates.findIndex(t => t.clips.length === 0)
+              if (emptyIndex < 0) {
+                emptyIndex = addEmptyTrack()
               }
+              setSelectedTrack(emptyIndex)
+              setShowYoutubeDialog(true)
             }}
             title="Importar desde YouTube"
           >
@@ -4005,31 +4033,58 @@ function App() {
 
       <div className="arrangement-view">
         <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
-          <div className="ruler-spacer" style={{ height: '32px', flexShrink: 0, borderBottom: '1px solid #333' }} />
-          {trackStates.map((trackState, trackIndex) => (
-            <TrackHeader
-              key={trackIndex}
-              trackIndex={trackIndex}
-              name={trackState.name}
-              mute={trackState.mute}
-              solo={trackState.solo}
-              volume={trackState.volume}
-              height={88 * verticalZoom}
-              canDelete={trackStates.length > 1}
-              isRenaming={renamingTrack === trackIndex}
-              renameDraft={renamingTrack === trackIndex ? renameDraft : ''}
-              onContextMenu={openTrackHeaderMenu}
-              onStartRename={startRenameTrack}
-              onRenameDraftChange={setRenameDraft}
-              onCommitRename={commitRenameTrack}
-              onCancelRename={cancelRenameTrack}
-              onDelete={requestDeleteTrack}
-              onMute={handleMuteToggle}
-              onSolo={handleSoloToggle}
-              onVolumeLive={handleVolumeLive}
-              onVolumeCommit={handleVolumeCommit}
-            />
-          ))}
+          <div
+            className="sidebar-scroll"
+            ref={sidebarScrollRef}
+            onScroll={() => syncVerticalScroll('sidebar')}
+          >
+            <div className="ruler-spacer" style={{ height: '32px', flexShrink: 0, borderBottom: '1px solid #333' }} />
+            {trackStates.map((trackState, trackIndex) => (
+              <TrackHeader
+                key={trackIndex}
+                trackIndex={trackIndex}
+                name={trackState.name}
+                mute={trackState.mute}
+                solo={trackState.solo}
+                volume={trackState.volume}
+                height={88 * verticalZoom}
+                canDelete={trackStates.length > 1}
+                isRenaming={renamingTrack === trackIndex}
+                renameDraft={renamingTrack === trackIndex ? renameDraft : ''}
+                onContextMenu={openTrackHeaderMenu}
+                onStartRename={startRenameTrack}
+                onRenameDraftChange={setRenameDraft}
+                onCommitRename={commitRenameTrack}
+                onCancelRename={cancelRenameTrack}
+                onDelete={requestDeleteTrack}
+                onMute={handleMuteToggle}
+                onSolo={handleSoloToggle}
+                onVolumeLive={handleVolumeLive}
+                onVolumeCommit={handleVolumeCommit}
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            className="add-track-button"
+            data-testid="add-track-button"
+            title="Agregar pista"
+            onClick={addEmptyTrack}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              setContextMenu({
+                x: e.clientX,
+                y: e.clientY,
+                trackIndex: trackStates.length - 1,
+                clipId: null,
+                time: 0,
+                kind: 'empty'
+              })
+            }}
+          >
+            + Agregar pista
+          </button>
         </div>
         <div 
           className="resize-handle"
@@ -4039,10 +4094,25 @@ function App() {
         <div
           className="lanes-column"
           ref={lanesColumnRef}
-          style={{ minWidth: `${100 * horizontalZoom}%` }}
-          onContextMenu={(e) => e.preventDefault()}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            const target = e.target as HTMLElement
+            if (target.closest('.track-content, .clip-wrapper, .bar-ruler')) return
+            setContextMenu({
+              x: e.clientX,
+              y: e.clientY,
+              trackIndex: trackStates.length - 1,
+              clipId: null,
+              time: 0,
+              kind: 'empty'
+            })
+          }}
         >
-          <div className="lanes-scroll-content">
+          <div
+            className="lanes-scroll-content"
+            ref={lanesScrollRef}
+            onScroll={() => syncVerticalScroll('lanes')}
+          >
           {marqueeBox && (
             <div
               className="marquee-rect"
@@ -4054,6 +4124,7 @@ function App() {
               }}
             />
           )}
+          <div className="lanes-scroll-inner" style={{ minWidth: `${100 * horizontalZoom}%` }}>
           <div className="bar-ruler" onMouseDown={handleRulerMouseDown}>
             {rulerBars}
           </div>
@@ -4093,6 +4164,7 @@ function App() {
               <span className="playhead-cap" />
             </div>
           </div>
+          </div>
         </div>
       </div>
 
@@ -4120,6 +4192,14 @@ function App() {
                 </button>
                 <button
                   type="button"
+                  className="context-menu-item"
+                  onClick={addEmptyTrack}
+                >
+                  Agregar pista
+                </button>
+                <div className="context-menu-sep" />
+                <button
+                  type="button"
                   className={`context-menu-item danger ${trackStates.length <= 1 ? 'disabled' : ''}`}
                   disabled={trackStates.length <= 1}
                   onClick={() => requestDeleteTrack(contextMenu.trackIndex)}
@@ -4127,6 +4207,14 @@ function App() {
                   Eliminar pista
                 </button>
               </>
+            ) : contextMenu.kind === 'empty' ? (
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={addEmptyTrack}
+              >
+                Agregar pista
+              </button>
             ) : contextMenu.clipId ? (
               <>
                 <button type="button" className="context-menu-item" onClick={() => runContextMenuAction('cut')}>Cortar</button>
@@ -4145,14 +4233,24 @@ function App() {
                 <button type="button" className="context-menu-item danger" onClick={() => runContextMenuAction('delete')}>Eliminar</button>
               </>
             ) : (
-              <button
-                type="button"
-                className={`context-menu-item ${clipboard && clipboard.length ? '' : 'disabled'}`}
-                disabled={!clipboard || clipboard.length === 0}
-                onClick={() => runContextMenuAction('paste')}
-              >
-                Pegar aquí
-              </button>
+              <>
+                <button
+                  type="button"
+                  className={`context-menu-item ${clipboard && clipboard.length ? '' : 'disabled'}`}
+                  disabled={!clipboard || clipboard.length === 0}
+                  onClick={() => runContextMenuAction('paste')}
+                >
+                  Pegar aquí
+                </button>
+                <div className="context-menu-sep" />
+                <button
+                  type="button"
+                  className="context-menu-item"
+                  onClick={addEmptyTrack}
+                >
+                  Agregar pista
+                </button>
+              </>
             )}
           </div>
         </>
@@ -4214,7 +4312,8 @@ function App() {
               <ul style={{ listStyle: 'none', padding: 0 }}>
                 <li>• <strong>Doble clic en el nombre</strong> - Renombrar pista (Enter o clic fuera guarda, Escape cancela)</li>
                 <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
-                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar pista, Eliminar pista</li>
+                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar pista, Agregar pista, Eliminar pista</li>
+                <li>• <strong>+ Agregar pista</strong> - Añade una pista vacía al final (Pista 9, 10, …). También en una pista vacía o zona vacía (clic derecho). Se puede deshacer</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
               </ul>

@@ -5,7 +5,8 @@ import JSZip from 'jszip'
 import './App.css'
 import './AudioDiagnostics.css'
 import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
-import { separateStems, isStemSeparationSupported } from './stemSeparator'
+import { separateStems, isStemSeparationSupported, type StemSeparationProgress } from './stemSeparator'
+import { DEFAULT_STEM_QUALITY, type StemQuality } from './stemQuality'
 import { autosaveProject, loadProject, clearProject, saveAudioBuffer, loadAudioBuffer } from './projectManager'
 import {
   register,
@@ -150,7 +151,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0077b'
+const APP_VERSION = '0.0078b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -277,7 +278,7 @@ function App() {
   const [verticalZoom, setVerticalZoom] = useState(1)
   const lanesColumnRef = useRef<HTMLDivElement>(null)
   const [showStemDialog, setShowStemDialog] = useState(false)
-  const [stemProgress, setStemProgress] = useState<number>(0)
+  const [stemProgress, setStemProgress] = useState<StemSeparationProgress>({ progress: 0, stage: '' })
   const [isProcessingStems, setIsProcessingStems] = useState(false)
   const stemAbortControllerRef = useRef<AbortController | null>(null)
   const pendingFileRef = useRef<File | null>(null)
@@ -3069,19 +3070,19 @@ function App() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const handleStemDialogConfirm = async () => {
+  const handleStemDialogConfirm = async (quality: StemQuality = DEFAULT_STEM_QUALITY) => {
     setShowStemDialog(false)
     if (!pendingFileRef.current || selectedTrack === null) return
 
     setIsProcessingStems(true)
-    setStemProgress(0)
+    setStemProgress({ progress: 0, stage: 'Inicializando...' })
 
     const file = pendingFileRef.current
     const track = selectedTrack
     const offset = pendingOffsetRef.current
 
     try {
-      await processStemSeparation(file, track, offset)
+      await processStemSeparation(file, track, offset, quality)
     } catch (error) {
       console.error('Stem separation failed:', error)
       const errorMessage = error instanceof Error ? error.message : 'Error desconocido'
@@ -3113,7 +3114,7 @@ function App() {
     }
     setShowStemDialog(false)
     setIsProcessingStems(false)
-    setStemProgress(0)
+    setStemProgress({ progress: 0, stage: '' })
     if (pendingFileRef.current && selectedTrack !== null) {
       loadSingleTrack(pendingFileRef.current, selectedTrack, pendingOffsetRef.current).catch(console.error)
     }
@@ -3235,7 +3236,12 @@ function App() {
     setTrackStates(newTrackStates)
   }
 
-  const processStemSeparation = async (file: File, startTrackIndex: number, offsetSeconds?: number) => {
+  const processStemSeparation = async (
+    file: File,
+    startTrackIndex: number,
+    offsetSeconds?: number,
+    quality: StemQuality = DEFAULT_STEM_QUALITY
+  ) => {
     await ensureAudio()
     beginImportUndo()
 
@@ -3262,8 +3268,8 @@ function App() {
     }
 
     const stems = await separateStems(originalBuffer, (progress) => {
-      setStemProgress(progress.progress)
-    }, abortController.signal)
+      setStemProgress(progress)
+    }, abortController.signal, quality)
 
     const stemNames = ['Vocals', 'Drums', 'Bass', 'Other']
     const stemBuffers = [stems.vocals, stems.drums, stems.bass, stems.other]
@@ -4367,7 +4373,13 @@ function App() {
       )}
 
       {isProcessingStems && (
-        <StemSplitProgress progress={stemProgress} onCancel={handleCancelStemSeparation} />
+        <StemSplitProgress
+          progress={stemProgress.progress}
+          stage={stemProgress.stage}
+          elapsedSeconds={stemProgress.elapsedSeconds}
+          etaSeconds={stemProgress.etaSeconds}
+          onCancel={handleCancelStemSeparation}
+        />
       )}
       
       {showToast && toastMessage && (

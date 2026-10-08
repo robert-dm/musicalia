@@ -12,6 +12,11 @@
 
 import * as ort from 'onnxruntime-web'
 import FFT from 'fft.js'
+import { fetchModelWithProgress } from './modelDownload'
+import { makeProgressReporter, type StemSeparationProgress } from './stemProgress'
+import type { StemQuality } from './stemQuality'
+
+export type { StemSeparationProgress }
 
 export interface StemSeparationResult {
   vocals: AudioBuffer
@@ -20,10 +25,11 @@ export interface StemSeparationResult {
   other: AudioBuffer
 }
 
-export interface StemSeparationProgress {
-  progress: number
-  stage: string
-}
+type SpleeterStemName = 'vocals' | 'drums' | 'bass' | 'other'
+type SpleeterModelBytes = Record<SpleeterStemName, Uint8Array>
+
+const SPLEETER_STEMS: SpleeterStemName[] = ['vocals', 'drums', 'bass', 'other']
+const SPLEETER_MODEL_BYTES = 20 * 1024 * 1024
 
 // Spleeter 4-stem ONNX models (fp16, ~20MB each)
 // These models process magnitude spectrograms, not waveforms
@@ -187,22 +193,47 @@ function createModelInput(magnitude: Float32Array[][]): ort.Tensor {
   return new ort.Tensor('float32', tensorData, [channels, numSplits, FRAMES_PER_SPLIT, N_BINS])
 }
 
+async function loadSpleeterModels(
+  onProgress: (progress: StemSeparationProgress) => void,
+  signal?: AbortSignal,
+  rangeStart = 5,
+  rangeEnd = 24
+): Promise<SpleeterModelBytes> {
+  const models = {} as SpleeterModelBytes
+  const span = (rangeEnd - rangeStart) / SPLEETER_STEMS.length
+  for (let i = 0; i < SPLEETER_STEMS.length; i++) {
+    const stemName = SPLEETER_STEMS[i]
+    const start = rangeStart + i * span
+    models[stemName] = await fetchModelWithProgress(
+      SPLEETER_MODELS[stemName],
+      SPLEETER_MODEL_BYTES,
+      (loaded, total, cached) => {
+        const frac = total > 0 ? loaded / total : 0
+        onProgress({
+          progress: start + frac * span,
+          stage: cached
+            ? `Modelo ${stemName} en caché`
+            : `Descargando modelo (${stemName})… ${Math.round(frac * 100)}%`,
+        })
+      },
+      signal
+    )
+  }
+  return models
+}
+
 /**
  * Run model for single stem and return magnitude estimate
  */
 async function processSingleStem(
-  stemName: 'vocals' | 'drums' | 'bass' | 'other',
+  stemName: SpleeterStemName,
   inputTensor: ort.Tensor,
-  onProgress?: (progress: StemSeparationProgress) => void
+  modelBytes: Uint8Array
 ): Promise<Float32Array> {
-  
-  const modelUrl = SPLEETER_MODELS[stemName]
-  
   try {
     console.log(`Loading ${stemName} model...`)
-    onProgress?.({ progress: 0, stage: `Cargando ${stemName}...` })
     
-    const session = await ort.InferenceSession.create(modelUrl, {
+    const session = await ort.InferenceSession.create(modelBytes, {
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'all',
       enableCpuMemArena: true,
@@ -491,6 +522,7 @@ async function processChunk(
   chunkIndex: number,
   totalChunks: number,
   startTime: number,
+  models: SpleeterModelBytes,
   onProgress?: (progress: StemSeparationProgress) => void,
   signal?: AbortSignal
 ): Promise<StemSeparationResult> {
@@ -508,7 +540,7 @@ async function processChunk(
   }
   
   // Step 1: Compute STFT
-  reportProgress(0, 'STFT')
+  reportProgress(0, 'espectro (STFT)')
   const chunkStart = Date.now()
   const { real, imag } = computeSTFT(audioChunk)
   await new Promise(r => setTimeout(r, 0)) // Yield to UI
@@ -522,16 +554,15 @@ async function processChunk(
   const inputTensor = createModelInput(magnitude)
   
   // Steps 2-5: Process all 4 stems
-  const stems = ['vocals', 'drums', 'bass', 'other'] as const
   const estimates: { [key: string]: Float32Array } = {}
   
-  for (let i = 0; i < stems.length; i++) {
+  for (let i = 0; i < SPLEETER_STEMS.length; i++) {
     if (signal?.aborted) throw new Error('Cancelado por el usuario')
     
-    reportProgress(1 + i, stems[i])
+    reportProgress(1 + i, SPLEETER_STEMS[i])
     const modelStart = Date.now()
-    estimates[stems[i]] = await processSingleStem(stems[i], inputTensor)
-    console.log(`[PERF] Model ${stems[i]}: ${Date.now() - modelStart}ms`)
+    estimates[SPLEETER_STEMS[i]] = await processSingleStem(SPLEETER_STEMS[i], inputTensor, models[SPLEETER_STEMS[i]])
+    console.log(`[PERF] Model ${SPLEETER_STEMS[i]}: ${Date.now() - modelStart}ms`)
     await new Promise(r => setTimeout(r, 0)) // Yield to UI
   }
   
@@ -615,11 +646,25 @@ function stitchChunks(
 export async function separateStems(
   audioBuffer: AudioBuffer,
   onProgress?: (progress: StemSeparationProgress) => void,
+  signal?: AbortSignal,
+  quality: StemQuality = 'spleeter'
+): Promise<StemSeparationResult> {
+  if (quality === 'demucs') {
+    const { separateStemsDemucs } = await import('./demucsSeparator')
+    return separateStemsDemucs(audioBuffer, onProgress, signal)
+  }
+  return separateStemsSpleeter(audioBuffer, onProgress, signal)
+}
+
+async function separateStemsSpleeter(
+  audioBuffer: AudioBuffer,
+  onProgress?: (progress: StemSeparationProgress) => void,
   signal?: AbortSignal
 ): Promise<StemSeparationResult> {
   
   const startTime = Date.now()
   let lastProgressTime = startTime
+  const reporter = makeProgressReporter(onProgress, startTime)
   
   // Watchdog: throw if no progress for 90s
   const watchdog = setInterval(() => {
@@ -631,7 +676,7 @@ export async function separateStems(
   
   const wrappedProgress = (p: StemSeparationProgress) => {
     lastProgressTime = Date.now()
-    onProgress?.(p)
+    reporter.report(p)
   }
   
   try {
@@ -643,11 +688,12 @@ export async function separateStems(
       throw new Error('Dispositivo móvil o memoria insuficiente. La separación de stems requiere al menos 4GB de RAM. Cargando como pista única...')
     }
     
+    wrappedProgress({ progress: 2, stage: 'Inicializando...' })
     await initializeRuntime()
     
     if (signal?.aborted) throw new Error('Cancelado por el usuario')
     
-    wrappedProgress({ progress: 5, stage: 'Inicializando...' })
+    const models = await loadSpleeterModels(wrappedProgress, signal)
     
     const duration = audioBuffer.length / audioBuffer.sampleRate
     const sampleRate = audioBuffer.sampleRate
@@ -669,12 +715,11 @@ export async function separateStems(
     const needsChunking = duration > 90
     
     if (!needsChunking) {
-      // Process entire audio at once
-      wrappedProgress({ progress: 10, stage: 'Procesando audio...' })
+      wrappedProgress({ progress: 26, stage: 'Calculando espectro (STFT)...' })
       
       const { real, imag } = computeSTFT(mono)
       
-      wrappedProgress({ progress: 20, stage: 'Extrayendo magnitudes...' })
+      wrappedProgress({ progress: 32, stage: 'Extrayendo magnitudes...' })
       
       const stereoReal = [real[0], real[0]]
       const stereoImag = [imag[0], imag[0]]
@@ -684,17 +729,17 @@ export async function separateStems(
       
       console.log('Input tensor shape:', inputTensor.dims)
       
-      wrappedProgress({ progress: 30, stage: 'Procesando vocals...' })
-      const vocalsEst = await processSingleStem('vocals', inputTensor)
+      wrappedProgress({ progress: 36, stage: 'Procesando vocals...' })
+      const vocalsEst = await processSingleStem('vocals', inputTensor, models.vocals)
       
-      wrappedProgress({ progress: 45, stage: 'Procesando drums...' })
-      const drumsEst = await processSingleStem('drums', inputTensor)
+      wrappedProgress({ progress: 50, stage: 'Procesando drums...' })
+      const drumsEst = await processSingleStem('drums', inputTensor, models.drums)
       
-      wrappedProgress({ progress: 60, stage: 'Procesando bass...' })
-      const bassEst = await processSingleStem('bass', inputTensor)
+      wrappedProgress({ progress: 64, stage: 'Procesando bass...' })
+      const bassEst = await processSingleStem('bass', inputTensor, models.bass)
       
-      wrappedProgress({ progress: 75, stage: 'Procesando other...' })
-      const otherEst = await processSingleStem('other', inputTensor)
+      wrappedProgress({ progress: 78, stage: 'Procesando other...' })
+      const otherEst = await processSingleStem('other', inputTensor, models.other)
       
       const estimates = {
         vocals: vocalsEst,
@@ -703,6 +748,7 @@ export async function separateStems(
         other: otherEst
       }
       
+      wrappedProgress({ progress: 88, stage: 'Aplicando máscara y reconstruyendo...' })
       const result = await applyMaskAndReconstruct(
         stereoReal,
         stereoImag,
@@ -714,7 +760,6 @@ export async function separateStems(
       wrappedProgress({ progress: 100, stage: 'Completado' })
       
       validateStems(result)
-      clearInterval(watchdog)
       return result
     }
     
@@ -736,12 +781,16 @@ export async function separateStems(
       // Extract chunk
       const audioChunk = mono.slice(startSample, endSample)
       
-      // Update progress
-      const chunkProgress = Math.floor(10 + (chunkIdx / numChunks) * 85)
-      onProgress?.({ progress: chunkProgress, stage: `Procesando parte ${chunkIdx + 1}/${numChunks}...` })
-      
-      // Process chunk
-      const chunkResult = await processChunk(audioChunk, sampleRate, chunkIdx, numChunks, startTime, wrappedProgress, signal)
+      const chunkResult = await processChunk(
+        audioChunk,
+        sampleRate,
+        chunkIdx,
+        numChunks,
+        startTime,
+        models,
+        wrappedProgress,
+        signal
+      )
       
       stemChunks.vocals.push(chunkResult.vocals)
       stemChunks.drums.push(chunkResult.drums)
@@ -749,7 +798,6 @@ export async function separateStems(
       stemChunks.other.push(chunkResult.other)
     }
     
-    // Stitch chunks together
     wrappedProgress({ progress: 95, stage: 'Uniendo partes...' })
     
     const vocals = stitchChunks(stemChunks.vocals, overlapSamples, mono.length, sampleRate)
@@ -759,16 +807,16 @@ export async function separateStems(
     
     wrappedProgress({ progress: 100, stage: 'Completado' })
     
-    // Validate stems before returning
     validateStems({ vocals, drums, bass, other })
     
-    clearInterval(watchdog)
     return { vocals, drums, bass, other }
     
   } catch (error) {
-    clearInterval(watchdog)
     console.error('Stem separation failed:', error)
     throw error
+  } finally {
+    reporter.stop()
+    clearInterval(watchdog)
   }
 }
 

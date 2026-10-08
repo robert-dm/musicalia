@@ -22,8 +22,9 @@ import {
   type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
+import { encodeAudioBufferWAV, audioBufferFromSerialized } from './wav'
 
-const APP_VERSION = '0.0071b'
+const APP_VERSION = '0.0072b'
 
 interface Clip {
   player: Tone.Player
@@ -655,10 +656,7 @@ function App() {
             audioFileName = `audio_${trackIdx}_${clipIdx}.wav`
             bufferMap.set(clip.buffer, audioFileName)
             
-            const wavData = encodeWAV(
-              [clip.buffer.getChannelData(0), clip.buffer.getChannelData(1)],
-              clip.buffer.sampleRate
-            )
+            const wavData = encodeAudioBufferWAV(clip.buffer)
             // Use STORE (no compression) for WAV files - they're already compressed
             // and DEFLATE is slow and doesn't save much space
             zip.file(audioFileName, wavData.buffer as ArrayBuffer, { compression: 'STORE' })
@@ -753,10 +751,7 @@ function App() {
             audioFileName = `audio_${trackIdx}_${clipIdx}.wav`
             bufferMap.set(clip.buffer, audioFileName)
             
-            const wavData = encodeWAV(
-              [clip.buffer.getChannelData(0), clip.buffer.getChannelData(1)],
-              clip.buffer.sampleRate
-            )
+            const wavData = encodeAudioBufferWAV(clip.buffer)
             zip.file(audioFileName, wavData.buffer as ArrayBuffer, { compression: 'STORE' })
           }
           
@@ -972,13 +967,7 @@ function App() {
       const loadedTracks = state.tracks.map((t: any, i: number) => {
         // Handle old format with single clip
         if (t.clip) {
-          const buffer = new AudioBuffer({
-            numberOfChannels: 2,
-            length: t.clip.audioData.left.length,
-            sampleRate: t.clip.audioData.sampleRate
-          })
-          buffer.getChannelData(0).set(new Float32Array(t.clip.audioData.left))
-          buffer.getChannelData(1).set(new Float32Array(t.clip.audioData.right))
+          const buffer = audioBufferFromSerialized(t.clip.audioData)
           
           const toneBuffer = new Tone.ToneAudioBuffer(buffer)
           const player = new Tone.Player()
@@ -1008,13 +997,7 @@ function App() {
         
         // Handle new format with clips array
         const loadedClips = (t.clips || []).map((clipData: any) => {
-          const buffer = new AudioBuffer({
-            numberOfChannels: 2,
-            length: clipData.audioData.left.length,
-            sampleRate: clipData.audioData.sampleRate
-          })
-          buffer.getChannelData(0).set(new Float32Array(clipData.audioData.left))
-          buffer.getChannelData(1).set(new Float32Array(clipData.audioData.right))
+          const buffer = audioBufferFromSerialized(clipData.audioData)
           
           const toneBuffer = new Tone.ToneAudioBuffer(buffer)
           const player = new Tone.Player()
@@ -1204,10 +1187,7 @@ function App() {
         
         setExportProgress('Codificando mezcla...')
         
-        const wavData = encodeWAV(
-          [renderedBuffer.getChannelData(0), renderedBuffer.getChannelData(1)],
-          sampleRate
-        )
+        const wavData = encodeAudioBufferWAV(renderedBuffer)
         
         const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
         const url = URL.createObjectURL(blob)
@@ -1263,10 +1243,7 @@ function App() {
           
           setExportProgress(`Codificando ${idx + 1}/${effectiveIndices.length}...`)
           
-          const wavData = encodeWAV(
-            [renderedBuffer.getChannelData(0), renderedBuffer.getChannelData(1)],
-            sampleRate
-          )
+          const wavData = encodeAudioBufferWAV(renderedBuffer)
           
           const blob = new Blob([wavData.buffer as ArrayBuffer], { type: 'audio/wav' })
           const url = URL.createObjectURL(blob)
@@ -1295,44 +1272,6 @@ function App() {
       setIsExporting(false)
       setExportProgress('')
     }
-  }
-
-  function encodeWAV(channelData: Float32Array[], sampleRate: number): Uint8Array {
-    const numChannels = channelData.length
-    const length = channelData[0].length
-    const buffer = new ArrayBuffer(44 + length * numChannels * 2)
-    const view = new DataView(buffer)
-    
-    const writeString = (offset: number, string: string) => {
-      for (let i = 0; i < string.length; i++) {
-        view.setUint8(offset + i, string.charCodeAt(i))
-      }
-    }
-    
-    writeString(0, 'RIFF')
-    view.setUint32(4, 36 + length * numChannels * 2, true)
-    writeString(8, 'WAVE')
-    writeString(12, 'fmt ')
-    view.setUint32(16, 16, true)
-    view.setUint16(20, 1, true)
-    view.setUint16(22, numChannels, true)
-    view.setUint32(24, sampleRate, true)
-    view.setUint32(28, sampleRate * numChannels * 2, true)
-    view.setUint16(32, numChannels * 2, true)
-    view.setUint16(34, 16, true)
-    writeString(36, 'data')
-    view.setUint32(40, length * numChannels * 2, true)
-    
-    let offset = 44
-    for (let i = 0; i < length; i++) {
-      for (let ch = 0; ch < numChannels; ch++) {
-        const sample = Math.max(-1, Math.min(1, channelData[ch][i]))
-        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true)
-        offset += 2
-      }
-    }
-    
-    return new Uint8Array(buffer)
   }
 
   const ensureAudio = async () => {
@@ -1448,20 +1387,24 @@ function App() {
       return cache.get(buffer)!
     }
     
-    const data = buffer.getChannelData(0)
-    const peakCount = Math.ceil(data.length / peaksPerPixel)
+    const channelCount = buffer.numberOfChannels
+    const dataLength = buffer.length
+    const peakCount = Math.ceil(dataLength / peaksPerPixel)
     const peaks = new Float32Array(peakCount * 2)
     
     for (let i = 0; i < peakCount; i++) {
       const start = i * peaksPerPixel
-      const end = Math.min(start + peaksPerPixel, data.length)
+      const end = Math.min(start + peaksPerPixel, dataLength)
       let min = 1.0
       let max = -1.0
       
-      for (let j = start; j < end; j++) {
-        const sample = data[j]
-        if (sample < min) min = sample
-        if (sample > max) max = sample
+      for (let ch = 0; ch < channelCount; ch++) {
+        const data = buffer.getChannelData(ch)
+        for (let j = start; j < end; j++) {
+          const sample = data[j]
+          if (sample < min) min = sample
+          if (sample > max) max = sample
+        }
       }
       
       peaks[i * 2] = min

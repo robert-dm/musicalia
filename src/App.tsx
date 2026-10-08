@@ -11,7 +11,6 @@ import {
   login,
   verifyAuth,
   clearAuth,
-  saveProjectToCloud,
   listCloudProjects,
   openProjectFromCloud,
   deleteProjectFromCloud,
@@ -107,7 +106,6 @@ function App() {
   const [storageUsage, setStorageUsage] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string>('')
-  const [isSaving, setIsSaving] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [exportTracks, setExportTracks] = useState<boolean[]>([])
   const [isExporting, setIsExporting] = useState(false)
@@ -135,6 +133,7 @@ function App() {
   const [scissorsMode, setScissorsMode] = useState(false)
   const [showSaveNameDialog, setShowSaveNameDialog] = useState(false)
   const [saveNameInput, setSaveNameInput] = useState('')
+  const [currentFileHandle, setCurrentFileHandle] = useState<any>(null)
   const [cutLinePreview, setCutLinePreview] = useState<{trackIndex: number, time: number} | null>(null)
   const [isDraggingThreshold, setIsDraggingThreshold] = useState(false)
   const [dragDistance, setDragDistance] = useState(0)
@@ -536,96 +535,6 @@ function App() {
     setTimeout(() => setShowToast(false), 3000)
   }
   
-  const handleSaveToCloud = async () => {
-    // Prevent concurrent saves
-    if (isSaving) {
-      setErrorMessage('Ya hay una guardada en progreso. Espera a que termine.')
-      setTimeout(() => setErrorMessage(null), 3000)
-      return
-    }
-    
-    if (!currentUser) {
-      setShowAuth(true)
-      setAuthMode('login')
-      setErrorMessage('Inicia sesión para guardar en la nube')
-      return
-    }
-    
-    // Validate that project has at least one clip with audio
-    const hasAnyAudio = trackStates.some(t => t.clips.length > 0)
-    if (!hasAnyAudio) {
-      setErrorMessage('No hay audio para guardar. Importa al menos un archivo de audio.')
-      setTimeout(() => setErrorMessage(null), 5000)
-      return
-    }
-    
-    setSaveNameInput(currentProjectName)
-    setShowSaveNameDialog(true)
-  }
-  
-  const handleConfirmSaveToCloud = async () => {
-    const name = saveNameInput.trim()
-    
-    if (!name) {
-      setErrorMessage('El nombre del proyecto no puede estar vacío')
-      setTimeout(() => setErrorMessage(null), 3000)
-      return
-    }
-    
-    setShowSaveNameDialog(false)
-    
-    const projectData = {
-      name,
-      bpm,
-      loopStart,
-      loopEnd,
-      playheadPosition,
-      tracks: trackStates.map((t, i) => ({
-        name: t.name,
-        mute: t.mute,
-        solo: t.solo,
-        volume: t.volume,
-        clips: t.clips.map((clip, clipIdx) => ({
-          fileName: clip.fileName,
-          startPosition: clip.startPosition,
-          offsetSeconds: clip.offsetSeconds,
-          id: clip.id,
-          audioFile: `audio_${i}_${clipIdx}.wav`,
-          sourceStart: clip.sourceStart,
-          duration: clip.duration,
-          audioData: {
-            left: Array.from(clip.buffer.getChannelData(0)),
-            right: Array.from(clip.buffer.getChannelData(1)),
-            sampleRate: clip.buffer.sampleRate
-          }
-        }))
-      }))
-    }
-    
-    setIsSaving(true)
-    
-    try {
-      setUploadProgress(0)
-      setErrorMessage(null)
-      console.log(`[Save] Starting save for project "${name}"`)
-      await saveProjectToCloud(projectData, name, setUploadProgress)
-      console.log(`[Save] Save completed successfully`)
-      setCurrentProjectName(name)
-      setToastMessage('Proyecto guardado en la nube')
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
-    } catch (err: any) {
-      console.error('[Save] Save failed:', err)
-      const errorMsg = err.message || 'Error al guardar proyecto'
-      setErrorMessage(errorMsg)
-      // Keep error visible longer for debugging
-      setTimeout(() => setErrorMessage(null), 8000)
-    } finally {
-      setUploadProgress(0)
-      setIsSaving(false)
-    }
-  }
-  
   const handleMigrateLegacyProjects = async () => {
     try {
       const result = await migrateLegacyProjects()
@@ -643,7 +552,7 @@ function App() {
     }
   }
 
-  const handleSaveToLocal = async () => {
+  const handleSaveToLocal = async (saveAs = false) => {
     try {
       const hasAnyAudio = trackStates.some(t => t.clips.length > 0)
       if (!hasAnyAudio) {
@@ -652,6 +561,22 @@ function App() {
         return
       }
       
+      if (!saveAs && currentFileHandle) {
+        await saveToFileHandle(currentFileHandle)
+        return
+      }
+      
+      setSaveNameInput(currentProjectName)
+      setShowSaveNameDialog(true)
+    } catch (err: any) {
+      console.error('Save error:', err)
+      setErrorMessage(err.message || 'Error al guardar')
+      setTimeout(() => setErrorMessage(null), 5000)
+    }
+  }
+  
+  const saveToFileHandle = async (fileHandle: any) => {
+    try {
       setUploadProgress(5)
       setExportProgress('Preparando proyecto...')
       
@@ -728,7 +653,115 @@ function App() {
       
       setUploadProgress(100)
       
-      const fileName = `${currentProjectName.replace(/[^a-z0-9]/gi, '_')}.musicalia`
+      if (fileHandle) {
+        const writable = await fileHandle.createWritable()
+        await writable.write(blob)
+        await writable.close()
+      }
+      
+      setToastMessage('Proyecto guardado')
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+    } catch (err: any) {
+      console.error('Save error:', err)
+      setErrorMessage(err.message || 'Error al guardar')
+      setTimeout(() => setErrorMessage(null), 5000)
+    } finally {
+      setUploadProgress(0)
+      setExportProgress('')
+    }
+  }
+  
+  const handleConfirmSaveToLocal = async () => {
+    const name = saveNameInput.trim()
+    
+    if (!name) {
+      setErrorMessage('El nombre del proyecto no puede estar vacío')
+      setTimeout(() => setErrorMessage(null), 3000)
+      return
+    }
+    
+    setShowSaveNameDialog(false)
+    setCurrentProjectName(name)
+    
+    try {
+      setUploadProgress(5)
+      setExportProgress('Preparando proyecto...')
+      
+      const zip = new JSZip()
+      
+      const projectData = {
+        version: APP_VERSION,
+        name: name,
+        bpm,
+        loopStart,
+        loopEnd,
+        playheadPosition,
+        metronomeEnabled,
+        countInBars,
+        tracks: trackStates.map((t, trackIdx) => ({
+          name: t.name,
+          mute: t.mute,
+          solo: t.solo,
+          volume: t.volume,
+          clips: t.clips.map((clip, clipIdx) => ({
+            fileName: clip.fileName,
+            startPosition: clip.startPosition,
+            offsetSeconds: clip.offsetSeconds,
+            id: clip.id,
+            sourceStart: clip.sourceStart,
+            duration: clip.duration,
+            audioFile: `audio_${trackIdx}_${clipIdx}.wav`
+          }))
+        }))
+      }
+      
+      zip.file('project.json', JSON.stringify(projectData, null, 2))
+      
+      setExportProgress('Guardando audio...')
+      
+      const bufferMap = new Map<AudioBuffer, string>()
+      
+      for (let trackIdx = 0; trackIdx < trackStates.length; trackIdx++) {
+        const track = trackStates[trackIdx]
+        for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
+          const clip = track.clips[clipIdx]
+          
+          let audioFileName: string
+          if (bufferMap.has(clip.buffer)) {
+            audioFileName = bufferMap.get(clip.buffer)!
+          } else {
+            audioFileName = `audio_${trackIdx}_${clipIdx}.wav`
+            bufferMap.set(clip.buffer, audioFileName)
+            
+            const wavData = encodeWAV(
+              [clip.buffer.getChannelData(0), clip.buffer.getChannelData(1)],
+              clip.buffer.sampleRate
+            )
+            zip.file(audioFileName, wavData.buffer as ArrayBuffer)
+          }
+          
+          const progress = 10 + ((trackIdx * track.clips.length + clipIdx + 1) / 
+            trackStates.reduce((sum, t) => sum + t.clips.length, 0)) * 70
+          setUploadProgress(progress)
+        }
+      }
+      
+      setExportProgress('Comprimiendo...')
+      setUploadProgress(80)
+      
+      const blob = await zip.generateAsync({ 
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 }
+      }, (metadata) => {
+        const progress = 80 + (metadata.percent * 0.2)
+        setUploadProgress(progress)
+      })
+      
+      setUploadProgress(100)
+      
+      const fileName = `${name.replace(/[^a-z0-9]/gi, '_')}.musicalia`
       
       if ('showSaveFilePicker' in window) {
         try {
@@ -742,6 +775,7 @@ function App() {
           const writable = await handle.createWritable()
           await writable.write(blob)
           await writable.close()
+          setCurrentFileHandle(handle)
         } catch (e: any) {
           if (e.name !== 'AbortError') throw e
           return
@@ -755,12 +789,12 @@ function App() {
         URL.revokeObjectURL(url)
       }
       
-      setToastMessage('Proyecto guardado en tu computadora')
+      setToastMessage('Proyecto guardado')
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
     } catch (err: any) {
-      console.error('Local save error:', err)
-      setErrorMessage(err.message || 'Error al guardar localmente')
+      console.error('Save error:', err)
+      setErrorMessage(err.message || 'Error al guardar')
       setTimeout(() => setErrorMessage(null), 5000)
     } finally {
       setUploadProgress(0)
@@ -2977,31 +3011,32 @@ function App() {
           )}
           <button 
             className="header-btn" 
-            onClick={handleSaveToCloud}
-            title="Guardar en la nube"
+            onClick={() => handleSaveToLocal(false)}
+            title="Guardar proyecto (Cmd/Ctrl+S)"
           >
-            ☁️ Guardar
-          </button>
-          <button 
-            className="header-btn" 
-            onClick={handleShowCloudProjects}
-            title="Mis proyectos en la nube"
-          >
-            📁 Proyectos
+            💾 Guardar
           </button>
           <button
             className="header-btn"
-            onClick={handleSaveToLocal}
-            title="Guardar en mi computadora (Cmd/Ctrl+S)"
+            onClick={() => handleSaveToLocal(true)}
+            title="Guardar como... (nuevo archivo)"
           >
-            💾 Guardar local
+            💾 Guardar como...
           </button>
           <button
             className="header-btn"
             onClick={() => localFileInputRef.current?.click()}
-            title="Abrir proyecto desde mi computadora"
+            title="Abrir proyecto"
           >
-            📂 Abrir local
+            📂 Abrir
+          </button>
+          <button 
+            className="header-btn" 
+            onClick={handleShowCloudProjects}
+            title="Abrir proyectos anteriores guardados en la nube"
+            style={{ fontSize: '11px', padding: '8px 10px' }}
+          >
+            ☁️ Proyectos en la nube (anteriores)
           </button>
           <button 
             className="header-btn" 
@@ -3308,7 +3343,7 @@ function App() {
       {showSaveNameDialog && (
         <div className="drive-projects-modal">
           <div className="modal-content">
-            <h2>Guardar proyecto en la nube</h2>
+            <h2>Guardar proyecto</h2>
             <div style={{ marginBottom: '16px' }}>
               <label style={{ display: 'block', marginBottom: '8px', fontSize: '14px', color: '#ccc' }}>
                 Nombre del proyecto:
@@ -3319,7 +3354,7 @@ function App() {
                 onChange={(e) => setSaveNameInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    handleConfirmSaveToCloud()
+                    handleConfirmSaveToLocal()
                   } else if (e.key === 'Escape') {
                     setShowSaveNameDialog(false)
                   }
@@ -3346,7 +3381,7 @@ function App() {
               </button>
               <button 
                 className="modal-close" 
-                onClick={handleConfirmSaveToCloud}
+                onClick={handleConfirmSaveToLocal}
               >
                 Guardar
               </button>
@@ -3783,10 +3818,11 @@ function App() {
               
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Guardar y Abrir</h3>
               <ul style={{ listStyle: 'none', padding: 0 }}>
-                <li>• <strong>☁️ Guardar</strong> - Guardar en la nube (requiere cuenta)</li>
-                <li>• <strong>💾 Guardar local</strong> - Guardar archivo .musicalia en tu compu</li>
-                <li>• <strong>📂 Abrir local</strong> - Abrir archivo .musicalia desde tu compu</li>
-                <li>• Los proyectos locales incluyen audio y stems sin rehacer separación</li>
+                <li>• <strong>💾 Guardar</strong> - Guardar proyecto en tu computadora</li>
+                <li>• <strong>💾 Guardar como...</strong> - Guardar con nuevo nombre o ubicación</li>
+                <li>• <strong>📂 Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>
+                <li>• Los proyectos incluyen todo el audio y stems sin rehacer separación</li>
+                <li>• <strong>☁️ Proyectos en la nube (anteriores)</strong> - Abrir proyectos viejos de la nube</li>
               </ul>
               
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>

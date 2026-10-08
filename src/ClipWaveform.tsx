@@ -18,8 +18,9 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
     if (!canvas) return
 
     const paint = () => {
+      const host = canvas.parentElement
       const w = Math.max(1, Math.floor(canvas.offsetWidth * 2))
-      const h = Math.max(1, Math.floor(canvas.offsetHeight * 2))
+      const h = Math.max(1, Math.floor((host?.clientHeight || canvas.offsetHeight) * 2))
       const key = `${buffer.length}:${buffer.sampleRate}:${w}:${h}`
       if (key === drawnKeyRef.current && canvas.width === w && canvas.height === h) return
       drawnKeyRef.current = key
@@ -31,6 +32,8 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
     paint()
     const observer = new ResizeObserver(paint)
     observer.observe(canvas)
+    const host = canvas.parentElement
+    if (host) observer.observe(host)
     return () => observer.disconnect()
   }, [buffer])
 

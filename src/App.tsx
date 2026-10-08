@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react'
 import * as Tone from 'tone'
 import JSZip from 'jszip'
 import './App.css'
@@ -23,7 +23,10 @@ import {
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 import { encodeAudioBufferWAV, audioBufferFromSerialized } from './wav'
-import { ClipWaveform } from './ClipWaveform'
+import { TrackHeader } from './TrackHeader'
+import { TrackLane } from './TrackLane'
+import { effectiveTrackGain, rampTrackGain } from './trackGain'
+import { clipBufferSignature } from './trackRenderMemo'
 import { applySeekSnap, clickTimeFromX, isClickGesture } from './playheadSeek'
 import {
   clampGroupTimeDelta,
@@ -201,6 +204,9 @@ function App() {
   const [renamingTrack, setRenamingTrack] = useState<number | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const renamingTrackRef = useRef<number | null>(null)
+  const trackStatesRef = useRef(trackStates)
+  trackStatesRef.current = trackStates
+  const lastClipBufferSigRef = useRef<string | null>(null)
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
@@ -386,13 +392,19 @@ function App() {
     checkAuth()
   }, [])
   
-  // Autosave on state changes (excluding playheadPosition to avoid copying audio on every tick)
+  // Autosave on state changes (excluding playheadPosition to avoid copying audio on every tick).
+  // Debounced so per-track sliders can commit without encoding WAV buffers on every input.
+  // Volume/mute/solo/name-only updates skip re-encoding clip buffers.
   useEffect(() => {
     const saveState = async () => {
+      const sig = clipBufferSignature(trackStates)
+      const writeBuffers = sig !== lastClipBufferSigRef.current
       const tracks = await Promise.all(trackStates.map(async (t, i) => {
         const savedClips = await Promise.all(t.clips.map(async (clip, clipIdx) => {
           const bufferKey = `audio-buffer-${i}-${clipIdx}`
-          await saveAudioBuffer(bufferKey, clip.buffer)
+          if (writeBuffers) {
+            await saveAudioBuffer(bufferKey, clip.buffer)
+          }
           return {
             fileName: clip.fileName,
             startPosition: clip.startPosition,
@@ -423,9 +435,11 @@ function App() {
         isLoopEnabled
       }
       autosaveProject(state)
+      lastClipBufferSigRef.current = sig
     }
     
-    saveState()
+    const timer = window.setTimeout(() => { void saveState() }, 1000)
+    return () => window.clearTimeout(timer)
   }, [bpm, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled])
 
   useEffect(() => {
@@ -1494,15 +1508,10 @@ function App() {
       const gainNode = trackGainsRef.current[index]
       if (!gainNode) return
       
-      let gain = trackState.volume
-      
-      if (trackState.mute) {
-        gain = 0
-      } else if (anySolo && !trackState.solo) {
-        gain = 0
-      }
-      
-      gainNode.gain.value = gain
+      rampTrackGain(
+        gainNode,
+        effectiveTrackGain(trackState.volume, trackState.mute, trackState.solo, anySolo)
+      )
     })
   }, [trackStates])
 
@@ -2989,7 +2998,7 @@ function App() {
     setTrackStates(newTrackStates)
   }
 
-  const handleMuteToggle = (trackIndex: number) => {
+  const handleMuteToggle = useCallback((trackIndex: number) => {
     setTrackStates(prev => {
       const newStates = [...prev]
       newStates[trackIndex] = {
@@ -2998,9 +3007,9 @@ function App() {
       }
       return newStates
     })
-  }
+  }, [])
 
-  const handleSoloToggle = (trackIndex: number) => {
+  const handleSoloToggle = useCallback((trackIndex: number) => {
     setTrackStates(prev => {
       const newStates = [...prev]
       newStates[trackIndex] = {
@@ -3009,18 +3018,34 @@ function App() {
       }
       return newStates
     })
-  }
+  }, [])
 
-  const handleVolumeChange = (trackIndex: number, volume: number) => {
+  const handleVolumeLive = useCallback((trackIndex: number, volume: number) => {
+    const tracks = trackStatesRef.current
+    const track = tracks[trackIndex]
+    if (!track) return
+    const anySolo = tracks.some(t => t.solo)
+    rampTrackGain(
+      trackGainsRef.current[trackIndex],
+      effectiveTrackGain(volume, track.mute, track.solo, anySolo)
+    )
+  }, [])
+
+  const handleVolumeCommit = useCallback((trackIndex: number, volume: number) => {
+    const tracks = trackStatesRef.current
+    const track = tracks[trackIndex]
+    if (track) {
+      const anySolo = tracks.some(t => t.solo)
+      rampTrackGain(
+        trackGainsRef.current[trackIndex],
+        effectiveTrackGain(volume, track.mute, track.solo, anySolo)
+      )
+    }
     setTrackStates(prev => {
-      const newStates = [...prev]
-      newStates[trackIndex] = {
-        ...newStates[trackIndex],
-        volume
-      }
-      return newStates
+      if (!prev[trackIndex] || Math.abs(prev[trackIndex].volume - volume) < 1e-4) return prev
+      return prev.map((t, i) => i === trackIndex ? { ...t, volume } : t)
     })
-  }
+  }, [])
 
   const requestDeleteTrack = (trackIndex: number) => {
     closeContextMenu()
@@ -3982,94 +4007,28 @@ function App() {
         <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
           <div className="ruler-spacer" style={{ height: '32px', flexShrink: 0, borderBottom: '1px solid #333' }} />
           {trackStates.map((trackState, trackIndex) => (
-            <div
+            <TrackHeader
               key={trackIndex}
-              className="track-header"
-              style={{ height: `${88 * verticalZoom}px` }}
-              onContextMenu={(e) => openTrackHeaderMenu(e, trackIndex)}
-            >
-              <div className="track-name-row">
-                {renamingTrack === trackIndex ? (
-                  <input
-                    className="track-name-input"
-                    value={renameDraft}
-                    autoFocus
-                    aria-label="Nombre de pista"
-                    onChange={(e) => setRenameDraft(e.target.value)}
-                    onFocus={(e) => e.currentTarget.select()}
-                    onKeyDown={(e) => {
-                      e.stopPropagation()
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        commitRenameTrack(trackIndex, renameDraft)
-                      } else if (e.key === 'Escape') {
-                        e.preventDefault()
-                        cancelRenameTrack()
-                      }
-                    }}
-                    onBlur={() => commitRenameTrack(trackIndex, renameDraft)}
-                    onClick={(e) => e.stopPropagation()}
-                    onMouseDown={(e) => e.stopPropagation()}
-                  />
-                ) : (
-                  <div
-                    className="track-name"
-                    title={resolveTrackName(trackState.name, trackIndex)}
-                    onDoubleClick={(e) => {
-                      e.preventDefault()
-                      e.stopPropagation()
-                      startRenameTrack(trackIndex)
-                    }}
-                  >
-                    {resolveTrackName(trackState.name, trackIndex)}
-                  </div>
-                )}
-                <button
-                  type="button"
-                  className="control-button track-delete-button"
-                  title={trackStates.length <= 1 ? 'Debe quedar al menos una pista' : 'Eliminar pista'}
-                  aria-label="Eliminar pista"
-                  disabled={trackStates.length <= 1}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    requestDeleteTrack(trackIndex)
-                  }}
-                >
-                  <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
-                    <path
-                      fill="currentColor"
-                      d="M6.2 2h3.6l.4 1.2H14v1.2H2V3.2h3.8L6.2 2zM3.2 5.2h9.6l-.7 8.4c-.1.7-.7 1.2-1.4 1.2H5.3c-.7 0-1.3-.5-1.4-1.2l-.7-8.4zM6.4 6.4v6H5.2v-6h1.2zm4.4 0v6H9.6v-6h1.2z"
-                    />
-                  </svg>
-                </button>
-              </div>
-              <div className="track-controls">
-                <button
-                  className={`control-button mute-button ${trackState.mute ? 'active' : ''}`}
-                  onClick={() => handleMuteToggle(trackIndex)}
-                  title="Mute"
-                >
-                  M
-                </button>
-                <button
-                  className={`control-button solo-button ${trackState.solo ? 'active' : ''}`}
-                  onClick={() => handleSoloToggle(trackIndex)}
-                  title="Solo"
-                >
-                  S
-                </button>
-                <input
-                  type="range"
-                  className="volume-slider"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={trackState.volume}
-                  onChange={(e) => handleVolumeChange(trackIndex, parseFloat(e.target.value))}
-                  title={`Volume: ${Math.round(trackState.volume * 100)}%`}
-                />
-              </div>
-            </div>
+              trackIndex={trackIndex}
+              name={trackState.name}
+              mute={trackState.mute}
+              solo={trackState.solo}
+              volume={trackState.volume}
+              height={88 * verticalZoom}
+              canDelete={trackStates.length > 1}
+              isRenaming={renamingTrack === trackIndex}
+              renameDraft={renamingTrack === trackIndex ? renameDraft : ''}
+              onContextMenu={openTrackHeaderMenu}
+              onStartRename={startRenameTrack}
+              onRenameDraftChange={setRenameDraft}
+              onCommitRename={commitRenameTrack}
+              onCancelRename={cancelRenameTrack}
+              onDelete={requestDeleteTrack}
+              onMute={handleMuteToggle}
+              onSolo={handleSoloToggle}
+              onVolumeLive={handleVolumeLive}
+              onVolumeCommit={handleVolumeCommit}
+            />
           ))}
         </div>
         <div 
@@ -4100,114 +4059,35 @@ function App() {
           </div>
           {(() => {
             const maxDur = getMaxDuration() || 100
-            return trackStates.map((trackState, trackIndex) => {
-              const hasClips = trackState.clips.length > 0
-              const isAnyClipPlaying = trackState.clips.some(c => c.isPlaying)
-            
-            return (
-            <div 
+            return trackStates.map((trackState, trackIndex) => (
+            <TrackLane
               key={trackIndex}
-              className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
-              style={{ height: `${88 * verticalZoom}px` }}
-              onClick={(e) => handleWaveformClick(e)}
-              onDoubleClick={() => handleLaneDoubleClick(trackIndex)}
+              trackIndex={trackIndex}
+              hasClips={trackState.clips.length > 0}
+              isAnyClipPlaying={trackState.clips.some(c => c.isPlaying)}
+              height={88 * verticalZoom}
+              maxDur={maxDur}
+              clips={trackState.clips}
+              selectedClipIds={selectedClipIds}
+              isLoopEnabled={isLoopEnabled}
+              isDraggingLoopEdge={!!isDraggingLoopEdge}
+              isDraggingClip={isDraggingClip}
+              loopStart={loopStart}
+              loopEnd={loopEnd}
+              tempLoopStart={tempLoopStart}
+              tempLoopEnd={tempLoopEnd}
+              onWaveformClick={handleWaveformClick}
+              onDoubleClick={handleLaneDoubleClick}
               onMouseDown={handleTrackMouseDown}
-              onContextMenu={(e) => openContextMenu(e, trackIndex, null)}
-            >
-              {hasClips ? (
-                <div 
-                  className="clip-region"
-                  onMouseDown={(e) => {
-                    if (isLoopEnabled && e.button === 0 && !isDraggingLoopEdge && !isDraggingClip) {
-                      handleLoopMouseDown(e)
-                    }
-                  }}
-                  onMouseMove={handleLoopMouseMove}
-                  onMouseUp={handleLoopMouseUp}
-                >
-                  {trackState.clips.map((clip) => {
-                    const isSelected = selectedClipIds.has(clip.id)
-                    
-                    return (
-                      <div 
-                        key={clip.id}
-                        data-clip-id={clip.id}
-                        className={`clip-wrapper ${isSelected ? 'selected' : ''}`}
-                        style={{
-                          position: 'absolute',
-                          left: `${(clip.offsetSeconds / maxDur) * 100}%`,
-                          width: `${(clip.duration / maxDur) * 100}%`,
-                          height: '100%'
-                        }}
-                        onClick={(e) => handleClipClick(e, trackIndex, clip.id)}
-                        onContextMenu={(e) => openContextMenu(e, trackIndex, clip.id)}
-                      >
-                        <div 
-                          className="clip-trim-handle left"
-                          onMouseDown={(e) => handleResizeStart(e, trackIndex, clip.id, 'left')}
-                          title="Arrastra para recortar desde el inicio"
-                        />
-                        <div 
-                          className="clip-body"
-                          onMouseDown={(e) => handleClipDragStart(e, trackIndex, clip.id)}
-                          title="Arrastra para mover (clic derecho para editar, Alt+arrastrar para duplicar)"
-                          style={{ cursor: 'move' }}
-                        >
-                          <div className="clip-info">
-                            <span className="clip-filename">{clip.fileName}</span>
-                          </div>
-                          <ClipWaveform
-                            buffer={clip.buffer}
-                            sourceStart={clip.sourceStart}
-                            duration={clip.duration}
-                          />
-                        </div>
-                        <div 
-                          className="clip-trim-handle right"
-                          onMouseDown={(e) => handleResizeStart(e, trackIndex, clip.id, 'right')}
-                          title="Arrastra para recortar desde el final"
-                        />
-                      </div>
-                    )
-                  })}
-                  {(loopStart !== null || tempLoopStart !== null) && (
-                    <div 
-                      className="loop-marker loop-start draggable"
-                      style={{ 
-                        left: `${((tempLoopStart ?? loopStart)! / maxDur) * 100}%` 
-                      }}
-                      onMouseDown={(e) => handleLoopMouseDown(e, 'start')}
-                      title="Arrastra para ajustar inicio"
-                    />
-                  )}
-                  {(loopEnd !== null || tempLoopEnd !== null) && (
-                    <div 
-                      className="loop-marker loop-end draggable"
-                      style={{ 
-                        left: `${((tempLoopEnd ?? loopEnd)! / maxDur) * 100}%` 
-                      }}
-                      onMouseDown={(e) => handleLoopMouseDown(e, 'end')}
-                      title="Arrastra para ajustar fin"
-                    />
-                  )}
-                  {((loopStart !== null && loopEnd !== null) || (tempLoopStart !== null && tempLoopEnd !== null)) && (
-                    <div 
-                      className="loop-region"
-                      style={{ 
-                        left: `${((tempLoopStart ?? loopStart)! / maxDur) * 100}%`,
-                        width: `${(((tempLoopEnd ?? loopEnd)! - (tempLoopStart ?? loopStart)!) / maxDur) * 100}%`
-                      }}
-                    />
-                  )}
-                </div>
-              ) : (
-                <div className="empty-lane">
-                  <span className="import-hint">Doble clic para importar audio</span>
-                </div>
-              )}
-            </div>
-            )
-            })
+              onContextMenuTrack={openContextMenu}
+              onLoopMouseDown={handleLoopMouseDown}
+              onLoopMouseMove={handleLoopMouseMove}
+              onLoopMouseUp={handleLoopMouseUp}
+              onClipClick={handleClipClick}
+              onResizeStart={handleResizeStart}
+              onClipDragStart={handleClipDragStart}
+            />
+            ))
           })()}
             <div className="playhead" ref={playheadElRef} aria-hidden="true">
               <span className="playhead-cap" />
@@ -4336,6 +4216,7 @@ function App() {
                 <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
                 <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar pista, Eliminar pista</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
+                <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
               </ul>
               
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Teclado</h3>

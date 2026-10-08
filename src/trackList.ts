@@ -1,3 +1,6 @@
+import { DEFAULT_PAN, defaultTrackFx, type TrackFxState } from './trackFx'
+import type { AutomationLane } from './automation'
+
 export const DEFAULT_TRACK_VOLUME = 0.8
 export const INITIAL_TRACK_COUNT = 8
 
@@ -6,6 +9,9 @@ export interface EmptyTrack {
   mute: boolean
   solo: boolean
   volume: number
+  pan: number
+  fx: TrackFxState
+  automation: AutomationLane[]
   clips: []
 }
 
@@ -17,6 +23,9 @@ export function createEmptyTrack(name: string): EmptyTrack {
     mute: false,
     solo: false,
     volume: DEFAULT_TRACK_VOLUME,
+    pan: DEFAULT_PAN,
+    fx: defaultTrackFx(),
+    automation: [],
     clips: []
   }
 }

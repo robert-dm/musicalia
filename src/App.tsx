@@ -18,7 +18,26 @@ import { detectBPM } from './bpmDetector'
 import { encodeAudioBufferWAV } from './wav'
 import { TrackHeader } from './TrackHeader'
 import { TrackLane } from './TrackLane'
-import { effectiveTrackGain, rampTrackGain } from './trackGain'
+import { FxRack } from './FxRack'
+import { AutomationLaneView } from './AutomationLaneView'
+import { applyTrackFxChain, createTrackFxChain, disposeTrackFxChain, type TrackFxChain } from './trackFxChain'
+import { laneForParam, setLanePoints, type AutomationLane } from './automation'
+import {
+  AUTOMATION_PARAMS,
+  AUTO_LANE_HEIGHT,
+  DEFAULT_PAN,
+  FX_RACK_HEIGHT,
+  defaultTrackFx,
+  getTrackParam,
+  hydrateTrackAudio,
+  hydrateTrackFx,
+  paramMeta,
+  serializeTrackAudio,
+  setTrackParam,
+  shiftOpenIndices,
+  type FilterType,
+  type TrackFxState
+} from './trackFx'
 import { clipBufferSignature } from './trackRenderMemo'
 import {
   applyClipTrim,
@@ -100,6 +119,8 @@ import {
   IconSave,
   IconScissors,
   IconSkipBack,
+  IconSliders,
+  IconSpline,
   IconSplit,
   IconStop,
   IconTrash,
@@ -118,7 +139,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0074b'
+const APP_VERSION = '0.0075b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -155,6 +176,9 @@ interface TrackState {
   mute: boolean
   solo: boolean
   volume: number
+  pan: number
+  fx: TrackFxState
+  automation: AutomationLane[]
   clips: Clip[]
   name?: string
 }
@@ -180,6 +204,12 @@ function App() {
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
   const [fileDragActive, setFileDragActive] = useState(false)
   const trackGainsRef = useRef<Tone.Gain[]>([])
+  const trackChainsRef = useRef<TrackFxChain[]>([])
+  const isPlayingRef = useRef(false)
+  const [fxOpenTracks, setFxOpenTracks] = useState<number[]>([])
+  const [autoOpenTracks, setAutoOpenTracks] = useState<number[]>([])
+  const [autoParamByTrack, setAutoParamByTrack] = useState<Record<number, string>>({})
+  const [selectedAutoPoint, setSelectedAutoPoint] = useState<{ trackIndex: number; paramId: string; index: number } | null>(null)
   const audioInitializedRef = useRef(false)
   const [sidebarWidth, setSidebarWidth] = useState(220)
   const [isResizing, setIsResizing] = useState(false)
@@ -328,6 +358,7 @@ function App() {
         solo: t.solo,
         volume: t.volume,
         name: t.name,
+        ...serializeTrackAudio(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -355,7 +386,11 @@ function App() {
     if (undoStack.length === 0) return
     const currentState = {
       trackStates: JSON.parse(JSON.stringify(trackStates.map(t => ({
-        ...t,
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        name: t.name,
+        ...serializeTrackAudio(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -383,7 +418,11 @@ function App() {
     if (redoStack.length === 0) return
     const currentState = {
       trackStates: JSON.parse(JSON.stringify(trackStates.map(t => ({
-        ...t,
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        name: t.name,
+        ...serializeTrackAudio(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -457,7 +496,11 @@ function App() {
       })
       
       return {
-        ...t,
+        mute: !!t.mute,
+        solo: !!t.solo,
+        volume: typeof t.volume === 'number' ? t.volume : DEFAULT_TRACK_VOLUME,
+        name: t.name,
+        ...hydrateTrackAudio(t),
         clips: clips.filter(c => c !== null)
       }
     }))
@@ -469,8 +512,10 @@ function App() {
   }
 
   const ensureTrackGains = (count: number) => {
-    while (trackGainsRef.current.length < count) {
-      trackGainsRef.current.push(new Tone.Gain(DEFAULT_TRACK_VOLUME).toDestination())
+    while (trackChainsRef.current.length < count) {
+      const chain = createTrackFxChain(DEFAULT_TRACK_VOLUME)
+      trackChainsRef.current.push(chain)
+      trackGainsRef.current.push(chain.gain)
     }
   }
 
@@ -484,11 +529,56 @@ function App() {
         clip.player.connect(gain)
       })
     })
-    while (trackGainsRef.current.length > tracks.length) {
-      const gain = trackGainsRef.current.pop()
-      try { gain?.disconnect() } catch { /* already disconnected */ }
-      gain?.dispose()
+    while (trackChainsRef.current.length > tracks.length) {
+      const chain = trackChainsRef.current.pop()
+      trackGainsRef.current.pop()
+      disposeTrackFxChain(chain)
     }
+  }
+
+  const applyAllTrackAudio = (time?: number) => {
+    const tracks = trackStatesRef.current
+    const t = Number.isFinite(time) ? (time as number) : Tone.getTransport().seconds
+    const anySolo = tracks.some(tr => tr.solo)
+    const ramp = isPlayingRef.current ? 0.05 : 0.02
+    tracks.forEach((track, i) => {
+      const chain = trackChainsRef.current[i]
+      if (chain) applyTrackFxChain(chain, track, t, anySolo, ramp)
+    })
+  }
+
+  const applyTrackAudioNow = (trackIndex: number, patch?: Partial<TrackState>) => {
+    const tracks = trackStatesRef.current
+    const track = tracks[trackIndex]
+    const chain = trackChainsRef.current[trackIndex]
+    if (!track || !chain) return
+    const anySolo = tracks.some(tr => tr.solo)
+    applyTrackFxChain(
+      chain,
+      { ...track, ...patch },
+      Tone.getTransport().seconds,
+      anySolo,
+      isPlayingRef.current ? 0.05 : 0.02
+    )
+  }
+
+  const writeTrackAutomation = (trackIndex: number, paramId: string, points: AutomationLane['points'], commit: boolean) => {
+    const apply = (tracks: TrackState[]) => {
+      if (!tracks[trackIndex]) return tracks
+      const next = tracks.map((track, i) => (
+        i === trackIndex
+          ? { ...track, automation: setLanePoints(track.automation ?? [], paramId, points) }
+          : track
+      ))
+      trackStatesRef.current = next
+      applyAllTrackAudio()
+      return next
+    }
+    if (!commit) {
+      apply(trackStatesRef.current)
+      return
+    }
+    setTrackStates(prev => apply(prev))
   }
 
   // Verify authentication on mount
@@ -531,6 +621,7 @@ function App() {
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
+          ...serializeTrackAudio(t),
           clips: savedClips
         }
       }))
@@ -627,7 +718,16 @@ function App() {
         // Handle old format with single clip
         if (t.clip) {
           const buffer = await loadAudioBuffer(t.clip.audioBufferKey)
-          if (!buffer) return { ...t, name: resolveTrackName(t.name, i), clips: [] }
+          if (!buffer) {
+            return {
+              mute: !!t.mute,
+              solo: !!t.solo,
+              volume: typeof t.volume === 'number' ? t.volume : DEFAULT_TRACK_VOLUME,
+              name: resolveTrackName(t.name, i),
+              ...hydrateTrackAudio(t),
+              clips: []
+            }
+          }
           
           const toneBuffer = new Tone.ToneAudioBuffer(buffer)
           const player = new Tone.Player()
@@ -636,8 +736,11 @@ function App() {
           player.connect(trackGainsRef.current[i])
           
           return {
-            ...t,
+            mute: !!t.mute,
+            solo: !!t.solo,
+            volume: typeof t.volume === 'number' ? t.volume : DEFAULT_TRACK_VOLUME,
             name: resolveTrackName(t.name, i),
+            ...hydrateTrackAudio(t),
             clips: [{
               player,
               fileName: t.clip.fileName,
@@ -677,8 +780,11 @@ function App() {
         }))
         
         return {
-          ...t,
+          mute: !!t.mute,
+          solo: !!t.solo,
+          volume: typeof t.volume === 'number' ? t.volume : DEFAULT_TRACK_VOLUME,
           name: resolveTrackName(t.name, i),
+          ...hydrateTrackAudio(t),
           clips: loadedClips.filter(c => c !== null) as Clip[]
         }
       }))
@@ -826,6 +932,7 @@ function App() {
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
+          ...serializeTrackAudio(t),
           clips: t.clips.map((clip, clipIdx) => ({
             fileName: clip.fileName,
             startPosition: clip.startPosition,
@@ -921,6 +1028,7 @@ function App() {
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
+          ...serializeTrackAudio(t),
           clips: t.clips.map((clip, clipIdx) => ({
             fileName: clip.fileName,
             startPosition: clip.startPosition,
@@ -1079,9 +1187,10 @@ function App() {
         
         return {
           name: resolveTrackName(t.name, trackIdx),
-          mute: t.mute,
-          solo: t.solo,
-          volume: t.volume,
+          mute: !!t.mute,
+          solo: !!t.solo,
+          volume: typeof t.volume === 'number' ? t.volume : DEFAULT_TRACK_VOLUME,
+          ...hydrateTrackAudio(t),
           clips: clips.filter(c => c !== null) as Clip[]
         }
       }))
@@ -1298,10 +1407,7 @@ function App() {
       await Tone.start()
       
       if (trackGainsRef.current.length === 0) {
-        const n = Math.max(trackStatesRef.current.length, 1)
-        trackGainsRef.current = Array.from({ length: n }, () =>
-          new Tone.Gain(DEFAULT_TRACK_VOLUME).toDestination()
-        )
+        ensureTrackGains(Math.max(trackStatesRef.current.length, 1))
       } else {
         ensureTrackGains(trackStatesRef.current.length)
       }
@@ -1420,17 +1526,7 @@ function App() {
   }, [playheadPosition])
 
   useEffect(() => {
-    const anySolo = trackStates.some(ts => ts.solo)
-    
-    trackStates.forEach((trackState, index) => {
-      const gainNode = trackGainsRef.current[index]
-      if (!gainNode) return
-      
-      rampTrackGain(
-        gainNode,
-        effectiveTrackGain(trackState.volume, trackState.mute, trackState.solo, anySolo)
-      )
-    })
+    applyAllTrackAudio(playheadPositionRef.current)
   }, [trackStates])
 
   const bindRecordingPreview = (trackIndex: number) => {
@@ -1554,19 +1650,22 @@ function App() {
     
     setTrackStates(updatedStates)
     setIsPlaying(true)
+    isPlayingRef.current = true
     setIsPaused(false)
     
     let lastUpdateTime = 0
     let lastLoopCheck = startTime
+    isPlayingRef.current = true
     const updatePlayhead = (timestamp: number) => {
       if (Tone.getTransport().state === 'started') {
+        const currentTime = Tone.getTransport().seconds
+        applyAllTrackAudio(currentTime)
         if (timestamp - lastUpdateTime < 50) {
           playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
           return
         }
         lastUpdateTime = timestamp
-        
-        const currentTime = Tone.getTransport().seconds
+
         
         // Detect loop: if current time jumped backwards, restart players
         if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
@@ -1644,7 +1743,9 @@ function App() {
     })))
     
     setIsPlaying(false)
+    isPlayingRef.current = false
     setIsPaused(true)
+    applyAllTrackAudio(playheadPositionRef.current)
   }
   handlePlayRef.current = handlePlay
   handlePauseRef.current = handlePause
@@ -1679,7 +1780,9 @@ function App() {
     })))
     
     setIsPlaying(false)
+    isPlayingRef.current = false
     setIsPaused(false)
+    applyAllTrackAudio(currentPosition)
   }
 
   const handleJumpToStart = () => {
@@ -2680,6 +2783,8 @@ function App() {
           closeContextMenu()
         } else if (selectedClipIds.size > 0) {
           setSelectedClipIds(new Set())
+        } else if (selectedAutoPoint) {
+          setSelectedAutoPoint(null)
         }
         return
       }
@@ -2689,6 +2794,17 @@ function App() {
       } else if (e.key === 's' && cmdOrCtrl) {
         e.preventDefault()
         handleSaveToLocal(false)
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedAutoPoint) {
+        e.preventDefault()
+        const { trackIndex, paramId, index } = selectedAutoPoint
+        const track = trackStatesRef.current[trackIndex]
+        const lane = laneForParam(track?.automation, paramId)
+        if (track && lane && index >= 0 && index < lane.points.length) {
+          saveUndo()
+          const nextPoints = lane.points.filter((_, i) => i !== index)
+          writeTrackAutomation(trackIndex, paramId, nextPoints, true)
+          setSelectedAutoPoint(null)
+        }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIds.size > 0) {
         e.preventDefault()
         handleDeleteSelected()
@@ -2745,7 +2861,7 @@ function App() {
     
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm])
+  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm, selectedAutoPoint])
 
   useEffect(() => {
     const mediaSession = typeof navigator !== 'undefined' ? navigator.mediaSession : null
@@ -3186,29 +3302,85 @@ function App() {
   }, [])
 
   const handleVolumeLive = useCallback((trackIndex: number, volume: number) => {
-    const tracks = trackStatesRef.current
-    const track = tracks[trackIndex]
-    if (!track) return
-    const anySolo = tracks.some(t => t.solo)
-    rampTrackGain(
-      trackGainsRef.current[trackIndex],
-      effectiveTrackGain(volume, track.mute, track.solo, anySolo)
-    )
+    applyTrackAudioNow(trackIndex, { volume })
   }, [])
 
   const handleVolumeCommit = useCallback((trackIndex: number, volume: number) => {
-    const tracks = trackStatesRef.current
-    const track = tracks[trackIndex]
-    if (track) {
-      const anySolo = tracks.some(t => t.solo)
-      rampTrackGain(
-        trackGainsRef.current[trackIndex],
-        effectiveTrackGain(volume, track.mute, track.solo, anySolo)
-      )
-    }
+    applyTrackAudioNow(trackIndex, { volume })
     setTrackStates(prev => {
       if (!prev[trackIndex] || Math.abs(prev[trackIndex].volume - volume) < 1e-4) return prev
       return prev.map((t, i) => i === trackIndex ? { ...t, volume } : t)
+    })
+  }, [])
+
+  const handlePanLive = (trackIndex: number, pan: number) => {
+    applyTrackAudioNow(trackIndex, { pan })
+  }
+
+  const handlePanCommit = (trackIndex: number, pan: number) => {
+    applyTrackAudioNow(trackIndex, { pan })
+    const track = trackStatesRef.current[trackIndex]
+    if (!track || Math.abs((track.pan ?? DEFAULT_PAN) - pan) < 1e-4) return
+    saveUndo()
+    setTrackStates(prev => prev.map((t, i) => i === trackIndex ? { ...t, pan } : t))
+  }
+
+  const handleFxLive = (trackIndex: number, paramId: string, value: number) => {
+    const track = trackStatesRef.current[trackIndex]
+    if (!track) return
+    applyTrackAudioNow(trackIndex, setTrackParam(track, paramId, value))
+  }
+
+  const handleFxCommit = (trackIndex: number, paramId: string, value: number) => {
+    const current = trackStatesRef.current[trackIndex]
+    if (!current) return
+    applyTrackAudioNow(trackIndex, setTrackParam(current, paramId, value))
+    if (Math.abs(getTrackParam(current, paramId) - value) < 1e-4) return
+    saveUndo()
+    setTrackStates(prev => prev.map((t, i) => i === trackIndex ? setTrackParam(t, paramId, value) : t))
+  }
+
+  const handleFxBypass = (trackIndex: number, section: keyof TrackFxState) => {
+    saveUndo()
+    setTrackStates(prev => prev.map((track, i) => {
+      if (i !== trackIndex) return track
+      const fx = hydrateTrackFx(track.fx)
+      return {
+        ...track,
+        fx: {
+          ...fx,
+          [section]: { ...fx[section], bypass: !fx[section].bypass }
+        }
+      }
+    }))
+  }
+
+  const handleFilterType = (trackIndex: number, type: FilterType) => {
+    const current = trackStatesRef.current[trackIndex]
+    if (!current) return
+    const fx = hydrateTrackFx(current.fx)
+    if (fx.filter.type === type) return
+    saveUndo()
+    setTrackStates(prev => prev.map((track, i) => {
+      if (i !== trackIndex) return track
+      const nextFx = hydrateTrackFx(track.fx)
+      return { ...track, fx: { ...nextFx, filter: { ...nextFx.filter, type } } }
+    }))
+  }
+
+  const toggleFxPanel = useCallback((trackIndex: number) => {
+    setFxOpenTracks(prev => prev.includes(trackIndex) ? prev.filter(i => i !== trackIndex) : [...prev, trackIndex])
+  }, [])
+
+  const toggleAutoPanel = useCallback((trackIndex: number) => {
+    setAutoOpenTracks(prev => {
+      const open = prev.includes(trackIndex)
+      if (open) {
+        setSelectedAutoPoint((sel) => sel?.trackIndex === trackIndex ? null : sel)
+        return prev.filter(i => i !== trackIndex)
+      }
+      setAutoParamByTrack((params) => params[trackIndex] ? params : { ...params, [trackIndex]: 'volume' })
+      return [...prev, trackIndex]
     })
   }, [])
 
@@ -3251,6 +3423,23 @@ function App() {
     })
     reconnectAllClips(planned.tracks)
     setTrackStates(planned.tracks)
+    setFxOpenTracks(prev => shiftOpenIndices(prev, trackIndex))
+    setAutoOpenTracks(prev => shiftOpenIndices(prev, trackIndex))
+    setAutoParamByTrack(prev => {
+      const next: Record<number, string> = {}
+      for (const [key, value] of Object.entries(prev)) {
+        const i = Number(key)
+        if (i === trackIndex) continue
+        next[i > trackIndex ? i - 1 : i] = value
+      }
+      return next
+    })
+    setSelectedAutoPoint((sel) => {
+      if (!sel) return sel
+      if (sel.trackIndex === trackIndex) return null
+      if (sel.trackIndex > trackIndex) return { ...sel, trackIndex: sel.trackIndex - 1 }
+      return sel
+    })
     setSelectedClipIds(planned.selectedIds)
     if (selectedTrack === trackIndex) setSelectedTrack(null)
     else if (selectedTrack !== null && selectedTrack > trackIndex) setSelectedTrack(selectedTrack - 1)
@@ -4167,30 +4356,61 @@ function App() {
           >
             <div className="ruler-spacer" />
             {trackStates.map((trackState, trackIndex) => (
-              <TrackHeader
-                key={trackIndex}
-                trackIndex={trackIndex}
-                name={trackState.name}
-                mute={trackState.mute}
-                solo={trackState.solo}
-                volume={trackState.volume}
-                height={88 * verticalZoom}
-                canDelete={trackStates.length > 1}
-                isRenaming={renamingTrack === trackIndex}
-                renameDraft={renamingTrack === trackIndex ? renameDraft : ''}
-                onContextMenu={openTrackHeaderMenu}
-                onStartRename={startRenameTrack}
-                onRenameDraftChange={setRenameDraft}
-                onCommitRename={commitRenameTrack}
-                onCancelRename={cancelRenameTrack}
-                onDelete={requestDeleteTrack}
-                onMute={handleMuteToggle}
-                onSolo={handleSoloToggle}
-                onVolumeLive={handleVolumeLive}
-                onVolumeCommit={handleVolumeCommit}
-                recordArmed={recordArmedIndex === trackIndex}
-                onRecordArm={handleRecordArm}
-              />
+              <div className="track-stack" key={trackIndex}>
+                <TrackHeader
+                  trackIndex={trackIndex}
+                  name={trackState.name}
+                  mute={trackState.mute}
+                  solo={trackState.solo}
+                  volume={trackState.volume}
+                  height={88 * verticalZoom}
+                  canDelete={trackStates.length > 1}
+                  isRenaming={renamingTrack === trackIndex}
+                  renameDraft={renamingTrack === trackIndex ? renameDraft : ''}
+                  onContextMenu={openTrackHeaderMenu}
+                  onStartRename={startRenameTrack}
+                  onRenameDraftChange={setRenameDraft}
+                  onCommitRename={commitRenameTrack}
+                  onCancelRename={cancelRenameTrack}
+                  onDelete={requestDeleteTrack}
+                  onMute={handleMuteToggle}
+                  onSolo={handleSoloToggle}
+                  onVolumeLive={handleVolumeLive}
+                  onVolumeCommit={handleVolumeCommit}
+                  recordArmed={recordArmedIndex === trackIndex}
+                  onRecordArm={handleRecordArm}
+                  fxOpen={fxOpenTracks.includes(trackIndex)}
+                  autoOpen={autoOpenTracks.includes(trackIndex)}
+                  onToggleFx={toggleFxPanel}
+                  onToggleAuto={toggleAutoPanel}
+                />
+                {fxOpenTracks.includes(trackIndex) && (
+                  <div className="fx-side" style={{ height: `${FX_RACK_HEIGHT}px` }}>
+                    <IconSliders size={13} />
+                    <span className="fx-side-label">FX</span>
+                  </div>
+                )}
+                {autoOpenTracks.includes(trackIndex) && (
+                  <div className="auto-side" style={{ height: `${AUTO_LANE_HEIGHT}px` }}>
+                    <IconSpline size={13} />
+                    <span className="auto-side-label">Auto</span>
+                    <select
+                      className="auto-param-select"
+                      value={autoParamByTrack[trackIndex] ?? 'volume'}
+                      aria-label="Parámetro de automatización"
+                      onChange={(e) => {
+                        const paramId = e.target.value
+                        setAutoParamByTrack((prev) => ({ ...prev, [trackIndex]: paramId }))
+                        setSelectedAutoPoint((sel) => sel?.trackIndex === trackIndex ? null : sel)
+                      }}
+                    >
+                      {AUTOMATION_PARAMS.map((param) => (
+                        <option key={param.id} value={param.id}>{param.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
             ))}
           </div>
           <button
@@ -4260,9 +4480,13 @@ function App() {
           </div>
           {(() => {
             const maxDur = getLayoutMax()
-            return trackStates.map((trackState, trackIndex) => (
+            return trackStates.map((trackState, trackIndex) => {
+            const autoParam = autoParamByTrack[trackIndex] ?? 'volume'
+            const autoMeta = paramMeta(autoParam)
+            const autoLane = laneForParam(trackState.automation, autoParam)
+            return (
+            <div className="track-stack" key={trackIndex}>
             <TrackLane
-              key={trackIndex}
               trackIndex={trackIndex}
               hasClips={trackState.clips.length > 0}
               isAnyClipPlaying={trackState.clips.some(c => c.isPlaying)}
@@ -4293,7 +4517,42 @@ function App() {
                   : 0
               }
             />
-            ))
+            {fxOpenTracks.includes(trackIndex) && (
+              <FxRack
+                fx={trackState.fx ?? defaultTrackFx()}
+                pan={trackState.pan ?? DEFAULT_PAN}
+                onPanLive={(v) => handlePanLive(trackIndex, v)}
+                onPanCommit={(v) => handlePanCommit(trackIndex, v)}
+                onFxLive={(id, v) => handleFxLive(trackIndex, id, v)}
+                onFxCommit={(id, v) => handleFxCommit(trackIndex, id, v)}
+                onBypass={(section) => handleFxBypass(trackIndex, section)}
+                onFilterType={(type) => handleFilterType(trackIndex, type)}
+              />
+            )}
+            {autoOpenTracks.includes(trackIndex) && (
+              <AutomationLaneView
+                points={autoLane?.points ?? []}
+                min={autoMeta.min}
+                max={autoMeta.max}
+                maxDur={maxDur}
+                staticValue={getTrackParam(trackState, autoParam)}
+                selectedIndex={
+                  selectedAutoPoint?.trackIndex === trackIndex && selectedAutoPoint.paramId === autoParam
+                    ? selectedAutoPoint.index
+                    : -1
+                }
+                onGestureStart={saveUndo}
+                onSelect={(index) => setSelectedAutoPoint({ trackIndex, paramId: autoParam, index })}
+                onLive={(pts) => writeTrackAutomation(trackIndex, autoParam, pts, false)}
+                onCommit={(pts, index) => {
+                  writeTrackAutomation(trackIndex, autoParam, pts, true)
+                  setSelectedAutoPoint(index >= 0 ? { trackIndex, paramId: autoParam, index } : null)
+                }}
+              />
+            )}
+            </div>
+            )
+            })
           })()}
             <div className="playhead" ref={playheadElRef} aria-hidden="true">
               <span className="playhead-cap" />
@@ -4426,6 +4685,18 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
                 <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
+                <li>• <strong>Botón FX</strong> - Abre el rack de efectos de esa pista (EQ, compresor, filtro, delay, reverb y pan). Cada módulo tiene knobs y bypass On/Off</li>
+                <li>• <strong>Botón A (curva)</strong> - Muestra la pista de automatización. Elegí el parámetro (volumen, pan o un knob de efecto) y dibujá la curva</li>
+              </ul>
+
+              <h3>Efectos y automatización</h3>
+              <ul>
+                <li>• <strong>Knobs</strong> - Arrastrá verticalmente para cambiar; Shift = ajuste fino. El audio se actualiza al instante</li>
+                <li>• <strong>Bypass</strong> - On/Off por efecto. EQ parte activo (plano); compresor, filtro, delay y reverb empiezan en bypass</li>
+                <li>• <strong>Filtro LP/HP</strong> - Tipo pasa-bajos o pasa-altos, con corte y resonancia</li>
+                <li>• <strong>Click en la curva</strong> - Añade un punto. Arrastrar mueve. Doble clic o Delete/Backspace borra el punto seleccionado</li>
+                <li>• <strong>Durante el play</strong> - La curva maneja el parámetro de Tone.js en tiempo real (interpolación lineal) sin re-renderizar la app cada frame</li>
+                <li>• <strong>Guardar</strong> - FX, pan y automatización van en project.json y en el autosave de IndexedDB. Un gesto de puntos = un deshacer</li>
               </ul>
 
               <h3>Grabación</h3>
@@ -4445,7 +4716,7 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clips seleccionados</li>
                 <li>• <strong>Cmd/Ctrl+V</strong> - Pegar selección en playhead (posiciones relativas)</li>
                 <li>• <strong>Cmd/Ctrl+D</strong> - Duplicar clips seleccionados</li>
-                <li>• <strong>Delete/Backspace</strong> - Eliminar clips seleccionados</li>
+                <li>• <strong>Delete/Backspace</strong> - Eliminar clips seleccionados, o el punto de automatización seleccionado</li>
                 <li>• <strong>Escape</strong> - Cerrar menú o limpiar selección</li>
                 <li>• <strong>Cmd/Ctrl+A</strong> - Seleccionar todos los clips</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer</li>

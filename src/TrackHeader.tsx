@@ -2,7 +2,7 @@ import { memo, useRef } from 'react'
 import { LiveParamSlider } from './LiveParamSlider'
 import { resolveTrackName } from './clipSelection'
 import { trackHeaderDataEqual } from './trackRenderMemo'
-import { IconRecordArm, IconTrash } from './uiIcons'
+import { IconRecordArm, IconSliders, IconSpline, IconTrash } from './uiIcons'
 
 interface TrackHeaderProps {
   trackIndex: number
@@ -26,6 +26,10 @@ interface TrackHeaderProps {
   onVolumeCommit: (trackIndex: number, volume: number) => void
   recordArmed?: boolean
   onRecordArm: (trackIndex: number) => void
+  fxOpen?: boolean
+  autoOpen?: boolean
+  onToggleFx: (trackIndex: number) => void
+  onToggleAuto: (trackIndex: number) => void
 }
 
 export const TrackHeader = memo(function TrackHeader({
@@ -49,7 +53,11 @@ export const TrackHeader = memo(function TrackHeader({
   onVolumeLive,
   onVolumeCommit,
   recordArmed = false,
-  onRecordArm
+  onRecordArm,
+  fxOpen = false,
+  autoOpen = false,
+  onToggleFx,
+  onToggleAuto
 }: TrackHeaderProps) {
   const renderCountRef = useRef(0)
   renderCountRef.current += 1
@@ -124,6 +132,28 @@ export const TrackHeader = memo(function TrackHeader({
           aria-pressed={recordArmed}
         >
           <IconRecordArm size={12} />
+        </button>
+        <button
+          type="button"
+          className={`control-button fx-button ${fxOpen ? 'active' : ''}`}
+          data-testid={`fx-toggle-${trackIndex}`}
+          onClick={() => onToggleFx(trackIndex)}
+          title={fxOpen ? 'Cerrar efectos' : 'Efectos de pista'}
+          aria-label="Efectos de pista"
+          aria-pressed={fxOpen}
+        >
+          <IconSliders size={12} />
+        </button>
+        <button
+          type="button"
+          className={`control-button auto-button ${autoOpen ? 'active' : ''}`}
+          data-testid={`auto-toggle-${trackIndex}`}
+          onClick={() => onToggleAuto(trackIndex)}
+          title={autoOpen ? 'Ocultar automatización' : 'Mostrar automatización'}
+          aria-label="Automatización"
+          aria-pressed={autoOpen}
+        >
+          <IconSpline size={12} />
         </button>
         <button
           className={`control-button mute-button ${mute ? 'active' : ''}`}

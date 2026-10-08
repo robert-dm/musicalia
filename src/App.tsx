@@ -36,7 +36,14 @@ import {
   initialEmptyTracks,
   nextPistaName
 } from './trackList'
-import { applySeekSnap, clickTimeFromX, isClickGesture } from './playheadSeek'
+import {
+  applySeekSnap,
+  clickTimeFromX,
+  isClickGesture,
+  persistSnapEnabled,
+  readStoredSnapEnabled,
+  snapActiveDuringDrag
+} from './playheadSeek'
 import {
   clampGroupTimeDelta,
   clampGroupTrackDelta,
@@ -183,7 +190,7 @@ function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const projectLoadGenRef = useRef<number>(0)
   const [selectedClipIds, setSelectedClipIds] = useState<Set<string>>(new Set())
-  const [snapEnabled, setSnapEnabled] = useState(true)
+  const [snapEnabled, setSnapEnabled] = useState(() => readStoredSnapEnabled())
   const [undoStack, setUndoStack] = useState<any[]>([])
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
@@ -224,8 +231,7 @@ function App() {
     return countInBars * beatsPerBar * secondsPerBeat
   }
 
-  const snapToGrid = (timeSeconds: number, forceSnap?: boolean): number => {
-    if (!snapEnabled && !forceSnap) return timeSeconds
+  const snapToGrid = (timeSeconds: number): number => {
     const secondsPerBeat = 60 / bpm
     const snapInterval = secondsPerBeat / 4
     return Math.round(timeSeconds / snapInterval) * snapInterval
@@ -1907,7 +1913,7 @@ function App() {
     if (!clip) return
 
     if (action === 'split') {
-      const splitTime = snapToGrid(time)
+      const splitTime = snapEnabled ? snapToGrid(time) : time
       if (splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration) {
         await splitClipAt(trackIndex, splitTime)
       }
@@ -2063,7 +2069,7 @@ function App() {
       const rect = firstLane.getBoundingClientRect()
       const deltaTime = deltaTimeFromLanePx(deltaX, rect.width, timelineMaxRef.current || 100)
       const rawOffset = startOffset + deltaTime
-      const newOffset = snapOn && !ev.shiftKey ? snapToGrid(rawOffset) : rawOffset
+      const newOffset = snapActiveDuringDrag(snapOn, ev.shiftKey) ? snapToGrid(rawOffset) : rawOffset
       let timeDelta = clampGroupTimeDelta(live.minOffset, newOffset - startOffset)
       const trackHeight = 88 * zoom
       const rawTrackDelta = Math.round(deltaY / trackHeight)
@@ -2933,7 +2939,7 @@ function App() {
 
   const seekToPosition = (seconds: number, shiftKey = false) => {
     const layoutMax = timelineMaxRef.current || 100
-    const clampedSeconds = applySeekSnap(seconds, layoutMax, snapEnabled, shiftKey, (t) => snapToGrid(t, true))
+    const clampedSeconds = applySeekSnap(seconds, layoutMax, snapEnabled, shiftKey, snapToGrid)
     commitPlayhead(clampedSeconds)
     Tone.getTransport().seconds = clampedSeconds
     
@@ -3381,8 +3387,14 @@ function App() {
           </button>
           <button
             className={`header-btn ${snapEnabled ? 'active' : ''}`}
-            onClick={() => setSnapEnabled(!snapEnabled)}
-            title="Ajuste a cuadrícula (Shift para desactivar temporalmente)"
+            onClick={() => {
+              setSnapEnabled(prev => {
+                const next = !prev
+                persistSnapEnabled(next)
+                return next
+              })
+            }}
+            title="Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras"
           >
             🧲 {snapEnabled ? 'Snap ON' : 'Snap OFF'}
           </button>
@@ -4026,8 +4038,8 @@ function App() {
                 <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
-                <li>• <strong>Shift al arrastrar</strong> - Desactivar snap temporalmente</li>
-                <li>• <strong>Botón 🧲 Snap</strong> - Activa/desactiva ajuste a cuadrícula</li>
+                <li>• <strong>Botón 🧲 Snap</strong> - Empieza en OFF. Activa/desactiva el ajuste a cuadrícula (se recuerda)</li>
+                <li>• <strong>Shift al arrastrar</strong> - Invierte el snap mientras arrastras (lo enciende si está OFF, lo apaga si está ON)</li>
               </ul>
 
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Pistas</h3>

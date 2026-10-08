@@ -1,4 +1,12 @@
-import { applySeekSnap, clickTimeFromX, isClickGesture } from './playheadSeek'
+import {
+  applySeekSnap,
+  clickTimeFromX,
+  isClickGesture,
+  persistSnapEnabled,
+  readStoredSnapEnabled,
+  SNAP_STORAGE_KEY,
+  snapActiveDuringDrag
+} from './playheadSeek'
 
 function snapQuarter(time: number): number {
   const interval = 0.5
@@ -26,8 +34,35 @@ assert(clickTimeFromX(100, 0, 100, 10) === 10, 'right edge is layoutMax')
 assert(clickTimeFromX(50, 0, 100, 0) === 0, 'layoutMax 0 yields 0')
 
 assert(applySeekSnap(5.1, 10, true, false, snapQuarter) === 5, 'snap on without shift')
-assert(applySeekSnap(5.1, 10, true, true, snapQuarter) === 5.1, 'shift disables snap')
+assert(applySeekSnap(5.1, 10, true, true, snapQuarter) === 5.1, 'shift disables snap on seek')
 assert(applySeekSnap(5.1, 10, false, false, snapQuarter) === 5.1, 'snap off leaves raw time')
+const memoryStore: Record<string, string> = {}
+const memoryStorage = {
+  getItem(key: string) {
+    return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null
+  },
+  setItem(key: string, value: string) {
+    memoryStore[key] = String(value)
+  },
+  removeItem(key: string) {
+    delete memoryStore[key]
+  }
+}
+;(globalThis as { localStorage?: typeof memoryStorage }).localStorage = memoryStorage
+
+assert(!readStoredSnapEnabled(), 'stored snap defaults OFF when nothing is saved')
+persistSnapEnabled(true)
+assert(memoryStore[SNAP_STORAGE_KEY] === '1', 'persisting ON writes 1')
+assert(readStoredSnapEnabled() === true, 'stored snap reads ON after toggle')
+persistSnapEnabled(false)
+assert(memoryStore[SNAP_STORAGE_KEY] === '0', 'persisting OFF writes 0')
+assert(readStoredSnapEnabled() === false, 'stored snap reads OFF after toggle off')
+memoryStorage.removeItem(SNAP_STORAGE_KEY)
+assert(!readStoredSnapEnabled(), 'cleared storage still defaults OFF')
+assert(snapActiveDuringDrag(false, false) === false, 'snap off + no shift = off')
+assert(snapActiveDuringDrag(false, true) === true, 'snap off + shift temporarily enables')
+assert(snapActiveDuringDrag(true, false) === true, 'snap on + no shift = on')
+assert(snapActiveDuringDrag(true, true) === false, 'snap on + shift temporarily disables')
 assert(applySeekSnap(-1, 10, false, false, snapQuarter) === 0, 'clamps below 0')
 assert(applySeekSnap(99, 10, false, false, snapQuarter) === 10, 'clamps to layoutMax')
 

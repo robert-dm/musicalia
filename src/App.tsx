@@ -24,8 +24,9 @@ import {
 import { detectBPM } from './bpmDetector'
 import { encodeAudioBufferWAV, audioBufferFromSerialized } from './wav'
 import { ClipWaveform } from './ClipWaveform'
+import { applySeekSnap, clickTimeFromX, isClickGesture } from './playheadSeek'
 
-const APP_VERSION = '0.0073b'
+const APP_VERSION = '0.0074b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -97,6 +98,8 @@ function App() {
     threshold: false,
     distance: 0
   })
+  const seekToPositionRef = useRef<(seconds: number, shiftKey?: boolean) => void>(() => {})
+  const loopGestureRef = useRef({ x: 0, y: 0, distance: 0 })
   const dragRafRef = useRef<number | null>(null)
   const resizeRafRef = useRef<number | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -363,9 +366,9 @@ function App() {
   }, [bpm, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled])
 
   useEffect(() => {
-    const handleGlobalMouseUp = () => {
+    const handleGlobalMouseUp = (e: MouseEvent) => {
       if (isDraggingLoop || isDraggingLoopEdge) {
-        handleLoopMouseUp()
+        handleLoopMouseUp(e)
       }
     }
     
@@ -1389,6 +1392,8 @@ function App() {
     return maxDuration > 0 ? maxDuration : 0
   }
 
+  const getLayoutMax = (): number => getMaxDuration() || 100
+
   const syncPlayheadDom = (seconds: number) => {
     playheadPositionRef.current = seconds
     const layoutMax = timelineMaxRef.current || 100
@@ -1407,9 +1412,13 @@ function App() {
   }
 
   useLayoutEffect(() => {
-    timelineMaxRef.current = getMaxDuration()
+    timelineMaxRef.current = getLayoutMax()
     syncPlayheadDom(playheadPositionRef.current)
   }, [trackStates, horizontalZoom])
+
+  useLayoutEffect(() => {
+    syncPlayheadDom(playheadPosition)
+  }, [playheadPosition])
 
   useEffect(() => {
     const anySolo = trackStates.some(ts => ts.solo)
@@ -1448,7 +1457,7 @@ function App() {
     const countInSeconds = getCountInSeconds()
     // When loop is enabled and marked, always start from loop start
     // Otherwise, start from current playhead position (clicked or paused)
-    const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : playheadPosition
+    const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : playheadPositionRef.current
     
     // Configure Transport loop
     if (isLoopEnabled && loopStart !== null && loopEnd !== null) {
@@ -1966,6 +1975,19 @@ function App() {
       }
       return
     }
+
+    if (!(e.target as HTMLElement).closest('.clip-trim-handle') && isClickGesture(dragLiveRef.current.distance)) {
+      const lane = (e.currentTarget as HTMLElement).closest('.track-content') as HTMLElement | null
+      if (lane) {
+        const rect = lane.getBoundingClientRect()
+        const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+        seekToPositionRef.current(raw, e.shiftKey)
+      }
+      setIsDraggingClip(false)
+      setDraggedClipTrack(null)
+      setDraggedClipId(null)
+      setTempDragTrack(null)
+    }
     
     if (e.shiftKey) {
       setSelectedClipIds(prev => {
@@ -2094,6 +2116,11 @@ function App() {
       const deltaY = e.clientY - dragStartY
       const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
       const live = dragLiveRef.current
+      live.distance = distance
+
+      if (isClickGesture(distance)) {
+        return
+      }
       
       if (live.threshold && distance < 5) {
         live.distance = distance
@@ -2162,12 +2189,26 @@ function App() {
       }
     }
 
-    const handleMouseUp = () => {
+    const handleMouseUp = (e: MouseEvent) => {
       if (dragRafRef.current != null) {
         cancelAnimationFrame(dragRafRef.current)
         dragRafRef.current = null
       }
       const live = dragLiveRef.current
+      if (isClickGesture(live.distance)) {
+        const lane = (e.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
+          ?? (document.querySelector('.track-content') as HTMLElement | null)
+        if (lane) {
+          const rect = lane.getBoundingClientRect()
+          const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+          seekToPositionRef.current(raw, e.shiftKey)
+        }
+        setIsDraggingClip(false)
+        setDraggedClipTrack(null)
+        setDraggedClipId(null)
+        setTempDragTrack(null)
+        return
+      }
       if (live.threshold && live.distance < 5) {
         setIsDraggingClip(false)
         setDraggedClipTrack(null)
@@ -2793,13 +2834,12 @@ function App() {
 
   const timeFromClientX = (clientX: number, el: HTMLElement) => {
     const rect = el.getBoundingClientRect()
-    const percentage = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0
-    return percentage * (getMaxDuration() || 0)
+    return clickTimeFromX(clientX, rect.left, rect.width, timelineMaxRef.current || 100)
   }
 
-  const seekToPosition = (seconds: number) => {
-    const maxDuration = getMaxDuration()
-    const clampedSeconds = Math.max(0, Math.min(seconds, maxDuration))
+  const seekToPosition = (seconds: number, shiftKey = false) => {
+    const layoutMax = timelineMaxRef.current || 100
+    const clampedSeconds = applySeekSnap(seconds, layoutMax, snapEnabled, shiftKey, (t) => snapToGrid(t, true))
     commitPlayhead(clampedSeconds)
     Tone.getTransport().seconds = clampedSeconds
     
@@ -2827,32 +2867,31 @@ function App() {
       })
     })
   }
+  seekToPositionRef.current = seekToPosition
 
-  const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>, trackIndex: number) => {
-    const track = trackStates[trackIndex]
-    if (track.clips.length === 0) {
-      handleLaneClick(trackIndex)
-      return
+  const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
+    if (isDraggingLoop || isDraggingLoopEdge || isDraggingClip) return
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
+  }
+
+  const handleLaneDoubleClick = (trackIndex: number) => {
+    if (trackStates[trackIndex].clips.length === 0) {
+      void handleLaneClick(trackIndex)
     }
-
-    if (isDraggingLoop || isDraggingLoopEdge || isDraggingClip) {
-      return
-    }
-
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
   }
 
   const handleRulerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
   }
 
-  const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>, trackIndex: number) => {
+  const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
     const target = e.target as HTMLElement
     if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
-    if (isLoopEnabled && trackStates[trackIndex]?.clips.length > 0) return
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget))
+    seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
   }
 
   const clearLoop = () => {
@@ -2884,6 +2923,8 @@ function App() {
 
   const handleLoopMouseDown = (e: React.MouseEvent<HTMLDivElement>, edge?: 'start' | 'end') => {
     if (!isLoopEnabled) return
+
+    loopGestureRef.current = { x: e.clientX, y: e.clientY, distance: 0 }
     
     if (edge) {
       e.stopPropagation()
@@ -2894,7 +2935,7 @@ function App() {
       const rect = e.currentTarget.getBoundingClientRect()
       const clickX = e.clientX - rect.left
       const percentage = clickX / rect.width
-      const clickTime = percentage * getMaxDuration()
+      const clickTime = percentage * (timelineMaxRef.current || 100)
       
       setIsDraggingLoop(true)
       setLoopDragStart(clickTime)
@@ -2907,10 +2948,14 @@ function App() {
     if (!isLoopEnabled) return
     if (!isDraggingLoop && !isDraggingLoopEdge) return
     
+    const dx = e.clientX - loopGestureRef.current.x
+    const dy = e.clientY - loopGestureRef.current.y
+    loopGestureRef.current.distance = Math.hypot(dx, dy)
+
     const rect = e.currentTarget.getBoundingClientRect()
     const clickX = e.clientX - rect.left
     const percentage = Math.max(0, Math.min(1, clickX / rect.width))
-    const currentTime = percentage * getMaxDuration()
+    const currentTime = percentage * (timelineMaxRef.current || 100)
     
     if (isDraggingLoop && loopDragStart !== null) {
       if (currentTime < loopDragStart) {
@@ -2933,7 +2978,21 @@ function App() {
     }
   }
 
-  const handleLoopMouseUp = () => {
+  const handleLoopMouseUp = (e?: MouseEvent | React.MouseEvent) => {
+    if (e) {
+      const dx = e.clientX - loopGestureRef.current.x
+      const dy = e.clientY - loopGestureRef.current.y
+      loopGestureRef.current.distance = Math.hypot(dx, dy)
+    }
+    if ((isDraggingLoop || isDraggingLoopEdge) && isClickGesture(loopGestureRef.current.distance)) {
+      setTempLoopStart(null)
+      setTempLoopEnd(null)
+      setIsDraggingLoop(false)
+      setIsDraggingLoopEdge(null)
+      setLoopDragStart(null)
+      loopGestureRef.current.distance = 0
+      return
+    }
     if (isDraggingLoop || isDraggingLoopEdge) {
       // Commit temporary values to actual state
       if (tempLoopStart !== null) setLoopStart(tempLoopStart)
@@ -2944,6 +3003,7 @@ function App() {
     setIsDraggingLoop(false)
     setIsDraggingLoopEdge(null)
     setLoopDragStart(null)
+    loopGestureRef.current.distance = 0
   }
 
   useEffect(() => {
@@ -3603,8 +3663,9 @@ function App() {
               key={trackIndex}
               className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
               style={{ height: `${88 * verticalZoom}px` }}
-              onClick={(e) => handleWaveformClick(e, trackIndex)}
-              onMouseDown={(e) => handleTrackMouseDown(e, trackIndex)}
+              onClick={(e) => handleWaveformClick(e)}
+              onDoubleClick={() => handleLaneDoubleClick(trackIndex)}
+              onMouseDown={handleTrackMouseDown}
               onContextMenu={(e) => openContextMenu(e, trackIndex, null)}
             >
               {hasClips ? (
@@ -3720,7 +3781,7 @@ function App() {
                 </div>
               ) : (
                 <div className="empty-lane">
-                  <span className="import-hint">Click para importar audio</span>
+                  <span className="import-hint">Doble clic para importar audio</span>
                 </div>
               )}
             </div>
@@ -3825,7 +3886,7 @@ function App() {
               <h3 style={{ color: '#0a5', marginTop: '16px', marginBottom: '8px' }}>Transporte</h3>
               <ul style={{ listStyle: 'none', padding: 0 }}>
                 <li>• <strong>Espacio</strong> - Reproducir/Pausar</li>
-                <li>• <strong>Click en timeline o regla</strong> - Mover playhead (siempre visible, también en pausa y al arrastrar)</li>
+                <li>• <strong>Click en timeline, regla o clip</strong> - Mover playhead (siempre visible, también en pausa)</li>
                 <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
                 <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>
               </ul>

@@ -4359,6 +4359,10 @@ function App() {
     setDrumEditorTrack(at)
     setDrumSelectedPad(0)
     showClipToast('Pista de pads creada')
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-testid="track-header-${at}"]`)?.scrollIntoView({ block: 'nearest' })
+      document.querySelector(`[data-testid="lane-stack-${at}"]`)?.scrollIntoView({ block: 'nearest' })
+    })
     return at
   }
 

@@ -15,7 +15,8 @@ const url = 'http://127.0.0.1:4177/'
 
 const browser = await puppeteer.launch({
   headless: 'new',
-  args: ['--no-sandbox', '--disable-setuid-sandbox', '--use-fake-ui-for-media-stream']
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome',
+  args: ['--no-sandbox', '--disable-setuid-sandbox', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required']
 })
 
 const page = await browser.newPage()
@@ -45,7 +46,14 @@ try {
   })
 
   await page.waitForSelector('[data-testid="drum-editor"]', { timeout: 15000 })
+  await page.evaluate(() => {
+    const n = document.querySelectorAll('[data-testid^="track-header-"]').length
+    document.querySelector(`[data-testid="track-header-${n - 1}"]`)?.scrollIntoView({ block: 'center' })
+    document.querySelector('[data-testid="drum-editor"]')?.scrollIntoView({ block: 'end' })
+  })
   await page.screenshot({ path: join(shotDir, 'drum-editor-pads.png'), fullPage: true })
+  const editor = await page.$('[data-testid="drum-editor-dock"]')
+  if (editor) await editor.screenshot({ path: join(shotDir, 'drum-editor-closeup.png') })
 
   const before = await page.evaluate(() => window.__musicaliaDrums.getSnapshot())
   assert(before.length >= 1, 'drum track exists')

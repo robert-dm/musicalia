@@ -452,6 +452,13 @@
   box-sizing: border-box;
 }
 
+.add-track-group {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
 .add-track-button {
   display: flex;
   align-items: center;
@@ -480,6 +487,34 @@
 .add-track-button:hover {
   background: var(--accent-dim);
   color: var(--accent);
+}
+
+.add-drum-track-button {
+  border-top: 1px dashed var(--border);
+}
+
+.drum-editor-dock {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.drum-editor-dock-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 0;
+  font-size: 12px;
+}
+
+.drum-editor-dock-bar strong {
+  color: var(--accent);
+}
+
+.drum-editor-dock-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-right: auto;
 }
 
 .track-header {

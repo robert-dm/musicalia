@@ -15,6 +15,8 @@ interface ProjectState {
     mute: boolean
     solo: boolean
     volume: number
+    kind?: string
+    drum?: unknown
     clip?: {
       fileName: string
       startPosition: number
@@ -22,24 +24,26 @@ interface ProjectState {
       offsetSeconds?: number
       id?: string
     } | null
-    clips?: {
-      fileName: string
-      startPosition: number
-      audioBufferKey: string
-      offsetSeconds: number
-      id: string
-    }[]
+    clips?: Array<Record<string, unknown>>
   }[]
 }
 
 let saveTimeout: NodeJS.Timeout | null = null
+
+export async function writeAutosaveNow(state: ProjectState) {
+  if (saveTimeout) {
+    clearTimeout(saveTimeout)
+    saveTimeout = null
+  }
+  await set('musicalia-project', state)
+}
 
 export async function autosaveProject(state: ProjectState) {
   if (saveTimeout) clearTimeout(saveTimeout)
   
   saveTimeout = setTimeout(async () => {
     try {
-      await set('musicalia-project', state)
+      await writeAutosaveNow(state)
       console.log('[AUTOSAVE] Saved')
     } catch (err: any) {
       if (err.name === 'QuotaExceededError') {

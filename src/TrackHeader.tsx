@@ -8,6 +8,7 @@ import { IconRecordArm, IconSliders, IconSpline, IconTrash } from './uiIcons'
 interface TrackHeaderProps {
   trackIndex: number
   name?: string
+  kind?: string
   mute: boolean
   solo: boolean
   volume: number
@@ -41,6 +42,7 @@ interface TrackHeaderProps {
 export const TrackHeader = memo(function TrackHeader({
   trackIndex,
   name,
+  kind,
   mute,
   solo,
   volume,
@@ -78,6 +80,7 @@ export const TrackHeader = memo(function TrackHeader({
     <div
       className="track-header"
       data-track-index={trackIndex}
+      data-track-kind={kind === 'drum' ? 'drum' : 'audio'}
       data-testid={`track-header-${trackIndex}`}
       data-render-count={renderCountRef.current}
       style={{ height: `${height}px` }}

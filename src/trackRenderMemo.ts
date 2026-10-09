@@ -1,6 +1,7 @@
 export interface TrackHeaderDataProps {
   trackIndex: number
   name?: string
+  kind?: string
   mute: boolean
   solo: boolean
   volume: number
@@ -17,6 +18,7 @@ export interface TrackHeaderDataProps {
 
 export interface TrackLaneDataProps {
   trackIndex: number
+  trackKind?: string
   hasClips: boolean
   isAnyClipPlaying: boolean
   height: number
@@ -36,6 +38,7 @@ export function trackHeaderDataEqual(prev: TrackHeaderDataProps, next: TrackHead
   return (
     prev.trackIndex === next.trackIndex &&
     prev.name === next.name &&
+    prev.kind === next.kind &&
     prev.mute === next.mute &&
     prev.solo === next.solo &&
     prev.volume === next.volume &&
@@ -54,6 +57,7 @@ export function trackHeaderDataEqual(prev: TrackHeaderDataProps, next: TrackHead
 export function trackLaneDataEqual(prev: TrackLaneDataProps, next: TrackLaneDataProps): boolean {
   return (
     prev.trackIndex === next.trackIndex &&
+    prev.trackKind === next.trackKind &&
     prev.hasClips === next.hasClips &&
     prev.isAnyClipPlaying === next.isAnyClipPlaying &&
     prev.height === next.height &&
@@ -81,6 +85,9 @@ export interface LaneClipViewData {
     duration: number
     sourceStart: number
     buffer: unknown
+    kind?: string
+    patternId?: string
+    patternRows?: unknown
   }
 }
 
@@ -94,14 +101,27 @@ export function laneClipDataEqual(prev: LaneClipViewData, next: LaneClipViewData
     prev.clip.offsetSeconds === next.clip.offsetSeconds &&
     prev.clip.duration === next.clip.duration &&
     prev.clip.sourceStart === next.clip.sourceStart &&
-    prev.clip.buffer === next.clip.buffer
+    prev.clip.buffer === next.clip.buffer &&
+    prev.clip.kind === next.clip.kind &&
+    prev.clip.patternId === next.clip.patternId &&
+    prev.clip.patternRows === next.clip.patternRows
   )
 }
 
 export function clipBufferSignature(
-  tracks: Array<{ clips: Array<{ id: string; buffer: { length: number; sampleRate: number } }> }>
+  tracks: Array<{
+    kind?: string
+    clips: Array<{ id: string; buffer: { length: number; sampleRate: number } }>
+    drum?: { pads?: Array<{ id?: string; buffer?: { length: number; sampleRate: number } | null }> }
+  }>
 ): string {
   return tracks
-    .map((t) => t.clips.map((c) => `${c.id}:${c.buffer.length}:${c.buffer.sampleRate}`).join(','))
+    .map((t) => {
+      const clips = t.clips.map((c) => `${c.id}:${c.buffer.length}:${c.buffer.sampleRate}`).join(',')
+      const pads = (t.drum?.pads ?? [])
+        .map((p, i) => `${p.id ?? i}:${p.buffer?.length ?? 0}:${p.buffer?.sampleRate ?? 0}`)
+        .join(',')
+      return `${t.kind || 'audio'}:${clips}|${pads}`
+    })
     .join('|')
 }

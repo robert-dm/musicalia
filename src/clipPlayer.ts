@@ -2,17 +2,34 @@ import * as Tone from 'tone'
 
 export const MIN_TEMPO_RATE = 0.5
 export const MAX_TEMPO_RATE = 1.5
+export const TEMPO_RATE_STEP = 0.05
+export const TEMPO_RATE_RESET = 1
 export const MIN_PITCH_SEMITONES = -12
 export const MAX_PITCH_SEMITONES = 12
+export const PITCH_SEMITONE_STEP = 0.5
+export const PITCH_SEMITONE_RESET = 0
+
+function decimalsOf(step: number): number {
+  const text = String(step)
+  const dot = text.indexOf('.')
+  return dot < 0 ? 0 : text.length - dot - 1
+}
+
+export function quantizeToStep(n: number, min: number, max: number, step: number): number {
+  const clamped = Math.max(min, Math.min(max, n))
+  if (!(step > 0)) return clamped
+  const stepped = min + Math.round((clamped - min) / step) * step
+  return Number(Math.max(min, Math.min(max, stepped)).toFixed(decimalsOf(step)))
+}
 
 export function clampTempoRate(n: number): number {
-  if (!Number.isFinite(n)) return 1
-  return Math.max(MIN_TEMPO_RATE, Math.min(MAX_TEMPO_RATE, n))
+  if (!Number.isFinite(n)) return TEMPO_RATE_RESET
+  return quantizeToStep(n, MIN_TEMPO_RATE, MAX_TEMPO_RATE, TEMPO_RATE_STEP)
 }
 
 export function clampPitchSemitones(n: number): number {
-  if (!Number.isFinite(n)) return 0
-  return Math.max(MIN_PITCH_SEMITONES, Math.min(MAX_PITCH_SEMITONES, Math.round(n)))
+  if (!Number.isFinite(n)) return PITCH_SEMITONE_RESET
+  return quantizeToStep(n, MIN_PITCH_SEMITONES, MAX_PITCH_SEMITONES, PITCH_SEMITONE_STEP)
 }
 
 export function effectiveBpm(baseBpm: number, tempoRate: number): number {

@@ -299,6 +299,9 @@
   color: var(--accent);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 11ch;
+  display: inline-block;
 }
 
 .loop-indicator {
@@ -1433,10 +1436,6 @@
   .zoom-slider {
     width: 56px;
   }
-
-  .pt-field input[type='range'] {
-    width: 56px;
-  }
 }
 
 @media (max-width: 1100px) {
@@ -1783,23 +1782,82 @@
   font-size: 11px;
   color: var(--text-muted);
   font-weight: 650;
+  flex-shrink: 0;
 }
 
-.pt-field input[type='range'] {
-  width: 72px;
+.number-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  height: 24px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  overflow: hidden;
 }
 
-.pt-value {
-  min-width: 34px;
-  font-variant-numeric: tabular-nums;
+.number-stepper-btn {
+  width: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
   color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.number-stepper-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: #fff;
+}
+
+.number-stepper-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.number-stepper-value {
+  height: 100%;
+  box-sizing: border-box;
+  border: none;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
+  font-weight: 650;
+  text-align: center;
+  padding: 0;
+  margin: 0;
+}
+
+.number-stepper-value:focus {
+  background: var(--bg-raised);
 }
 
 .bpm-effective {
+  min-width: 6ch;
   font-size: 11px;
   color: var(--accent);
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.bpm-effective[data-active='false'] {
+  visibility: hidden;
+}
+
+.snap-label {
+  display: inline-block;
+  min-width: 8ch;
+  text-align: left;
 }
 
 .key-badge {

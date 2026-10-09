@@ -4,8 +4,12 @@ import * as Tone from 'tone'
 import JSZip from 'jszip'
 import './App.css'
 import './AudioDiagnostics.css'
-import { StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
+import { StemFallbackDialog, StemSplitDialog, StemSplitProgress } from './StemSplitDialog'
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
+import { DEFAULT_STEM_QUALITY, type StemQuality } from './stemQuality'
+import { decorateProgress, type StemSeparationProgress } from './stemProgress'
+import { sessionHasAudio, shouldApplyDetectedBpm } from './sessionBpm'
+import { demucsLanes, selectAudibleStems, skippedStemNote, spleeterLanes, type StemLane } from './stemTracks'
 import { autosaveProject, loadProject, clearProject, saveAudioBuffer, loadAudioBuffer } from './projectManager'
 import {
   register,
@@ -156,7 +160,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0081b'
+const APP_VERSION = '0.00XXb'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -283,8 +287,10 @@ function App() {
   const [verticalZoom, setVerticalZoom] = useState(1)
   const lanesColumnRef = useRef<HTMLDivElement>(null)
   const [showStemDialog, setShowStemDialog] = useState(false)
-  const [stemProgress, setStemProgress] = useState<number>(0)
+  const [stemProgress, setStemProgress] = useState<StemSeparationProgress>({ progress: 0, stage: '' })
   const [isProcessingStems, setIsProcessingStems] = useState(false)
+  const [stemFallback, setStemFallback] = useState<string | null>(null)
+  const bpmManuallySetRef = useRef(false)
   const stemAbortControllerRef = useRef<AbortController | null>(null)
   const pendingFileRef = useRef<File | null>(null)
   const pendingOffsetRef = useRef(0)
@@ -787,6 +793,7 @@ function App() {
       ensureTrackGains(state.tracks.length)
       
       setBpm(state.bpm)
+      bpmManuallySetRef.current = true
       const loadedPitch = clampPitchSemitones(Number((state as { pitchSemitones?: unknown }).pitchSemitones) || 0)
       const loadedRate = clampTempoRate(Number((state as { tempoRate?: unknown }).tempoRate) || 1)
       pitchRef.current = loadedPitch
@@ -1297,6 +1304,7 @@ function App() {
       }
       
       setBpm(projectData.bpm || 120)
+      bpmManuallySetRef.current = true
       const loadedPitch = clampPitchSemitones(Number(projectData.pitchSemitones) || 0)
       const loadedRate = clampTempoRate(Number(projectData.tempoRate) || 1)
       Tone.getTransport().bpm.value = effectiveBpm(projectData.bpm || 120, loadedRate)
@@ -2957,6 +2965,7 @@ function App() {
 
   const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newBpm = parseInt(e.target.value) || 120
+    bpmManuallySetRef.current = true
     setBpm(newBpm)
     Tone.getTransport().bpm.value = effectiveBpm(newBpm, tempoRateRef.current)
   }
@@ -3081,22 +3090,41 @@ function App() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const handleStemDialogConfirm = async () => {
+  const finishStemImport = () => {
+    setIsProcessingStems(false)
+    setStemFallback(null)
+    stemAbortControllerRef.current = null
+    pendingFileRef.current = null
+    setSelectedTrack(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    void processNextImport()
+  }
+
+  const handleStemDialogConfirm = async (quality: StemQuality = DEFAULT_STEM_QUALITY) => {
     setShowStemDialog(false)
+    setStemFallback(null)
     if (!pendingFileRef.current || selectedTrack === null) return
 
     setIsProcessingStems(true)
-    setStemProgress(0)
+    setStemProgress({ progress: 0, stage: 'Inicializando...' })
 
     const file = pendingFileRef.current
     const track = selectedTrack
     const offset = pendingOffsetRef.current
 
     try {
-      await processStemSeparation(file, track, offset)
+      await processStemSeparation(file, track, offset, quality)
+      finishStemImport()
     } catch (error) {
       console.error('Stem separation failed:', error)
       const errorMessage = error instanceof Error ? error.message : 'Error desconocido'
+      setIsProcessingStems(false)
+      stemAbortControllerRef.current = null
+      if (quality === 'demucs') {
+        setErrorMessage(`⚠️ Mejor calidad no disponible: ${errorMessage}`)
+        setStemFallback(errorMessage)
+        return
+      }
       setErrorMessage(`⚠️ Separación de stems no disponible: ${errorMessage}`)
       setTimeout(() => setErrorMessage(null), 5000)
       try {
@@ -3109,14 +3137,34 @@ function App() {
         setErrorMessage('Error al cargar el archivo de audio.')
         setTimeout(() => setErrorMessage(null), 5000)
       }
-    } finally {
-      setIsProcessingStems(false)
-      stemAbortControllerRef.current = null
-      pendingFileRef.current = null
-      setSelectedTrack(null)
-      if (fileInputRef.current) fileInputRef.current.value = ''
-      void processNextImport()
+      finishStemImport()
     }
+  }
+
+  const handleStemFallbackBasic = () => {
+    void handleStemDialogConfirm('spleeter')
+  }
+
+  const handleStemFallbackSingle = async () => {
+    const file = pendingFileRef.current
+    const track = selectedTrack
+    const offset = pendingOffsetRef.current
+    setStemFallback(null)
+    if (!file || track === null) {
+      finishStemImport()
+      return
+    }
+    try {
+      await loadSingleTrack(file, track, offset)
+      setToastMessage('Audio cargado como pista única')
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+    } catch (loadError) {
+      console.error('Failed to load single track:', loadError)
+      setErrorMessage('Error al cargar el archivo de audio.')
+      setTimeout(() => setErrorMessage(null), 5000)
+    }
+    finishStemImport()
   }
 
   const handleCancelStemSeparation = () => {
@@ -3125,7 +3173,8 @@ function App() {
     }
     setShowStemDialog(false)
     setIsProcessingStems(false)
-    setStemProgress(0)
+    setStemFallback(null)
+    setStemProgress({ progress: 0, stage: '' })
     if (pendingFileRef.current && selectedTrack !== null) {
       loadSingleTrack(pendingFileRef.current, selectedTrack, pendingOffsetRef.current).catch(console.error)
     }
@@ -3212,18 +3261,7 @@ function App() {
     player.connect(trackGain)
     loader.dispose()
 
-    const bpmResult = await detectBPM(buffer)
-    if (bpmResult.bpm) {
-      console.log('[BPM] Detected:', bpmResult.bpm)
-      setBpm(bpmResult.bpm)
-      Tone.getTransport().bpm.value = effectiveBpm(bpmResult.bpm, tempoRateRef.current)
-      setErrorMessage(`Tempo: ${bpmResult.bpm}`)
-      setTimeout(() => setErrorMessage(null), 3000)
-    } else {
-      console.log('[BPM] Detection failed, keeping current BPM')
-      setErrorMessage('No se pudo detectar el tempo')
-      setTimeout(() => setErrorMessage(null), 3000)
-    }
+    await maybeApplyDetectedBpm(buffer)
 
     const newClip: Clip = {
       player,
@@ -3251,7 +3289,35 @@ function App() {
     setTrackStates(newTrackStates)
   }
 
-  const processStemSeparation = async (file: File, startTrackIndex: number, offsetSeconds?: number) => {
+  const maybeApplyDetectedBpm = async (buffer: AudioBuffer) => {
+    const hasExistingAudio = sessionHasAudio(trackStatesRef.current)
+    if (hasExistingAudio || bpmManuallySetRef.current) return
+    const bpmResult = await detectBPM(buffer)
+    if (!shouldApplyDetectedBpm({
+      hasExistingAudio,
+      bpmManuallySet: bpmManuallySetRef.current,
+      detectedBpm: bpmResult.bpm
+    })) {
+      if (!bpmResult.bpm) {
+        console.log('[BPM] Detection failed, keeping current BPM')
+        setErrorMessage('No se pudo detectar el tempo')
+        setTimeout(() => setErrorMessage(null), 3000)
+      }
+      return
+    }
+    console.log('[BPM] Detected:', bpmResult.bpm)
+    setBpm(bpmResult.bpm as number)
+    Tone.getTransport().bpm.value = effectiveBpm(bpmResult.bpm as number, tempoRateRef.current)
+    setErrorMessage(`Tempo: ${bpmResult.bpm}`)
+    setTimeout(() => setErrorMessage(null), 3000)
+  }
+
+  const processStemSeparation = async (
+    file: File,
+    startTrackIndex: number,
+    offsetSeconds?: number,
+    quality: StemQuality = DEFAULT_STEM_QUALITY
+  ) => {
     await ensureAudio()
     beginImportUndo()
 
@@ -3264,29 +3330,36 @@ function App() {
     const originalBuffer = tempPlayer.buffer.get() as AudioBuffer
     tempPlayer.dispose()
 
-    const bpmResult = await detectBPM(originalBuffer)
-    if (bpmResult.bpm) {
-      console.log('[BPM] Detected:', bpmResult.bpm)
-      setBpm(bpmResult.bpm)
-      Tone.getTransport().bpm.value = effectiveBpm(bpmResult.bpm, tempoRateRef.current)
-      setErrorMessage(`Tempo: ${bpmResult.bpm}`)
-      setTimeout(() => setErrorMessage(null), 3000)
-    } else {
-      console.log('[BPM] Detection failed, keeping current BPM')
-      setErrorMessage('No se pudo detectar el tempo')
-      setTimeout(() => setErrorMessage(null), 3000)
+    await maybeApplyDetectedBpm(originalBuffer)
+
+    const startedAt = Date.now()
+    const reportProgress = (progress: { progress: number; stage: string }) => {
+      setStemProgress(decorateProgress(progress, startedAt))
     }
 
-    const stems = await separateStems(originalBuffer, (progress) => {
-      setStemProgress(progress.progress)
-    }, abortController.signal)
+    let lanes: StemLane[]
+    if (quality === 'demucs') {
+      const { separateStemsDemucs } = await import('./demucsSeparator')
+      const stems = await separateStemsDemucs(originalBuffer, reportProgress, abortController.signal)
+      const { kept, skipped } = selectAudibleStems(demucsLanes(stems))
+      if (kept.length === 0) {
+        throw new Error('HT-Demucs no produjo pistas audibles. Prueba Básica / Rápida o una sola pista.')
+      }
+      const note = skippedStemNote(skipped)
+      if (note) {
+        setToastMessage(note)
+        setShowToast(true)
+        setTimeout(() => setShowToast(false), 4000)
+      }
+      lanes = kept
+    } else {
+      const stems = await separateStems(originalBuffer, reportProgress, abortController.signal)
+      lanes = spleeterLanes(stems)
+    }
 
-    const stemNames = ['Vocals', 'Drums', 'Bass', 'Other']
-    const stemBuffers = [stems.vocals, stems.drums, stems.bass, stems.other]
-    
     console.log('Stem amplitude check:')
-    stemBuffers.forEach((buffer, i) => {
-      const data = buffer.getChannelData(0)
+    lanes.forEach((lane) => {
+      const data = lane.buffer.getChannelData(0)
       let peak = 0
       let rms = 0
       for (let j = 0; j < data.length; j++) {
@@ -3294,11 +3367,11 @@ function App() {
         rms += data[j] * data[j]
       }
       rms = Math.sqrt(rms / data.length)
-      console.log(`  ${stemNames[i]}: peak=${peak.toFixed(4)}, rms=${rms.toFixed(4)}, rms_dB=${(20 * Math.log10(rms)).toFixed(1)}`)
+      console.log(`  ${lane.name}: peak=${peak.toFixed(4)}, rms=${rms.toFixed(4)}, rms_dB=${(20 * Math.log10(rms)).toFixed(1)}`)
     })
-    
+
     const newTrackStates = [...trackStatesRef.current]
-    const needed = startTrackIndex + stemBuffers.length
+    const needed = startTrackIndex + lanes.length
     while (newTrackStates.length < needed) {
       newTrackStates.push({
         ...createEmptyTrack(nextPistaName(newTrackStates.map(t => t.name), newTrackStates.length)),
@@ -3308,32 +3381,28 @@ function App() {
     ensureTrackGains(newTrackStates.length)
     const stemOffset = offsetSeconds ?? getCountInSeconds()
 
-    for (let i = 0; i < stemBuffers.length; i++) {
+    for (let i = 0; i < lanes.length; i++) {
       const targetTrackIndex = startTrackIndex + i
-
-      const player = makeClipPlayer()
+      const lane = lanes[i]
+      const player = makeClipPlayer(lane.buffer)
       player.loop = false
-      
-      const toneBuffer = new Tone.ToneAudioBuffer(stemBuffers[i])
-      player.buffer = toneBuffer
-      
       player.connect(trackGainsRef.current[targetTrackIndex])
 
       const newClip: Clip = {
         player,
-        fileName: `${file.name} - ${stemNames[i]}`,
+        fileName: `${file.name} - ${lane.name}`,
         isPlaying: false,
-        buffer: stemBuffers[i],
+        buffer: lane.buffer,
         startPosition: 0,
         offsetSeconds: stemOffset,
         id: `clip-${Date.now()}-${i}-${Math.random()}`,
         sourceStart: 0,
-        duration: stemBuffers[i].duration
+        duration: lane.buffer.duration
       }
 
       newTrackStates[targetTrackIndex] = {
         ...newTrackStates[targetTrackIndex],
-        name: stemNames[i],
+        name: lane.name,
         mute: false,
         solo: false,
         clips: [...newTrackStates[targetTrackIndex].clips, newClip]
@@ -4396,7 +4465,21 @@ function App() {
       )}
 
       {isProcessingStems && (
-        <StemSplitProgress progress={stemProgress} onCancel={handleCancelStemSeparation} />
+        <StemSplitProgress
+          progress={stemProgress.progress}
+          stage={stemProgress.stage}
+          elapsedSeconds={stemProgress.elapsedSeconds}
+          etaSeconds={stemProgress.etaSeconds}
+          onCancel={handleCancelStemSeparation}
+        />
+      )}
+
+      {stemFallback && !isProcessingStems && (
+        <StemFallbackDialog
+          message={stemFallback}
+          onRetryBasic={handleStemFallbackBasic}
+          onSingleTrack={() => { void handleStemFallbackSingle() }}
+        />
       )}
       
       {showToast && toastMessage && (

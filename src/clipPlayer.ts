@@ -20,14 +20,36 @@ export function effectiveBpm(baseBpm: number, tempoRate: number): number {
   return Math.max(20, Math.min(300, Math.round(bpm * clampTempoRate(tempoRate))))
 }
 
+type ClipBufferSource = AudioBuffer | { get: () => AudioBuffer | undefined | null }
+
+export function nativeFromClipSource(buffer: ClipBufferSource): AudioBuffer | undefined {
+  if (buffer && typeof (buffer as { get?: unknown }).get === 'function') {
+    return (buffer as { get: () => AudioBuffer | undefined | null }).get() ?? undefined
+  }
+  return buffer as AudioBuffer
+}
+
+/**
+ * GrainPlayer.buffer is a public field, not a setter. Replacing it with
+ * another ToneAudioBuffer shares that wrapper. Tone.Player.dispose() then
+ * calls wrapper.dispose() and sets _buffer = undefined — clip.buffer (the
+ * native AudioBuffer from .get()) still draws the waveform, but playback
+ * is silent. Copy the native samples into GrainPlayer's own wrapper.
+ */
+export function assignOwnedClipBuffer(
+  player: { buffer: { set: (buffer: AudioBuffer) => unknown } },
+  buffer: ClipBufferSource
+): void {
+  const native = nativeFromClipSource(buffer)
+  if (native) player.buffer.set(native)
+}
+
 export function createClipPlayer(buffer?: AudioBuffer | Tone.ToneAudioBuffer): Tone.GrainPlayer {
   const player = new Tone.GrainPlayer()
   player.grainSize = 0.1
   player.overlap = 0.05
   player.loop = false
-  if (buffer) {
-    player.buffer = buffer instanceof Tone.ToneAudioBuffer ? buffer : new Tone.ToneAudioBuffer(buffer)
-  }
+  if (buffer) assignOwnedClipBuffer(player, buffer)
   return player
 }
 

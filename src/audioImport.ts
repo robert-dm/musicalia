@@ -53,15 +53,25 @@ export function dropTimeOnLane(
 export interface DropPlacement {
   trackIndex: number
   createNew: boolean
+  insertAt?: number
 }
 
-/** One file on a hovered lane stays there; several files each get a new track. */
+/** One file on a hovered lane stays there; several files each get a new track.
+ *  insertAt (0..count) creates new tracks at that index instead of appending. */
 export function resolveDropPlacement(
   fileCount: number,
   hoverTrackIndex: number | null,
-  currentTrackCount: number
+  currentTrackCount: number,
+  insertAt?: number | null
 ): DropPlacement[] {
   if (fileCount <= 0) return []
+  if (insertAt != null && insertAt >= 0 && insertAt <= currentTrackCount) {
+    return Array.from({ length: fileCount }, (_, i) => ({
+      trackIndex: insertAt + i,
+      createNew: true,
+      insertAt: insertAt + i
+    }))
+  }
   if (fileCount === 1 && hoverTrackIndex !== null && hoverTrackIndex >= 0 && hoverTrackIndex < currentTrackCount) {
     return [{ trackIndex: hoverTrackIndex, createNew: false }]
   }

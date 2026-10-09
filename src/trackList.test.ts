@@ -3,6 +3,7 @@ import {
   appendEmptyTrack,
   createEmptyTrack,
   initialEmptyTracks,
+  insertEmptyTrack,
   nextPistaName,
   nextPistaNumber
 } from './trackList'
@@ -31,6 +32,11 @@ const nine = appendEmptyTrack(eight, createEmptyTrack)
 assert(nine.length === 9 && nine[8].name === 'Pista 9', 'append adds Pista 9')
 const ten = appendEmptyTrack(nine, createEmptyTrack)
 assert(ten.length === 10 && ten[9].name === 'Pista 10', 'append adds Pista 10')
+const inserted = insertEmptyTrack(eight, 1, createEmptyTrack)
+assert(inserted.length === 9 && inserted[1].name === 'Pista 9', 'insert between keeps later tracks')
+assert(inserted[0].name === 'Pista 1' && inserted[2].name === 'Pista 2', 'insert does not rename neighbors')
+assert(insertEmptyTrack(eight, 0, createEmptyTrack)[0].name === 'Pista 9', 'insert at top')
+assert(insertEmptyTrack(eight, 99, createEmptyTrack)[8].name === 'Pista 9', 'insert past end appends')
 
 const created = createEmptyTrack('Pista 9')
 assert(created.volume === 0.8 && created.solo === false && created.clips.length === 0, 'factory volume/mute/empty lane')

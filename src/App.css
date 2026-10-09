@@ -510,7 +510,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: text;
+  cursor: grab;
+}
+
+.track-header.reordering .track-name,
+.track-name:active {
+  cursor: grabbing;
 }
 
 .track-name-input {
@@ -1397,6 +1402,33 @@
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+}
+
+.track-stack.track-reorder-dragging {
+  z-index: 40;
+  opacity: 0.94;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  position: relative;
+}
+
+.track-insert-line {
+  position: fixed;
+  height: 3px;
+  margin-top: -1px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent),
+    0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
+  z-index: 80;
+  pointer-events: none;
+  display: none;
+}
+
+.track-insert-line.visible {
+  display: block;
+}
+
+.sidebar-scroll {
+  position: relative;
 }
 
 .fx-button.active,

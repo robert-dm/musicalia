@@ -35,6 +35,7 @@ interface TrackHeaderProps {
   autoOpen?: boolean
   onToggleFx: (trackIndex: number) => void
   onToggleAuto: (trackIndex: number) => void
+  onReorderMouseDown?: (e: React.MouseEvent, trackIndex: number) => void
 }
 
 export const TrackHeader = memo(function TrackHeader({
@@ -66,7 +67,8 @@ export const TrackHeader = memo(function TrackHeader({
   fxOpen = false,
   autoOpen = false,
   onToggleFx,
-  onToggleAuto
+  onToggleAuto,
+  onReorderMouseDown
 }: TrackHeaderProps) {
   const renderCountRef = useRef(0)
   renderCountRef.current += 1
@@ -76,9 +78,16 @@ export const TrackHeader = memo(function TrackHeader({
     <div
       className="track-header"
       data-track-index={trackIndex}
+      data-testid={`track-header-${trackIndex}`}
       data-render-count={renderCountRef.current}
       style={{ height: `${height}px` }}
       onContextMenu={(e) => onContextMenu(e, trackIndex)}
+      onMouseDown={(e) => {
+        if (e.button !== 0) return
+        const target = e.target as HTMLElement
+        if (target.closest('button, input, .volume-slider, .track-name-input')) return
+        onReorderMouseDown?.(e, trackIndex)
+      }}
     >
       <div className="track-name-row">
         {isRenaming ? (
@@ -106,7 +115,8 @@ export const TrackHeader = memo(function TrackHeader({
         ) : (
           <div
             className="track-name"
-            title={displayName}
+            data-testid={`track-name-${trackIndex}`}
+            title={`${displayName} — arrastrá para reordenar`}
             onDoubleClick={(e) => {
               e.preventDefault()
               e.stopPropagation()

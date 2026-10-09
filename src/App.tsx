@@ -85,6 +85,7 @@ import {
   appendEmptyTrack,
   createEmptyTrack,
   initialEmptyTracks,
+  insertEmptyTrack,
   nextPistaName
 } from './trackList'
 import {
@@ -103,6 +104,25 @@ import {
   resolveDropPlacement,
   trackIndexFromPoint
 } from './audioImport'
+import {
+  destIndexFromInsertBefore,
+  fileDropInsertIndex,
+  insertIndexFromY,
+  insertionLineY,
+  liveShiftOffsets,
+  moveItem,
+  remapHarmonySourceAfterInsert,
+  remapHarmonySourceAfterMove,
+  remapIndexAfterInsert,
+  remapIndexAfterMove,
+  remapKeyedRecordAfterInsert,
+  remapKeyedRecordAfterMove,
+  remapNullableIndexAfterInsert,
+  remapNullableIndexAfterMove,
+  remapOpenIndicesAfterInsert,
+  remapOpenIndicesAfterMove,
+  sameReorderSlot
+} from './trackOrder'
 import {
   armedIndexAfterDelete,
   compensatedRecordOffset,
@@ -172,7 +192,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0085b'
+const APP_VERSION = '0.0086b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -316,7 +336,7 @@ function App() {
   const stemAbortControllerRef = useRef<AbortController | null>(null)
   const pendingFileRef = useRef<File | null>(null)
   const pendingOffsetRef = useRef(0)
-  const importQueueRef = useRef<Array<{ file: File; trackIndex: number; createNew: boolean; offsetSeconds: number }>>([])
+  const importQueueRef = useRef<Array<{ file: File; trackIndex: number; createNew: boolean; offsetSeconds: number; insertAt?: number }>>([])
   const importUndoSavedRef = useRef(false)
   const fileDragDepthRef = useRef(0)
   const highlightedDropTrackRef = useRef<number | null>(null)
@@ -394,6 +414,15 @@ function App() {
   const lastClipBufferSigRef = useRef<string | null>(null)
   const sidebarScrollRef = useRef<HTMLDivElement>(null)
   const lanesScrollRef = useRef<HTMLDivElement>(null)
+  const insertLineSidebarRef = useRef<HTMLDivElement>(null)
+  const insertLineLanesRef = useRef<HTMLDivElement>(null)
+  const trackReorderRef = useRef<{
+    from: number
+    originY: number
+    insertBefore: number
+    moved: boolean
+  } | null>(null)
+  const fileInsertAtRef = useRef<number | null>(null)
   const syncingVerticalScroll = useRef(false)
   
   const getCountInSeconds = () => {
@@ -3005,6 +3034,8 @@ function App() {
     fileDragDepthRef.current = 0
     setFileDragActive(false)
     highlightDropTrack(null)
+    fileInsertAtRef.current = null
+    setInsertLineVisible(0, false)
   }
 
   const beginImportUndo = () => {
@@ -3047,8 +3078,12 @@ function App() {
     beginImportUndo()
     let trackIndex = next.trackIndex
     if (next.createNew) {
-      appendTracksForImport(1)
-      trackIndex = trackStatesRef.current.length - 1
+      if (next.insertAt != null) {
+        trackIndex = insertEmptyTrackAt(next.insertAt, { undo: false, closeMenu: false, toast: false })
+      } else {
+        appendTracksForImport(1)
+        trackIndex = trackStatesRef.current.length - 1
+      }
     }
     setSelectedTrack(trackIndex)
     pendingOffsetRef.current = next.offsetSeconds
@@ -3067,15 +3102,17 @@ function App() {
   const enqueueAudioImports = (
     files: File[],
     hoverTrackIndex: number | null,
-    offsetSeconds: number
+    offsetSeconds: number,
+    insertAt?: number | null
   ) => {
     if (files.length === 0) return
-    const placements = resolveDropPlacement(files.length, hoverTrackIndex, trackStatesRef.current.length)
+    const placements = resolveDropPlacement(files.length, hoverTrackIndex, trackStatesRef.current.length, insertAt)
     importQueueRef.current.push(...files.map((file, i) => ({
       file,
       trackIndex: placements[i].trackIndex,
       createNew: placements[i].createNew,
-      offsetSeconds
+      offsetSeconds,
+      insertAt: placements[i].insertAt
     })))
     void processNextImport()
   }
@@ -3213,6 +3250,17 @@ function App() {
     if (!dataTransferHasFiles(e.dataTransfer.types)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
+    const { tops, bottoms } = readSidebarStacks()
+    const gap = fileDropInsertIndex(e.clientY, tops, bottoms)
+    if (gap != null) {
+      highlightDropTrack(null)
+      fileInsertAtRef.current = gap
+      const offsets = tops.map(() => 0)
+      setInsertLineVisible(insertionLineY(gap, tops, bottoms, offsets), true)
+      return
+    }
+    fileInsertAtRef.current = null
+    setInsertLineVisible(0, false)
     highlightDropTrack(trackIndexFromPoint(e.clientX, e.clientY))
   }
 
@@ -3226,7 +3274,9 @@ function App() {
     if (!dataTransferHasFiles(e.dataTransfer.types)) return
     e.preventDefault()
     e.stopPropagation()
-    const hover = trackIndexFromPoint(e.clientX, e.clientY)
+    const { tops, bottoms } = readSidebarStacks()
+    const gap = fileInsertAtRef.current ?? fileDropInsertIndex(e.clientY, tops, bottoms)
+    const hover = gap != null ? null : trackIndexFromPoint(e.clientX, e.clientY)
     clearFileDrag()
     const { audio, ignored } = partitionDroppedFiles(Array.from(e.dataTransfer.files || []))
     toastIgnoredFiles(ignored.length)
@@ -3246,7 +3296,7 @@ function App() {
         )
       }
     }
-    enqueueAudioImports(audio, hover, offset)
+    enqueueAudioImports(audio, hover, offset, gap)
   }
 
   const loadSingleTrack = async (file: File, trackIndex: number, offsetSeconds?: number) => {
@@ -3715,6 +3765,194 @@ function App() {
     setTrackStates(next)
     showClipToast(joinSolo ? 'Pista agregada (se oye junto a la aislada)' : 'Pista agregada')
     return next.length - 1
+  }
+
+  const remapAllAfterInsert = (insertAt: number) => {
+    setSelectedTrack((prev) => remapNullableIndexAfterInsert(prev, insertAt))
+    setRecordArmedIndex((prev) => remapNullableIndexAfterInsert(prev, insertAt))
+    setPracticeIndex((prev) => {
+      const next = remapNullableIndexAfterInsert(prev, insertAt)
+      practiceIndexRef.current = next
+      return next
+    })
+    setFxOpenTracks((prev) => remapOpenIndicesAfterInsert(prev, insertAt))
+    setAutoOpenTracks((prev) => remapOpenIndicesAfterInsert(prev, insertAt))
+    setAutoParamByTrack((prev) => remapKeyedRecordAfterInsert(prev, insertAt))
+    setSelectedAutoPoint((sel) => sel ? { ...sel, trackIndex: remapIndexAfterInsert(sel.trackIndex, insertAt) } : sel)
+    setRenamingTrack((prev) => {
+      const next = remapNullableIndexAfterInsert(prev, insertAt)
+      renamingTrackRef.current = next
+      return next
+    })
+    setRecordingTrackIndex((prev) => remapNullableIndexAfterInsert(prev, insertAt))
+    if (recordLiveRef.current) {
+      recordLiveRef.current.trackIndex = remapIndexAfterInsert(recordLiveRef.current.trackIndex, insertAt)
+    }
+    setHarmonySource((prev) => remapHarmonySourceAfterInsert(prev, insertAt))
+  }
+
+  const spliceNewChainAt = (insertAt: number) => {
+    ensureTrackGains(trackChainsRef.current.length + 1)
+    const chain = trackChainsRef.current.pop()
+    trackGainsRef.current.pop()
+    if (!chain) return
+    trackChainsRef.current.splice(insertAt, 0, chain)
+    trackGainsRef.current = trackChainsRef.current.map((c) => c.gain)
+  }
+
+  const insertEmptyTrackAt = (index: number, { undo = true, closeMenu = true, toast = true } = {}) => {
+    if (closeMenu) closeContextMenu()
+    if (undo) saveUndo()
+    const at = Math.max(0, Math.min(trackStatesRef.current.length, index))
+    const joinSolo = newLaneJoinsSolo(trackStatesRef.current)
+    const next = insertEmptyTrack(trackStatesRef.current, at, (name) => ({
+      ...createEmptyTrack(name),
+      solo: joinSolo,
+      clips: [] as Clip[]
+    }))
+    spliceNewChainAt(at)
+    remapAllAfterInsert(at)
+    trackStatesRef.current = next
+    applyAllTrackAudio()
+    setTrackStates(next)
+    if (toast) showClipToast(joinSolo ? 'Pista insertada (se oye junto a la aislada)' : 'Pista insertada')
+    return at
+  }
+
+  const commitTrackReorder = (from: number, to: number) => {
+    if (from === to) return
+    const tracks = trackStatesRef.current
+    if (from < 0 || from >= tracks.length || to < 0 || to >= tracks.length) return
+    saveUndo()
+    const next = moveItem(tracks, from, to)
+    trackChainsRef.current = moveItem(trackChainsRef.current, from, to)
+    trackGainsRef.current = trackChainsRef.current.map((c) => c.gain)
+    trackStatesRef.current = next
+    applyAllTrackAudio()
+    setTrackStates(next)
+    setSelectedTrack((prev) => remapNullableIndexAfterMove(prev, from, to))
+    setRecordArmedIndex((prev) => remapNullableIndexAfterMove(prev, from, to))
+    setPracticeIndex((prev) => {
+      const n = remapNullableIndexAfterMove(prev, from, to)
+      practiceIndexRef.current = n
+      return n
+    })
+    setFxOpenTracks((prev) => remapOpenIndicesAfterMove(prev, from, to))
+    setAutoOpenTracks((prev) => remapOpenIndicesAfterMove(prev, from, to))
+    setAutoParamByTrack((prev) => remapKeyedRecordAfterMove(prev, from, to))
+    setSelectedAutoPoint((sel) => sel ? { ...sel, trackIndex: remapIndexAfterMove(sel.trackIndex, from, to) } : sel)
+    setRenamingTrack((prev) => {
+      const n = remapNullableIndexAfterMove(prev, from, to)
+      renamingTrackRef.current = n
+      return n
+    })
+    setRecordingTrackIndex((prev) => remapNullableIndexAfterMove(prev, from, to))
+    if (recordLiveRef.current) {
+      recordLiveRef.current.trackIndex = remapIndexAfterMove(recordLiveRef.current.trackIndex, from, to)
+    }
+    setHarmonySource((prev) => remapHarmonySourceAfterMove(prev, from, to))
+  }
+
+  const readSidebarStacks = () => {
+    const stacks = Array.from(document.querySelectorAll('.sidebar-scroll .track-stack')) as HTMLElement[]
+    const tops: number[] = []
+    const bottoms: number[] = []
+    const heights: number[] = []
+    stacks.forEach((el) => {
+      const r = el.getBoundingClientRect()
+      tops.push(r.top)
+      bottoms.push(r.bottom)
+      heights.push(r.height)
+    })
+    return { stacks, tops, bottoms, heights }
+  }
+
+  const setInsertLineVisible = (clientY: number, visible: boolean) => {
+    const place = (el: HTMLDivElement | null, host: HTMLElement | null) => {
+      if (!el) return
+      if (!visible || !host) {
+        el.classList.remove('visible')
+        return
+      }
+      const r = host.getBoundingClientRect()
+      el.style.left = `${r.left}px`
+      el.style.width = `${r.width}px`
+      el.style.top = `${clientY}px`
+      el.classList.add('visible')
+    }
+    place(insertLineSidebarRef.current, sidebarScrollRef.current)
+    place(insertLineLanesRef.current, lanesColumnRef.current)
+  }
+
+  const clearTrackReorderPreview = () => {
+    document.querySelectorAll('.track-stack').forEach((node) => {
+      const el = node as HTMLElement
+      el.style.transform = ''
+      el.style.zIndex = ''
+      el.style.willChange = ''
+      el.classList.remove('track-reorder-dragging')
+    })
+    document.querySelectorAll('.track-header.reordering').forEach((el) => el.classList.remove('reordering'))
+    setInsertLineVisible(0, false)
+  }
+
+  const applyTrackReorderPreview = (from: number, insertBefore: number, dragDeltaY: number) => {
+    const { stacks, tops, bottoms, heights } = readSidebarStacks()
+    const laneStacks = Array.from(document.querySelectorAll('.lanes-scroll-inner .track-stack')) as HTMLElement[]
+    const offsets = liveShiftOffsets(from, insertBefore, heights)
+    const paint = (els: HTMLElement[]) => {
+      els.forEach((el, i) => {
+        const extra = i === from ? dragDeltaY : offsets[i]
+        el.style.willChange = 'transform'
+        el.style.transform = extra ? `translateY(${extra}px)` : ''
+        el.style.zIndex = i === from ? '40' : ''
+        el.classList.toggle('track-reorder-dragging', i === from)
+      })
+    }
+    paint(stacks)
+    paint(laneStacks)
+    const showLine = !sameReorderSlot(from, insertBefore)
+    const lineY = insertionLineY(insertBefore, tops, bottoms, offsets)
+    setInsertLineVisible(lineY, showLine)
+  }
+
+  const handleTrackReorderMouseDown = (e: React.MouseEvent, trackIndex: number) => {
+    if (e.button !== 0) return
+    if (renamingTrackRef.current === trackIndex) return
+    e.preventDefault()
+    const from = trackIndex
+    const originY = e.clientY
+    trackReorderRef.current = { from, originY, insertBefore: from, moved: false }
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'grabbing'
+    document.querySelector(`.track-header[data-track-index="${from}"]`)?.classList.add('reordering')
+
+    const onMove = (ev: MouseEvent) => {
+      const live = trackReorderRef.current
+      if (!live) return
+      const dist = Math.abs(ev.clientY - live.originY)
+      if (!live.moved && dist < 4) return
+      live.moved = true
+      const { tops, bottoms } = readSidebarStacks()
+      live.insertBefore = insertIndexFromY(ev.clientY, tops, bottoms)
+      applyTrackReorderPreview(live.from, live.insertBefore, ev.clientY - live.originY)
+    }
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      const live = trackReorderRef.current
+      trackReorderRef.current = null
+      clearTrackReorderPreview()
+      if (!live || !live.moved) return
+      const dest = Math.max(0, Math.min(trackStatesRef.current.length - 1, destIndexFromInsertBefore(live.from, live.insertBefore)))
+      if (dest !== live.from) commitTrackReorder(live.from, dest)
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
   }
 
   const syncVerticalScroll = (source: 'sidebar' | 'lanes') => {
@@ -4695,6 +4933,18 @@ function App() {
         </div>
       )}
 
+      <div
+        className="track-insert-line"
+        data-testid="track-insert-line"
+        ref={insertLineSidebarRef}
+        aria-hidden="true"
+      />
+      <div
+        className="track-insert-line"
+        data-testid="track-insert-line-lanes"
+        ref={insertLineLanesRef}
+        aria-hidden="true"
+      />
       <div className="arrangement-view">
         <div className="sidebar-column" style={{ width: `${sidebarWidth}px` }}>
           <div
@@ -4706,7 +4956,7 @@ function App() {
               {harmony && <span className="chord-key">{harmony.key.label}</span>}
             </div>
             {trackStates.map((trackState, trackIndex) => (
-              <div className="track-stack" key={trackIndex}>
+              <div className="track-stack" key={trackIndex} data-testid={`track-stack-${trackIndex}`}>
                 <TrackHeader
                   trackIndex={trackIndex}
                   name={trackState.name}
@@ -4737,6 +4987,7 @@ function App() {
                   isolated={trackState.solo && trackStates.every((t, i) => i === trackIndex ? t.solo : !t.solo)}
                   onPractice={handlePractice}
                   onAislar={handleAislar}
+                  onReorderMouseDown={handleTrackReorderMouseDown}
                 />
                 {fxOpenTracks.includes(trackIndex) && (
                   <div className="fx-side" style={{ height: `${FX_RACK_HEIGHT}px` }}>
@@ -4863,7 +5114,7 @@ function App() {
             const autoMeta = paramMeta(autoParam)
             const autoLane = laneForParam(trackState.automation, autoParam)
             return (
-            <div className="track-stack" key={trackIndex}>
+            <div className="track-stack" key={trackIndex} data-testid={`lane-stack-${trackIndex}`}>
             <TrackLane
               trackIndex={trackIndex}
               hasClips={trackState.clips.length > 0}
@@ -4952,6 +5203,16 @@ function App() {
             {contextMenu.kind === 'header' ? (
               <>
                 <ContextMenuItem icon={<IconPencil />} label="Renombrar pista" onClick={() => startRenameTrack(contextMenu.trackIndex)} />
+                <ContextMenuItem
+                  icon={<IconMoveVertical />}
+                  label="Insertar pista arriba"
+                  onClick={() => insertEmptyTrackAt(contextMenu.trackIndex)}
+                />
+                <ContextMenuItem
+                  icon={<IconMoveVertical />}
+                  label="Insertar pista abajo"
+                  onClick={() => insertEmptyTrackAt(contextMenu.trackIndex + 1)}
+                />
                 <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
                 <div className="context-menu-sep" />
                 <ContextMenuItem
@@ -5052,7 +5313,7 @@ function App() {
                 <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
-                <li>• <strong>Arrastrar archivos de audio</strong> - Soltalos en una pista para colocarlos ahí (con snap si está activo). Fuera de una pista se crea una pista nueva. Varios archivos: una pista por archivo</li>
+                <li>• <strong>Arrastrar archivos de audio</strong> - Soltalos en una pista para colocarlos ahí (con snap si está activo). Entre pistas se inserta una pista nueva. Fuera de una pista se crea una pista nueva al final. Varios archivos: una pista por archivo</li>
                 <li>• <strong>Botón Snap</strong> - Empieza en OFF. Activa/desactiva el ajuste a cuadrícula (se recuerda)</li>
                 <li>• <strong>Shift al arrastrar</strong> - Invierte el snap mientras arrastras (lo enciende si está OFF, lo apaga si está ON)</li>
               </ul>
@@ -5060,9 +5321,11 @@ function App() {
               <h3>Pistas</h3>
               <ul>
                 <li>• <strong>Doble clic en el nombre</strong> - Renombrar pista (Enter o clic fuera guarda, Escape cancela)</li>
+                <li>• <strong>Arrastrar el nombre/cabecera</strong> - Reordena las pistas (línea de inserción y las demás se corren). Clips, FX, volumen y mute/solo/Aislar viajan con la pista</li>
                 <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
-                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar pista, Agregar pista, Eliminar pista</li>
+                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar, Insertar pista arriba/abajo, Agregar pista, Eliminar pista</li>
                 <li>• <strong>+ Agregar pista</strong> - Añade una pista vacía al final (Pista 9, 10, …). También en una pista vacía o zona vacía (clic derecho). Se puede deshacer</li>
+                <li>• <strong>Soltar audio entre pistas</strong> - Inserta una pista nueva en ese lugar. Sobre una pista la coloca ahí</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
                 <li>• <strong>Zoom vertical</strong> - La forma de onda queda centrada en el clip a cualquier altura (también al mínimo del slider)</li>

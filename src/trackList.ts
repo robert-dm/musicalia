@@ -59,6 +59,17 @@ export function appendEmptyTrack<T extends { name?: string }>(
   return [...tracks, factory(nextPistaName(tracks.map((t) => t.name), tracks.length))]
 }
 
+export function insertEmptyTrack<T extends { name?: string }>(
+  tracks: T[],
+  index: number,
+  factory: (name: string) => T
+): T[] {
+  const at = Math.max(0, Math.min(tracks.length, index))
+  const next = tracks.slice()
+  next.splice(at, 0, factory(nextPistaName(tracks.map((t) => t.name), tracks.length)))
+  return next
+}
+
 export function initialEmptyTracks(count = INITIAL_TRACK_COUNT): EmptyTrack[] {
   return Array.from({ length: count }, (_, i) => createEmptyTrack(`Pista ${i + 1}`))
 }

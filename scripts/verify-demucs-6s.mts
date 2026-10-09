@@ -1,18 +1,13 @@
 /**
- * Real HT-Demucs 6-stem inference check (Node onnxruntime).
- * Downloads StemSplitio htdemucs_6s_fp16weights.onnx if missing, runs one
- * 7.8 s chunk, and asserts output shape + non-silent stems.
+ * HT-Demucs 6-stem check against the shipped WASM model (folded graph).
  *
  *   npx tsx scripts/verify-demucs-6s.mts
  */
-import { createWriteStream, existsSync, statSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
-import { pipeline } from 'node:stream/promises'
-import { Readable } from 'node:stream'
-import { DEMUCS_MODEL_URL, DEMUCS_MODEL_BYTES } from '../src/demucsSeparator.ts'
+import { existsSync, statSync } from 'node:fs'
 import { DEMUCS_N_SAMPLES, DEMUCS_STEM_ROWS } from '../src/demucsChunking.ts'
 
-const MODEL_PATH = '/tmp/musicalia-verify/htdemucs_6s_fp16weights.onnx'
+const MODEL_PATH = new URL('../public/models/htdemucs_6s_wasm.onnx', import.meta.url)
+const MODEL_DATA = new URL('../public/models/htdemucs_6s_wasm.onnx.data', import.meta.url)
 
 function tone(freq: number, sr: number, n: number, amp: number): Float32Array {
   const out = new Float32Array(n)
@@ -21,29 +16,20 @@ function tone(freq: number, sr: number, n: number, amp: number): Float32Array {
   return out
 }
 
-async function ensureModel(): Promise<string> {
-  await mkdir('/tmp/musicalia-verify', { recursive: true })
-  if (existsSync(MODEL_PATH) && statSync(MODEL_PATH).size > 10_000_000) {
-    console.log('Using cached model', MODEL_PATH, statSync(MODEL_PATH).size)
-    return MODEL_PATH
-  }
-  console.log('Downloading', DEMUCS_MODEL_URL)
-  const res = await fetch(DEMUCS_MODEL_URL)
-  if (!res.ok || !res.body) throw new Error(`download failed: ${res.status}`)
-  const out = createWriteStream(MODEL_PATH)
-  await pipeline(Readable.fromWeb(res.body as never), out)
-  const size = statSync(MODEL_PATH).size
-  console.log('Downloaded', size, 'bytes (hint', DEMUCS_MODEL_BYTES, ')')
-  if (size < 10_000_000) throw new Error('model file too small')
-  return MODEL_PATH
-}
-
 async function main() {
-  const modelPath = await ensureModel()
+  const modelPath = MODEL_PATH.pathname
+  const dataPath = MODEL_DATA.pathname
+  if (!existsSync(modelPath) || !existsSync(dataPath)) {
+    throw new Error(`missing ${modelPath} or ${dataPath}`)
+  }
+  console.log('model', modelPath, statSync(modelPath).size, 'data', statSync(dataPath).size)
+
   const ort = await import('onnxruntime-node') as typeof import('onnxruntime-node')
   const session = await ort.InferenceSession.create(modelPath, {
     executionProviders: ['cpu'],
-    graphOptimizationLevel: 'all',
+    graphOptimizationLevel: 'disabled',
+    enableCpuMemArena: false,
+    enableMemPattern: false,
   })
   console.log('inputs', session.inputNames, 'outputs', session.outputNames)
 
@@ -91,7 +77,7 @@ async function main() {
   if (stats.some((s) => !s.finite)) throw new Error('NaN/Inf in stems')
   const audible = stats.filter((s) => s.peak > 1e-4)
   if (audible.length === 0) throw new Error('all stems silent')
-  console.log('OK htdemucs_6s loaded; audible stems:', audible.map((s) => s.name).join(', '))
+  console.log('OK htdemucs_6s wasm model; audible stems:', audible.map((s) => s.name).join(', '))
 }
 
 main().catch((error) => {

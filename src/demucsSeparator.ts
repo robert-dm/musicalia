@@ -2,7 +2,8 @@
  * HT-Demucs 6-stem (htdemucs_6s). Loaded only via dynamic import.
  * Does not import stemSeparator. ORT env is restored after use.
  *
- * Model: huggingface.co/StemSplitio/htdemucs-6s-onnx htdemucs_6s_fp16weights.onnx
+ * Model: same-origin folded graph public/models/htdemucs_6s_wasm.onnx
+ * (from StemSplitio htdemucs_6s_fp16weights.onnx).
  * Input mix:    (1, 2, 343980)   stereo 44.1 kHz, 7.8 s
  * Output stems: (1, 6, 2, 343980) drums, bass, other, vocals, guitar, piano
  */
@@ -10,18 +11,22 @@
 import { resampleChannel } from './audioResample'
 import { channelsAtDemucsRate, inferDemucsChunks, type DemucsChannelPair } from './demucsInfer'
 import { mapDemucsError } from './demucsErrors'
-export { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_URL } from './demucsModel'
-import { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_URL } from './demucsModel'
+export { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_DATA_BYTES, DEMUCS_MODEL_URL, DEMUCS_MODEL_DATA_URL } from './demucsModel'
 import {
+  DEMUCS_MODEL_BYTES,
+  DEMUCS_MODEL_DATA_BYTES,
+  DEMUCS_MODEL_DATA_URL,
+  DEMUCS_MODEL_URL,
+} from './demucsModel'
+import {
+  createDemucsSession,
   hasWebGPU,
   isMobileUserAgent,
   loadDemucsOnnxRuntime,
   shouldBlockForDeviceMemory,
-  wasmSessionOptions,
-  webgpuSessionOptions,
 } from './demucsOrt'
 import type { DemucsWorkerRequest, DemucsWorkerResponse } from './demucsWorker'
-import { fetchModelWithProgress } from './modelDownload'
+import { fetchDemucsModelFiles } from './modelDownload'
 import { makeProgressReporter, type StemSeparationProgress } from './stemProgress'
 import type { DemucsStemBuffers } from './stemTracks'
 
@@ -137,16 +142,19 @@ async function runOnMainThread(
   throwIfAborted(signal)
   let loaded = await loadDemucsOnnxRuntime(preferWebGPU)
   try {
-    const modelBytes = await fetchModelWithProgress(
+    const files = await fetchDemucsModelFiles(
       DEMUCS_MODEL_URL,
       DEMUCS_MODEL_BYTES,
-      (loadedBytes, total, cached) => {
+      DEMUCS_MODEL_DATA_URL,
+      DEMUCS_MODEL_DATA_BYTES,
+      (loadedBytes, total, cached, part) => {
         const frac = total > 0 ? loadedBytes / total : 0
+        const label = part === 'graph' ? 'grafo' : 'pesos'
         onProgress({
           progress: 4 + frac * 18,
           stage: cached
-            ? 'Modelo HT-Demucs en caché'
-            : `Descargando modelo HT-Demucs… ${Math.round(frac * 100)}%`,
+            ? `Modelo HT-Demucs (${label}) en caché`
+            : `Descargando ${label} HT-Demucs… ${Math.round(frac * 100)}%`,
         })
       },
       signal
@@ -159,17 +167,17 @@ async function runOnMainThread(
 
     let session
     try {
-      const options = loaded.provider === 'webgpu' ? webgpuSessionOptions() : wasmSessionOptions()
-      session = await loaded.ort.InferenceSession.create(modelBytes, options)
+      session = await createDemucsSession(loaded.ort, loaded.provider, files.graph, files.data)
     } catch (error) {
       if (loaded.provider !== 'webgpu') throw error
       console.warn('[HT-Demucs] WebGPU falló, usando WASM', error)
       onProgress({ progress: 25, stage: 'WebGPU no disponible, usando WASM…' })
       loaded.restore()
       loaded = await loadDemucsOnnxRuntime(false)
-      session = await loaded.ort.InferenceSession.create(modelBytes, wasmSessionOptions())
+      session = await createDemucsSession(loaded.ort, 'wasm', files.graph, files.data)
     }
-    modelBytes.fill(0)
+    files.graph.fill(0)
+    files.data.fill(0)
 
     throwIfAborted(signal)
     const outs = await inferDemucsChunks(loaded.ort, session, left, right, onProgress, signal)
@@ -221,6 +229,8 @@ export async function separateStemsDemucs(
     }
 
     wrapped({ progress: 1, stage: 'Inicializando HT-Demucs…' })
+    // Probe GPU on the page thread. Dedicated module workers in Chrome often
+    // lack navigator.gpu even when the tab can use WebGPU.
     const preferWebGPU = await hasWebGPU()
     wrapped({
       progress: 3,
@@ -232,13 +242,24 @@ export async function separateStemsDemucs(
     const { left, right } = channelsAtDemucsRate(origLeft, origRight, audioBuffer.sampleRate, resampleChannel)
 
     let outs: DemucsChannelPair[]
-    try {
-      outs = await runInWorker(left, right, preferWebGPU, wrapped, signal)
-    } catch (error) {
-      if (signal?.aborted) throw error
-      console.warn('[HT-Demucs] worker no disponible, usando hilo principal', error)
-      wrapped({ progress: 4, stage: 'Worker no disponible, usando hilo principal…' })
-      outs = await runOnMainThread(left, right, preferWebGPU, wrapped, signal)
+    if (preferWebGPU) {
+      try {
+        outs = await runOnMainThread(left, right, true, wrapped, signal)
+      } catch (error) {
+        if (signal?.aborted) throw error
+        console.warn('[HT-Demucs] WebGPU en hilo principal falló, WASM en worker', error)
+        wrapped({ progress: 4, stage: 'WebGPU no disponible, usando WASM…' })
+        outs = await runInWorker(left, right, false, wrapped, signal)
+      }
+    } else {
+      try {
+        outs = await runInWorker(left, right, false, wrapped, signal)
+      } catch (error) {
+        if (signal?.aborted) throw error
+        console.warn('[HT-Demucs] worker no disponible, usando hilo principal', error)
+        wrapped({ progress: 4, stage: 'Worker no disponible, usando hilo principal…' })
+        outs = await runOnMainThread(left, right, false, wrapped, signal)
+      }
     }
 
     if (watchdogFired) {

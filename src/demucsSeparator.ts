@@ -1,64 +1,34 @@
 /**
  * HT-Demucs 6-stem (htdemucs_6s). Loaded only via dynamic import.
- * Does not import stemSeparator and restores onnxruntime-web env after use.
+ * Does not import stemSeparator. ORT env is restored after use.
  *
  * Model: huggingface.co/StemSplitio/htdemucs-6s-onnx htdemucs_6s_fp16weights.onnx
  * Input mix:    (1, 2, 343980)   stereo 44.1 kHz, 7.8 s
  * Output stems: (1, 6, 2, 343980) drums, bass, other, vocals, guitar, piano
  */
 
-import { resampleChannel, resampleToLength } from './audioResample'
+import { resampleChannel } from './audioResample'
+import { channelsAtDemucsRate, inferDemucsChunks, type DemucsChannelPair } from './demucsInfer'
+import { mapDemucsError } from './demucsErrors'
+export { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_URL } from './demucsModel'
+import { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_URL } from './demucsModel'
 import {
-  accumulateStemChannel,
-  DEMUCS_N_SAMPLES,
-  DEMUCS_OVERLAP,
-  DEMUCS_SAMPLE_RATE,
-  DEMUCS_STEM_ROWS,
-  DEMUCS_STRIDE,
-  demucsChunkCount,
-  makeTransitionWindow,
-  normalizeOverlapAdd,
-  packStereoChunk,
-} from './demucsChunking'
-import { hasWebGPU, isMobileUserAgent, withIsolatedOnnxRuntime } from './demucsOrt'
+  hasWebGPU,
+  isMobileUserAgent,
+  loadDemucsOnnxRuntime,
+  shouldBlockForDeviceMemory,
+  wasmSessionOptions,
+  webgpuSessionOptions,
+} from './demucsOrt'
+import type { DemucsWorkerRequest, DemucsWorkerResponse } from './demucsWorker'
 import { fetchModelWithProgress } from './modelDownload'
-import { interpolateChunkProgress, makeProgressReporter, type StemSeparationProgress } from './stemProgress'
+import { makeProgressReporter, type StemSeparationProgress } from './stemProgress'
 import type { DemucsStemBuffers } from './stemTracks'
 
-export const DEMUCS_MODEL_URL =
-  'https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx'
-export const DEMUCS_MODEL_BYTES = 136_428_532
 const WATCHDOG_MS = 5 * 60 * 1000
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error('Cancelado por el usuario')
-}
-
-function mapDemucsError(error: unknown): Error {
-  if (error instanceof Error && error.message.startsWith('Cancelado')) return error
-  const msg = error instanceof Error ? error.message : String(error)
-  const lower = msg.toLowerCase()
-  if (lower.includes('móvil') || lower.includes('movil')) {
-    return error instanceof Error ? error : new Error(msg)
-  }
-  if (lower.includes('bad_alloc') || lower.includes('oom') || lower.includes('out of memory') ||
-      (lower.includes('memory') && (lower.includes('alloc') || lower.includes('insufficient')))) {
-    return new Error(
-      'Memoria insuficiente para HT-Demucs. Puedes reintentar con Básica / Rápida o cargar el audio como pista única.'
-    )
-  }
-  if (lower.includes('failed to fetch') || lower.includes('network') || lower.includes('descargar') ||
-      lower.includes('load failed') || lower.includes('err_http')) {
-    return new Error(
-      'Error al descargar el modelo HT-Demucs. Verifica tu conexión. Puedes usar Básica / Rápida o una sola pista.'
-    )
-  }
-  if (lower.includes('webgpu') || lower.includes('wasm') || lower.includes('onnx')) {
-    return new Error(
-      'No se pudo iniciar HT-Demucs (WebGPU/WASM). Prueba Chrome o Edge, o usa Básica / Rápida.'
-    )
-  }
-  return new Error(`Error en HT-Demucs: ${msg}. Puedes usar Básica / Rápida o una sola pista.`)
 }
 
 function toStereoBuffer(
@@ -67,12 +37,26 @@ function toStereoBuffer(
   sampleRate: number,
   length: number
 ): AudioBuffer {
-  const l = resampleToLength(left, length)
-  const r = resampleToLength(right, length)
   const buffer = new AudioBuffer({ numberOfChannels: 2, length, sampleRate })
-  buffer.getChannelData(0).set(l)
-  buffer.getChannelData(1).set(r)
+  const outL = buffer.getChannelData(0)
+  const outR = buffer.getChannelData(1)
+  const copy = Math.min(length, left.length, right.length)
+  if (copy > 0) {
+    outL.set(left.subarray(0, copy))
+    outR.set(right.subarray(0, copy))
+  }
   return buffer
+}
+
+function pairsToStems(outs: DemucsChannelPair[], sampleRate: number, length: number): DemucsStemBuffers {
+  return {
+    drums: toStereoBuffer(outs[0][0], outs[0][1], sampleRate, length),
+    bass: toStereoBuffer(outs[1][0], outs[1][1], sampleRate, length),
+    other: toStereoBuffer(outs[2][0], outs[2][1], sampleRate, length),
+    vocals: toStereoBuffer(outs[3][0], outs[3][1], sampleRate, length),
+    guitar: toStereoBuffer(outs[4][0], outs[4][1], sampleRate, length),
+    piano: toStereoBuffer(outs[5][0], outs[5][1], sampleRate, length),
+  }
 }
 
 function validateDemucsStems(stems: DemucsStemBuffers): void {
@@ -89,6 +73,114 @@ function validateDemucsStems(stems: DemucsStemBuffers): void {
   }
   if (!anyAudio) {
     throw new Error('Error en HT-Demucs: las pistas quedaron en silencio.')
+  }
+}
+
+function copyChannel(source: Float32Array): Float32Array {
+  return new Float32Array(source)
+}
+
+async function runInWorker(
+  left: Float32Array,
+  right: Float32Array,
+  preferWebGPU: boolean,
+  onProgress: (p: StemSeparationProgress) => void,
+  signal?: AbortSignal
+): Promise<DemucsChannelPair[]> {
+  if (typeof Worker === 'undefined') throw new Error('Worker no disponible')
+  const worker = new Worker(new URL('./demucsWorker.ts', import.meta.url), { type: 'module' })
+  const request: DemucsWorkerRequest = {
+    type: 'run',
+    left: copyChannel(left),
+    right: copyChannel(right),
+    preferWebGPU,
+  }
+
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      worker.terminate()
+      reject(new Error('Cancelado por el usuario'))
+    }
+    if (signal?.aborted) {
+      abort()
+      return
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+
+    worker.onmessage = (event: MessageEvent<DemucsWorkerResponse>) => {
+      const msg = event.data
+      if (msg.type === 'progress') {
+        onProgress({ progress: msg.progress, stage: msg.stage })
+        return
+      }
+      signal?.removeEventListener('abort', abort)
+      worker.terminate()
+      if (msg.type === 'done') resolve(msg.stems)
+      else reject(new Error(msg.message))
+    }
+    worker.onerror = (event) => {
+      signal?.removeEventListener('abort', abort)
+      worker.terminate()
+      reject(new Error(event.message || 'Error en el worker HT-Demucs'))
+    }
+    worker.postMessage(request, [request.left.buffer, request.right.buffer])
+  })
+}
+
+async function runOnMainThread(
+  left: Float32Array,
+  right: Float32Array,
+  preferWebGPU: boolean,
+  onProgress: (p: StemSeparationProgress) => void,
+  signal?: AbortSignal
+): Promise<DemucsChannelPair[]> {
+  throwIfAborted(signal)
+  let loaded = await loadDemucsOnnxRuntime(preferWebGPU)
+  try {
+    const modelBytes = await fetchModelWithProgress(
+      DEMUCS_MODEL_URL,
+      DEMUCS_MODEL_BYTES,
+      (loadedBytes, total, cached) => {
+        const frac = total > 0 ? loadedBytes / total : 0
+        onProgress({
+          progress: 4 + frac * 18,
+          stage: cached
+            ? 'Modelo HT-Demucs en caché'
+            : `Descargando modelo HT-Demucs… ${Math.round(frac * 100)}%`,
+        })
+      },
+      signal
+    )
+    throwIfAborted(signal)
+    onProgress({
+      progress: 24,
+      stage: loaded.provider === 'webgpu' ? 'Creando sesión WebGPU…' : 'Creando sesión WASM…',
+    })
+
+    let session
+    try {
+      const options = loaded.provider === 'webgpu' ? webgpuSessionOptions() : wasmSessionOptions()
+      session = await loaded.ort.InferenceSession.create(modelBytes, options)
+    } catch (error) {
+      if (loaded.provider !== 'webgpu') throw error
+      console.warn('[HT-Demucs] WebGPU falló, usando WASM', error)
+      onProgress({ progress: 25, stage: 'WebGPU no disponible, usando WASM…' })
+      loaded.restore()
+      loaded = await loadDemucsOnnxRuntime(false)
+      session = await loaded.ort.InferenceSession.create(modelBytes, wasmSessionOptions())
+    }
+    modelBytes.fill(0)
+
+    throwIfAborted(signal)
+    const outs = await inferDemucsChunks(loaded.ort, session, left, right, onProgress, signal)
+    try {
+      session.release()
+    } catch {
+      /* ignore */
+    }
+    return outs
+  } finally {
+    loaded.restore()
   }
 }
 
@@ -121,162 +213,45 @@ export async function separateStemsDemucs(
     }
 
     const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory
-    if (memory !== undefined && memory < 4) {
+    console.info('[HT-Demucs] deviceMemory=', memory, 'crossOriginIsolated=', typeof crossOriginIsolated !== 'undefined' ? crossOriginIsolated : false)
+    if (shouldBlockForDeviceMemory(memory)) {
       throw new Error(
-        'HT-Demucs requiere al menos 4 GB de RAM. Usa Básica / Rápida o carga el audio como pista única.'
+        'HT-Demucs requiere más RAM de la que reporta este navegador. Usa Básica / Rápida o carga el audio como pista única.'
       )
     }
 
     wrapped({ progress: 1, stage: 'Inicializando HT-Demucs…' })
-
     const preferWebGPU = await hasWebGPU()
     wrapped({
       progress: 3,
       stage: preferWebGPU ? 'Inicializando (WebGPU)…' : 'Inicializando (WASM)…',
     })
 
-    return await withIsolatedOnnxRuntime(async (ort) => {
-      throwIfAborted(signal)
+    const origLeft = audioBuffer.getChannelData(0)
+    const origRight = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : origLeft
+    const { left, right } = channelsAtDemucsRate(origLeft, origRight, audioBuffer.sampleRate, resampleChannel)
 
-      const modelBytes = await fetchModelWithProgress(
-        DEMUCS_MODEL_URL,
-        DEMUCS_MODEL_BYTES,
-        (loaded, total, cached) => {
-          const frac = total > 0 ? loaded / total : 0
-          wrapped({
-            progress: 4 + frac * 18,
-            stage: cached
-              ? 'Modelo HT-Demucs en caché'
-              : `Descargando modelo HT-Demucs… ${Math.round(frac * 100)}%`,
-          })
-        },
-        signal
+    let outs: DemucsChannelPair[]
+    try {
+      outs = await runInWorker(left, right, preferWebGPU, wrapped, signal)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      console.warn('[HT-Demucs] worker no disponible, usando hilo principal', error)
+      wrapped({ progress: 4, stage: 'Worker no disponible, usando hilo principal…' })
+      outs = await runOnMainThread(left, right, preferWebGPU, wrapped, signal)
+    }
+
+    if (watchdogFired) {
+      throw new Error(
+        'La separación HT-Demucs se detuvo. Intenta un archivo más corto, Básica / Rápida, o una sola pista.'
       )
+    }
 
-      wrapped({ progress: 24, stage: 'Creando sesión ONNX…' })
-
-      const sessionOptions = {
-        graphOptimizationLevel: 'all' as const,
-        enableCpuMemArena: true,
-        enableMemPattern: true,
-      }
-
-      let session
-      if (preferWebGPU) {
-        try {
-          session = await ort.InferenceSession.create(modelBytes, {
-            ...sessionOptions,
-            executionProviders: ['webgpu', 'wasm'],
-          })
-        } catch (error) {
-          console.warn('WebGPU falló, usando WASM', error)
-          wrapped({ progress: 25, stage: 'WebGPU no disponible, usando WASM…' })
-          session = await ort.InferenceSession.create(modelBytes, {
-            ...sessionOptions,
-            executionProviders: ['wasm'],
-          })
-        }
-      } else {
-        session = await ort.InferenceSession.create(modelBytes, {
-          ...sessionOptions,
-          executionProviders: ['wasm'],
-        })
-      }
-
-      throwIfAborted(signal)
-      wrapped({ progress: 28, stage: 'Preparando audio (44.1 kHz estéreo)…' })
-
-      const origLeft = audioBuffer.getChannelData(0)
-      const origRight = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : origLeft
-      const left = resampleChannel(origLeft, audioBuffer.sampleRate, DEMUCS_SAMPLE_RATE)
-      const right = audioBuffer.numberOfChannels > 1
-        ? resampleChannel(origRight, audioBuffer.sampleRate, DEMUCS_SAMPLE_RATE)
-        : new Float32Array(left)
-
-      const total = left.length
-      const nChunks = demucsChunkCount(total)
-      const window = makeTransitionWindow(DEMUCS_N_SAMPLES, DEMUCS_OVERLAP)
-
-      const outs = DEMUCS_STEM_ROWS.map(() => [new Float32Array(total), new Float32Array(total)] as const)
-      const weight = new Float32Array(total)
-      let estimatedChunkMs = 12_000
-
-      for (let i = 0; i < nChunks; i++) {
-        throwIfAborted(signal)
-        if (watchdogFired) {
-          throw new Error(
-            'La separación HT-Demucs se detuvo. Intenta un archivo más corto, Básica / Rápida, o una sola pista.'
-          )
-        }
-
-        const start = i * DEMUCS_STRIDE
-        const end = Math.min(start + DEMUCS_N_SAMPLES, total)
-        const clen = end - start
-        const chunkStart = Date.now()
-
-        const pulse = setInterval(() => {
-          wrapped({
-            progress: interpolateChunkProgress(i, nChunks, Date.now() - chunkStart, estimatedChunkMs, 30, 90),
-            stage: `Procesando bloque ${i + 1}/${nChunks}…`,
-          })
-        }, 400)
-
-        try {
-          const chunkBuf = packStereoChunk(left, right, start, end)
-          const feeds = { mix: new ort.Tensor('float32', chunkBuf, [1, 2, DEMUCS_N_SAMPLES]) }
-          const results = await session.run(feeds)
-          const stemsTensor = results.stems ?? results[session.outputNames[0]]
-          if (!stemsTensor) throw new Error('El modelo HT-Demucs no devolvió stems')
-          const dims = stemsTensor.dims
-          if (dims.length < 4 || dims[1] !== 6 || dims[2] !== 2 || dims[3] !== DEMUCS_N_SAMPLES) {
-            throw new Error(`Forma de salida inesperada: [${dims.join(', ')}]`)
-          }
-          const stemsData = stemsTensor.data as Float32Array
-
-          for (let row = 0; row < DEMUCS_STEM_ROWS.length; row++) {
-            accumulateStemChannel(
-              stemsData, DEMUCS_N_SAMPLES, row, 0, start, clen, window, outs[row][0],
-              row === 0 ? weight : undefined
-            )
-            accumulateStemChannel(stemsData, DEMUCS_N_SAMPLES, row, 1, start, clen, window, outs[row][1])
-          }
-        } finally {
-          clearInterval(pulse)
-        }
-
-        estimatedChunkMs = Date.now() - chunkStart
-        wrapped({
-          progress: interpolateChunkProgress(i + 1, nChunks, estimatedChunkMs, estimatedChunkMs, 30, 90),
-          stage: `Procesando bloque ${i + 1}/${nChunks}…`,
-        })
-        await new Promise((r) => setTimeout(r, 0))
-      }
-
-      wrapped({ progress: 92, stage: 'Reconstruyendo pistas…' })
-      normalizeOverlapAdd(outs.flatMap(([l, r]) => [l, r]), weight)
-
-      try {
-        session.release()
-      } catch {
-        /* ignore */
-      }
-
-      wrapped({ progress: 96, stage: 'Ajustando sample rate…' })
-      const length = audioBuffer.length
-      const sampleRate = audioBuffer.sampleRate
-      const result: DemucsStemBuffers = {
-        drums: toStereoBuffer(outs[0][0], outs[0][1], sampleRate, length),
-        bass: toStereoBuffer(outs[1][0], outs[1][1], sampleRate, length),
-        other: toStereoBuffer(outs[2][0], outs[2][1], sampleRate, length),
-        vocals: toStereoBuffer(outs[3][0], outs[3][1], sampleRate, length),
-        guitar: toStereoBuffer(outs[4][0], outs[4][1], sampleRate, length),
-        piano: toStereoBuffer(outs[5][0], outs[5][1], sampleRate, length),
-      }
-
-      validateDemucsStems(result)
-      wrapped({ progress: 100, stage: 'Completado' })
-      return result
-    })
+    wrapped({ progress: 96, stage: 'Creando pistas…' })
+    const result = pairsToStems(outs, audioBuffer.sampleRate, audioBuffer.length)
+    validateDemucsStems(result)
+    wrapped({ progress: 100, stage: 'Completado' })
+    return result
   } catch (error) {
     throw mapDemucsError(error)
   } finally {

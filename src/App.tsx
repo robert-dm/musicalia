@@ -160,7 +160,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0082b'
+const APP_VERSION = '0.0083b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -893,9 +893,6 @@ function App() {
       }
       
       setTrackStates(newTrackStates)
-      setToastMessage('Proyecto local cargado')
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
       console.log(`[Mount] Local project loaded successfully`)
     })
   }, [])
@@ -4142,7 +4139,7 @@ function App() {
       />
       
       <div className="transport-bar">
-        <div className="transport-controls">
+        <div className="tb-group tb-project" role="group" aria-label="Proyecto">
           <button className="header-btn icon-only" onClick={handleNewProject} title="Nuevo proyecto" aria-label="Nuevo proyecto">
             <IconFilePlus />
           </button>
@@ -4181,39 +4178,11 @@ function App() {
             <IconFolderOpen />
             <span className="btn-label">Abrir</span>
           </button>
-          <button
-            className="header-btn"
-            onClick={handleOpenExportDialog}
-            title="Exportar pistas seleccionadas"
-          >
-            <IconDownload />
-            <span className="btn-label">Exportar</span>
-          </button>
-          <button
-            className={`header-btn toggle-btn ${snapEnabled ? 'active' : ''}`}
-            aria-pressed={snapEnabled}
-            onClick={() => {
-              setSnapEnabled(prev => {
-                const next = !prev
-                persistSnapEnabled(next)
-                return next
-              })
-            }}
-            title={`Snap ${snapEnabled ? 'ON' : 'OFF'}. Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras`}
-          >
-            <IconMagnet />
-            <span className="btn-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
-          </button>
-          <button
-            className="header-btn"
-            onClick={() => setShowHelp(true)}
-            title="Atajos de teclado"
-          >
-            <IconCircleHelp />
-            <span className="btn-label">Ayuda</span>
-          </button>
         </div>
-        <div className="transport-playback" role="group" aria-label="Transporte">
+
+        <div className="tb-sep" aria-hidden="true" />
+
+        <div className="tb-group tb-transport transport-playback" role="group" aria-label="Transporte">
           <button
             className="transport-button icon-btn"
             onClick={handleJumpToStart}
@@ -4282,8 +4251,57 @@ function App() {
             </select>
           )}
           <span className="record-elapsed" ref={recordElapsedRef} data-testid="record-elapsed" />
+        </div>
+
+        <div className="tb-sep" aria-hidden="true" />
+
+        <div className="tb-group tb-tempo" role="group" aria-label="Tempo">
+          <div className="bpm-control">
+            <span className="bpm-label">BPM</span>
+            <input
+              type="number"
+              className="bpm-input"
+              value={bpm}
+              onChange={handleBpmChange}
+              min="20"
+              max="300"
+            />
+            {Math.abs(tempoRate - 1) > 0.001 && (
+              <span className="bpm-effective" title="BPM que suena con la velocidad actual">
+                → {effectiveBpm(bpm, tempoRate)}
+              </span>
+            )}
+          </div>
+          <div className="pitch-tempo-controls">
+            <label className="pt-field" title="Tono global, ±12 semitonos">
+              <span>Tono</span>
+              <input
+                type="range"
+                min={-12}
+                max={12}
+                step={1}
+                value={pitchSemitones}
+                onChange={(e) => handlePitch(parseInt(e.target.value, 10))}
+                aria-label="Tono en semitonos"
+              />
+              <span className="pt-value">{pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones}</span>
+            </label>
+            <label className="pt-field" title="Velocidad 0.5x–1.5x (GrainPlayer)">
+              <span>Vel.</span>
+              <input
+                type="range"
+                min={0.5}
+                max={1.5}
+                step={0.05}
+                value={tempoRate}
+                onChange={(e) => handleTempoRate(parseFloat(e.target.value))}
+                aria-label="Velocidad de reproducción"
+              />
+              <span className="pt-value">{tempoRate.toFixed(2)}x</span>
+            </label>
+          </div>
           <button
-            className={`transport-button toggle-btn ${metronomeEnabled ? 'active' : ''}`}
+            className={`header-btn icon-only toggle-btn ${metronomeEnabled ? 'active' : ''}`}
             onClick={() => setMetronomeEnabled(!metronomeEnabled)}
             title="Metrónomo (cuenta 2 compases antes)"
             aria-label="Metrónomo"
@@ -4292,7 +4310,22 @@ function App() {
             <IconMetronome size={15} />
           </button>
           <button
-            className={`transport-button toggle-btn ${isLoopEnabled ? 'active' : ''}`}
+            className={`header-btn toggle-btn ${snapEnabled ? 'active' : ''}`}
+            aria-pressed={snapEnabled}
+            onClick={() => {
+              setSnapEnabled(prev => {
+                const next = !prev
+                persistSnapEnabled(next)
+                return next
+              })
+            }}
+            title={`Snap ${snapEnabled ? 'ON' : 'OFF'}. Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras`}
+          >
+            <IconMagnet />
+            <span className="btn-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+          <button
+            className={`header-btn icon-only toggle-btn ${isLoopEnabled ? 'active' : ''}`}
             onClick={handleLoopToggle}
             title="Activar loop — arrastra en el timeline para marcar zona"
             aria-label="Loop"
@@ -4300,20 +4333,23 @@ function App() {
           >
             <IconRepeat size={15} />
           </button>
-        </div>
-        <div className="transport-meta">
-          <div className="time-display">
-            <span className="time-label">Time</span>
-            <span className="time-value" ref={timeDisplayRef}>
-              {formatTime(playheadPosition)} / {formatTime(getMaxDuration())}
-            </span>
-          </div>
           {isLoopEnabled && (loopStart !== null || loopEnd !== null) && (
             <div className="loop-indicator">
               <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
               <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
             </div>
           )}
+        </div>
+
+        <div className="tb-sep" aria-hidden="true" />
+
+        <div className="tb-group tb-tools" role="group" aria-label="Herramientas">
+          <div className="time-display">
+            <span className="time-label">Time</span>
+            <span className="time-value" ref={timeDisplayRef}>
+              {formatTime(playheadPosition)} / {formatTime(getMaxDuration())}
+            </span>
+          </div>
           <div className="zoom-controls">
             <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)"><IconMoveHorizontal size={14} /></span>
             <input
@@ -4360,50 +4396,6 @@ function App() {
               Aislar
             </button>
           </div>
-          <div className="pitch-tempo-controls">
-            <label className="pt-field" title="Tono global, ±12 semitonos">
-              <span>Tono</span>
-              <input
-                type="range"
-                min={-12}
-                max={12}
-                step={1}
-                value={pitchSemitones}
-                onChange={(e) => handlePitch(parseInt(e.target.value, 10))}
-                aria-label="Tono en semitonos"
-              />
-              <span className="pt-value">{pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones}</span>
-            </label>
-            <label className="pt-field" title="Velocidad 0.5x–1.5x (GrainPlayer)">
-              <span>Vel.</span>
-              <input
-                type="range"
-                min={0.5}
-                max={1.5}
-                step={0.05}
-                value={tempoRate}
-                onChange={(e) => handleTempoRate(parseFloat(e.target.value))}
-                aria-label="Velocidad de reproducción"
-              />
-              <span className="pt-value">{tempoRate.toFixed(2)}x</span>
-            </label>
-          </div>
-          <div className="bpm-control">
-            <span className="bpm-label">BPM</span>
-            <input
-              type="number"
-              className="bpm-input"
-              value={bpm}
-              onChange={handleBpmChange}
-              min="20"
-              max="300"
-            />
-            {Math.abs(tempoRate - 1) > 0.001 && (
-              <span className="bpm-effective" title="BPM que suena con la velocidad actual">
-                → {effectiveBpm(bpm, tempoRate)}
-              </span>
-            )}
-          </div>
           <div className="harmony-controls">
             {harmony?.key.label && (
               <span className="key-badge" title="Tonalidad detectada">{harmony.key.label}</span>
@@ -4433,20 +4425,36 @@ function App() {
               {harmonyBusy ? 'Analizando…' : 'Detectar acordes'}
             </button>
           </div>
-        </div>
-        <div className="header-info">
-          <div className="audio-diagnostics">
-            <span title="Context State">{Tone.getContext().state}</span>
-            <span title="Sample Rate">{Tone.getContext().sampleRate}Hz</span>
-            <span ref={meterDisplayRef} title="Output Level" className="level-inactive">
-              -∞
-            </span>
-            <button className="test-tone-btn" onClick={playTestTone} title="Test Tone (440Hz)" aria-label="Tono de prueba">
-              <IconVolume2 size={13} />
-            </button>
-          </div>
-          <div className="version-badge">
-            <span className="version-label">v{APP_VERSION}</span>
+          <button
+            className="header-btn"
+            onClick={handleOpenExportDialog}
+            title="Exportar pistas seleccionadas"
+          >
+            <IconDownload />
+            <span className="btn-label">Exportar</span>
+          </button>
+          <button
+            className="header-btn"
+            onClick={() => setShowHelp(true)}
+            title="Atajos de teclado"
+          >
+            <IconCircleHelp />
+            <span className="btn-label">Ayuda</span>
+          </button>
+          <div className="header-info">
+            <div className="audio-diagnostics">
+              <span title="Context State">{Tone.getContext().state}</span>
+              <span title="Sample Rate">{Tone.getContext().sampleRate}Hz</span>
+              <span ref={meterDisplayRef} title="Output Level" className="level-inactive">
+                -∞
+              </span>
+              <button className="test-tone-btn" onClick={playTestTone} title="Test Tone (440Hz)" aria-label="Tono de prueba">
+                <IconVolume2 size={13} />
+              </button>
+            </div>
+            <div className="version-badge">
+              <span className="version-label">v{APP_VERSION}</span>
+            </div>
           </div>
         </div>
       </div>

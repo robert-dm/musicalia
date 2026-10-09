@@ -12,8 +12,7 @@ function snapshotWasmEnv(ort: typeof OrtNS) {
 }
 
 function restoreWasmEnv(ort: typeof OrtNS, snap: ReturnType<typeof snapshotWasmEnv>): void {
-  const wasm = ort.env.wasm as typeof snap
-  Object.assign(wasm, snap)
+  Object.assign(ort.env.wasm, snap)
 }
 
 export async function hasWebGPU(): Promise<boolean> {
@@ -26,25 +25,67 @@ export async function hasWebGPU(): Promise<boolean> {
   }
 }
 
+export function wasmSessionOptions() {
+  return {
+    graphOptimizationLevel: 'basic' as const,
+    enableCpuMemArena: false,
+    enableMemPattern: false,
+    executionProviders: ['wasm'] as const,
+  }
+}
+
+export function webgpuSessionOptions() {
+  return {
+    graphOptimizationLevel: 'basic' as const,
+    enableCpuMemArena: false,
+    enableMemPattern: false,
+    executionProviders: ['webgpu'] as const,
+  }
+}
+
 /**
- * Run Demucs against onnxruntime-web without leaving Spleeter's global
- * ort.env.wasm settings changed. Never imports stemSeparator.
+ * Load ORT for Demucs only. Prefer the WebGPU build so weights stay on GPU.
+ * WASM uses a single thread and no proxy to cut peak heap. Spleeter env is restored.
  */
-export async function withIsolatedOnnxRuntime<T>(
-  fn: (ort: typeof OrtNS) => Promise<T>
-): Promise<T> {
-  const ort = await import('onnxruntime-web')
-  const snap = snapshotWasmEnv(ort)
-  try {
-    if (!ort.env.wasm.wasmPaths) {
-      ort.env.wasm.wasmPaths = ORT_WASM_PATHS
+export async function loadDemucsOnnxRuntime(preferWebGPU: boolean): Promise<{
+  ort: typeof OrtNS
+  provider: 'webgpu' | 'wasm'
+  restore: () => void
+}> {
+  let ort: typeof OrtNS
+  let provider: 'webgpu' | 'wasm' = 'wasm'
+  if (preferWebGPU) {
+    try {
+      ort = await import('onnxruntime-web/webgpu')
+      provider = 'webgpu'
+    } catch (error) {
+      console.warn('[HT-Demucs] onnxruntime-web/webgpu no disponible, usando WASM', error)
+      ort = await import('onnxruntime-web')
     }
-    return await fn(ort)
-  } finally {
-    restoreWasmEnv(ort, snap)
+  } else {
+    ort = await import('onnxruntime-web')
+  }
+
+  const snap = snapshotWasmEnv(ort)
+  if (!ort.env.wasm.wasmPaths) {
+    ort.env.wasm.wasmPaths = ORT_WASM_PATHS
+  }
+  if (provider === 'wasm') {
+    ort.env.wasm.numThreads = 1
+    ort.env.wasm.proxy = false
+  }
+
+  return {
+    ort,
+    provider,
+    restore: () => restoreWasmEnv(ort, snap),
   }
 }
 
 export function isMobileUserAgent(ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''): boolean {
   return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua)
+}
+
+export function shouldBlockForDeviceMemory(deviceMemory?: number): boolean {
+  return deviceMemory !== undefined && deviceMemory < 2
 }

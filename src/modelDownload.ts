@@ -32,9 +32,7 @@ async function writeCache(url: string, bytes: Uint8Array): Promise<void> {
   if (typeof caches === 'undefined') return
   try {
     const cache = await caches.open(MODEL_CACHE_NAME)
-    const copy = new Uint8Array(bytes.byteLength)
-    copy.set(bytes)
-    await cache.put(url, new Response(copy.buffer, {
+    await cache.put(url, new Response(new Blob([bytes as BlobPart]), {
       headers: { 'Content-Type': 'application/octet-stream' },
     }))
   } catch {

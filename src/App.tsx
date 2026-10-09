@@ -30,7 +30,13 @@ import {
   songTimeFromWall,
   wallDelayForSong
 } from './clipPlayer'
-import { resolvePracticeTrack, toggleAislar, togglePractice } from './practiceMode'
+import {
+  AISLAR_TRANSPORT_TITLE,
+  newLaneJoinsSolo,
+  resolvePracticeTrack,
+  toggleAislar,
+  togglePractice
+} from './practiceMode'
 import { analyzeHarmony, hydrateHarmony, serializeHarmony, type HarmonyResult } from './harmony'
 import { laneForParam, setLanePoints, type AutomationLane } from './automation'
 import {
@@ -150,7 +156,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0079b'
+const APP_VERSION = '0.0080b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -1882,6 +1888,9 @@ function App() {
             sourceStart: 0,
             duration: buffer.duration
           }
+          if (isPlayingRef.current) {
+            newClip.isPlaying = startClipAtSongTime(newClip, getSongTime())
+          }
           const next = [...trackStatesRef.current]
           if (next[live.trackIndex]) {
             next[live.trackIndex] = {
@@ -2996,15 +3005,18 @@ function App() {
   const appendTracksForImport = (count: number) => {
     if (count <= 0) return
     beginImportUndo()
+    const joinSolo = newLaneJoinsSolo(trackStatesRef.current)
     const next = [...trackStatesRef.current]
     for (let i = 0; i < count; i++) {
       next.push({
         ...createEmptyTrack(nextPistaName(next.map(t => t.name), next.length)),
+        solo: joinSolo,
         clips: [] as Clip[]
       })
     }
     ensureTrackGains(next.length)
     trackStatesRef.current = next
+    applyAllTrackAudio()
     setTrackStates(next)
   }
 
@@ -3224,6 +3236,9 @@ function App() {
       sourceStart: 0,
       duration: buffer.duration
     }
+    if (isPlayingRef.current) {
+      newClip.isPlaying = startClipAtSongTime(newClip, getSongTime())
+    }
 
     const newTrackStates = [...trackStatesRef.current]
     if (!newTrackStates[trackIndex]) return
@@ -3232,6 +3247,7 @@ function App() {
       clips: [...newTrackStates[trackIndex].clips, newClip]
     }
     trackStatesRef.current = newTrackStates
+    applyAllTrackAudio()
     setTrackStates(newTrackStates)
   }
 
@@ -3318,11 +3334,16 @@ function App() {
       newTrackStates[targetTrackIndex] = {
         ...newTrackStates[targetTrackIndex],
         name: stemNames[i],
+        mute: false,
+        solo: false,
         clips: [...newTrackStates[targetTrackIndex].clips, newClip]
       }
     }
 
+    practiceIndexRef.current = null
+    setPracticeIndex(null)
     trackStatesRef.current = newTrackStates
+    applyAllTrackAudio()
     setTrackStates(newTrackStates)
   }
 
@@ -3352,6 +3373,8 @@ function App() {
     const next = togglePractice(trackStatesRef.current, trackIndex, practiceIndexRef.current)
     practiceIndexRef.current = next.practiceIndex
     setPracticeIndex(next.practiceIndex)
+    trackStatesRef.current = next.tracks
+    applyAllTrackAudio()
     setTrackStates(next.tracks)
     const name = resolveTrackName(next.tracks[trackIndex]?.name, trackIndex)
     showClipToast(next.practiceIndex === trackIndex ? `Practicar encima de ${name}` : 'Práctica desactivada')
@@ -3361,9 +3384,11 @@ function App() {
     const next = toggleAislar(trackStatesRef.current, trackIndex)
     practiceIndexRef.current = next.practiceIndex
     setPracticeIndex(next.practiceIndex)
+    trackStatesRef.current = next.tracks
+    applyAllTrackAudio()
     setTrackStates(next.tracks)
     const name = resolveTrackName(next.tracks[trackIndex]?.name, trackIndex)
-    showClipToast(next.tracks[trackIndex]?.solo ? `Aislar ${name}` : 'Aislar desactivado')
+    showClipToast(next.tracks[trackIndex]?.solo ? `Aislada: solo se oye ${name}` : 'Aislar desactivado: se oyen todas')
   }
 
   const handlePracticeFromTransport = () => {
@@ -3601,13 +3626,17 @@ function App() {
   const addEmptyTrack = () => {
     closeContextMenu()
     saveUndo()
+    const joinSolo = newLaneJoinsSolo(trackStatesRef.current)
     const next = appendEmptyTrack(trackStatesRef.current, (name) => ({
       ...createEmptyTrack(name),
+      solo: joinSolo,
       clips: [] as Clip[]
     }))
     ensureTrackGains(next.length)
+    trackStatesRef.current = next
+    applyAllTrackAudio()
     setTrackStates(next)
-    showClipToast('Pista agregada')
+    showClipToast(joinSolo ? 'Pista agregada (se oye junto a la aislada)' : 'Pista agregada')
     return next.length - 1
   }
 
@@ -4246,7 +4275,7 @@ function App() {
               className={`header-btn has-label ${practiceIndex != null ? 'active' : ''}`}
               data-testid="practice-transport"
               onClick={handlePracticeFromTransport}
-              title="Practicar encima de la pista seleccionada (silencia ese stem)"
+              title="Practicar encima: silencia la pista seleccionada y deja el resto, para tocar o cantar"
             >
               Practicar encima
             </button>
@@ -4257,7 +4286,7 @@ function App() {
               }`}
               data-testid="aislar-transport"
               onClick={handleAislarFromTransport}
-              title="Aislar la pista seleccionada"
+              title={AISLAR_TRANSPORT_TITLE}
             >
               Aislar
             </button>
@@ -4915,7 +4944,7 @@ function App() {
                 <li>• <strong>Zoom vertical</strong> - La forma de onda queda centrada en el clip a cualquier altura (también al mínimo del slider)</li>
                 <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
                 <li>• <strong>P (Practicar encima)</strong> - Silencia ese stem y deja el resto sonando para tocar o cantar encima. El botón del transporte usa la pista seleccionada</li>
-                <li>• <strong>Ais (Aislar)</strong> - Solo ese stem (exclusivo). Volvé a pulsar para salir</li>
+                <li>• <strong>Aislar</strong> - Oís SOLO esa pista (para tocar encima). Mute (M) silencia una. Solo (S) puede dejar varias. Una pista nueva se oye también. Pulsá de nuevo para oír todas</li>
                 <li>• <strong>Botón FX</strong> - Abre el rack de efectos de esa pista (EQ, compresor, filtro, delay, reverb y pan). Cada módulo tiene knobs y bypass On/Off</li>
                 <li>• <strong>Botón A (curva)</strong> - Muestra la pista de automatización. Elegí el parámetro (volumen, pan o un knob de efecto) y dibujá la curva</li>
               </ul>

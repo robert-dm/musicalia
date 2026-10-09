@@ -1,6 +1,7 @@
 import { memo, useRef } from 'react'
 import { LiveParamSlider } from './LiveParamSlider'
 import { resolveTrackName } from './clipSelection'
+import { AISLAR_BUTTON_TITLE } from './practiceMode'
 import { trackHeaderDataEqual } from './trackRenderMemo'
 import { IconRecordArm, IconSliders, IconSpline, IconTrash } from './uiIcons'
 
@@ -120,7 +121,7 @@ export const TrackHeader = memo(function TrackHeader({
           className={`control-button practice-button ${practiceActive ? 'active' : ''}`}
           data-testid={`practice-${trackIndex}`}
           onClick={() => onPractice(trackIndex)}
-          title="Practicar encima: silencia este instrumento y deja el resto"
+          title="Practicar encima: silencia ESTA pista y deja el resto sonando, para tocar o cantar"
           aria-label="Practicar encima"
           aria-pressed={practiceActive}
         >
@@ -131,11 +132,11 @@ export const TrackHeader = memo(function TrackHeader({
           className={`control-button isolate-button ${isolated ? 'active' : ''}`}
           data-testid={`aislar-${trackIndex}`}
           onClick={() => onAislar(trackIndex)}
-          title="Aislar: solo este stem"
-          aria-label="Aislar"
+          title={AISLAR_BUTTON_TITLE}
+          aria-label="Aislar: oír solo esta pista"
           aria-pressed={isolated}
         >
-          Ais
+          Aislar
         </button>
         <button
           type="button"
@@ -188,7 +189,7 @@ export const TrackHeader = memo(function TrackHeader({
         <button
           className={`control-button mute-button ${mute ? 'active' : ''}`}
           onClick={() => onMute(trackIndex)}
-          title="Mute"
+          title="Mute: silencia esta pista. Distinto de Aislar (oír solo una)."
           aria-pressed={mute}
         >
           M
@@ -196,7 +197,7 @@ export const TrackHeader = memo(function TrackHeader({
         <button
           className={`control-button solo-button ${solo ? 'active' : ''}`}
           onClick={() => onSolo(trackIndex)}
-          title="Solo"
+          title="Solo: deja esta pista sonando (podés activar Solo en varias). Aislar deja una sola."
           aria-pressed={solo}
         >
           S

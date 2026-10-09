@@ -77,6 +77,36 @@ export function applyTrimPreviewStyles(
   waveform.style.transform = `translateX(${crop.translatePct}%)`
 }
 
+export function applyTrimPreviewPx(
+  wrapper: { style: { transform: string; width: string; zIndex: string; willChange: string } },
+  waveform: { style: { width: string; transform: string } } | null,
+  next: ClipTrimState,
+  orig: ClipTrimState,
+  origWidthPx: number,
+  pxPerSec: number,
+  bufferDuration: number
+): void {
+  const dx = (next.offsetSeconds - orig.offsetSeconds) * pxPerSec
+  const widthPx = Math.max(1, origWidthPx + (next.duration - orig.duration) * pxPerSec)
+  wrapper.style.willChange = 'transform, width'
+  wrapper.style.zIndex = '20'
+  wrapper.style.transform = `translateX(${dx}px)`
+  wrapper.style.width = `${widthPx}px`
+  if (!waveform) return
+  const crop = waveformCropStyle(next.sourceStart, next.duration, bufferDuration)
+  waveform.style.width = `${crop.widthPct}%`
+  waveform.style.transform = `translateX(${crop.translatePct}%)`
+}
+
+export function clearTrimPreviewPx(
+  wrapper: { style: { transform: string; width: string; zIndex: string; willChange: string } }
+): void {
+  wrapper.style.transform = ''
+  wrapper.style.width = ''
+  wrapper.style.zIndex = ''
+  wrapper.style.willChange = ''
+}
+
 export function trimStatesEqual(a: ClipTrimState, b: ClipTrimState, eps = 1e-6): boolean {
   return (
     Math.abs(a.sourceStart - b.sourceStart) < eps &&

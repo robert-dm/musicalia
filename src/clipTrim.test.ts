@@ -1,5 +1,6 @@
 import {
   applyClipTrim,
+  applyTrimPreviewPx,
   applyTrimPreviewStyles,
   deltaTimeFromLanePx,
   trimStatesEqual,
@@ -50,6 +51,11 @@ applyTrimPreviewStyles(wrap, wave, left, 10, 100)
 assert(wrap.style.left === '9%' && wrap.style.width === '3%', 'preview writes left/width percents')
 assert(wave.style.width === `${(10 / 3) * 100}%`, 'preview waveform width follows crop')
 assert(wave.style.transform.includes('translateX'), 'preview shifts waveform with translateX')
+
+const pxWrap = { style: { transform: '', width: '', zIndex: '', willChange: '' } }
+applyTrimPreviewPx(pxWrap, wave, left, orig, 80, 20, 10)
+assert(pxWrap.style.transform === 'translateX(20px)', 'trim preview dx = Δoffset * pxPerSec')
+assert(pxWrap.style.width === '60px', 'trim preview width = origWidth + Δduration * pxPerSec')
 
 assert(trimStatesEqual(left, { ...left }), 'equal trim states')
 assert(!trimStatesEqual(left, right), 'different trim states')

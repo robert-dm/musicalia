@@ -41,7 +41,12 @@ export function idsMatch(entryId: string, fileId: string | null): boolean {
   return entryId === fileId
 }
 
-export function hasFileSystemAccess(win: { showSaveFilePicker?: unknown; showOpenFilePicker?: unknown } = window): boolean {
+type PickerWindow = {
+  showSaveFilePicker?: unknown
+  showOpenFilePicker?: unknown
+}
+
+export function hasFileSystemAccess(win: PickerWindow = window as PickerWindow): boolean {
   return typeof win.showSaveFilePicker === 'function' && typeof win.showOpenFilePicker === 'function'
 }
 
@@ -230,12 +235,14 @@ export async function pickMusicaliaFile(): Promise<{ file: File; handle: FileSys
   })
 }
 
+type HandlePermissionMode = 'read' | 'readwrite'
+
 export async function queryHandlePermission(
   handle: FileSystemFileHandle,
-  mode: FileSystemPermissionMode = 'read'
+  mode: HandlePermissionMode = 'read'
 ): Promise<PermissionState | 'unknown'> {
   const withPerm = handle as FileSystemFileHandle & {
-    queryPermission?: (opts: { mode: FileSystemPermissionMode }) => Promise<PermissionState>
+    queryPermission?: (opts: { mode: HandlePermissionMode }) => Promise<PermissionState>
   }
   if (typeof withPerm.queryPermission !== 'function') return 'unknown'
   try {
@@ -247,12 +254,12 @@ export async function queryHandlePermission(
 
 export async function ensureHandlePermission(
   handle: FileSystemFileHandle,
-  mode: FileSystemPermissionMode = 'read'
+  mode: HandlePermissionMode = 'read'
 ): Promise<boolean> {
   const status = await queryHandlePermission(handle, mode)
   if (status === 'granted' || status === 'unknown') return true
   const withPerm = handle as FileSystemFileHandle & {
-    requestPermission?: (opts: { mode: FileSystemPermissionMode }) => Promise<PermissionState>
+    requestPermission?: (opts: { mode: HandlePermissionMode }) => Promise<PermissionState>
   }
   if (typeof withPerm.requestPermission !== 'function') return false
   try {

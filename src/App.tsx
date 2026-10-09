@@ -1076,7 +1076,7 @@ function App() {
       
       // Otherwise, ask for file location FIRST (before any async work)
       // This preserves user activation for showSaveFilePicker
-      const fileName = `${currentProjectName.replace(/[^a-z0-9]/gi, '_')}.musicalia`
+      const fileName = `${sanitizeFilename(currentProjectName) || 'proyecto'}.musicalia`
       
       if ('showSaveFilePicker' in window) {
         try {
@@ -1088,8 +1088,9 @@ function App() {
             }]
           })
           
-          // Extract the project name from the chosen file name
-          const savedFileName = handle.name.replace(/\.musicalia$/, '').replace(/_/g, ' ')
+          // Keep the in-app name unless the user picked a different file name
+          const chosenBase = String(handle.name || fileName).replace(/\.musicalia$/i, '').trim()
+          const savedFileName = chosenBase || currentProjectName
           setCurrentProjectName(savedFileName)
           setCurrentFileHandle(handle)
           

@@ -8,15 +8,18 @@
 import { createServer } from 'node:http'
 import { createReadStream, existsSync } from 'node:fs'
 import { mkdir, writeFile, stat } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { extname, join, resolve } from 'node:path'
-import { chromium } from 'playwright'
+
+const require = createRequire('/tmp/pw/package.json')
+const { chromium } = require('playwright-core')
 
 const ROOT = resolve(process.cwd())
 const DIST = join(ROOT, 'dist')
 const PORT = Number(process.env.VERIFY_PORT || 4177)
 const ORIGIN = `http://127.0.0.1:${PORT}`
 const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR || '/opt/cursor/artifacts/screenshots'
-const SCREENSHOT = join(SCREENSHOT_DIR, 'mis-proyectos-list.png')
+const SCREENSHOT = join(SCREENSHOT_DIR, 'mis-proyectos-list-signed-in.png')
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -211,6 +214,8 @@ async function main() {
   await page.getByTitle(/Guardar proyecto/).click()
   await page.getByText(/Proyecto guardado/i).waitFor({ timeout: 30000 })
 
+  const dismiss = page.locator('.error-toast button')
+  if (await dismiss.count()) await dismiss.click().catch(() => {})
   await page.getByTestId('my-projects-button').click()
   const row = page.getByTestId('my-projects-row')
   await row.waitFor({ timeout: 10000 })

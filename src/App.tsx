@@ -22,6 +22,18 @@ import { detectBPM } from './bpmDetector'
 import { encodeAudioBufferWAV } from './wav'
 import { TrackHeader } from './TrackHeader'
 import { TrackLane } from './TrackLane'
+import { TimelineRuler } from './TimelineRuler'
+import {
+  applyLoopSnap,
+  hitTestLoop,
+  loopFromClip,
+  loopFromDrag,
+  moveLoop,
+  RULER_HEIGHT_PX,
+  resizeLoop,
+  rulerCursor,
+  type LoopHit
+} from './loopRegion'
 import { FxRack } from './FxRack'
 import { AutomationLaneView } from './AutomationLaneView'
 import { applyTrackFxChain, createTrackFxChain, disposeTrackFxChain, type TrackFxChain } from './trackFxChain'
@@ -160,7 +172,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0084b'
+const APP_VERSION = '0.0085b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -229,8 +241,7 @@ function App() {
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
   const [countInBars, _setCountInBars] = useState(2)
   const [isDraggingLoop, setIsDraggingLoop] = useState(false)
-  const [isDraggingLoopEdge, setIsDraggingLoopEdge] = useState<'start' | 'end' | null>(null)
-  const [loopDragStart, setLoopDragStart] = useState<number | null>(null)
+  const [loopHoverHit, setLoopHoverHit] = useState<LoopHit>('empty')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const localFileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
@@ -264,7 +275,16 @@ function App() {
     maxTrack: 0
   })
   const seekToPositionRef = useRef<(seconds: number, shiftKey?: boolean) => void>(() => {})
-  const loopGestureRef = useRef({ x: 0, y: 0, distance: 0 })
+  const loopDragRef = useRef<{
+    kind: LoopHit | 'create'
+    originX: number
+    originY: number
+    originTime: number
+    start0: number
+    end0: number
+    moved: boolean
+    snapOn: boolean
+  } | null>(null)
   const marqueeLiveRef = useRef({
     active: false,
     didDrag: false,
@@ -283,6 +303,8 @@ function App() {
   const [loopEnd, setLoopEnd] = useState<number | null>(null)
   const [tempLoopStart, setTempLoopStart] = useState<number | null>(null)
   const [tempLoopEnd, setTempLoopEnd] = useState<number | null>(null)
+  const tempLoopStartRef = useRef<number | null>(null)
+  const tempLoopEndRef = useRef<number | null>(null)
   const [horizontalZoom, setHorizontalZoom] = useState(1)
   const [verticalZoom, setVerticalZoom] = useState(1)
   const lanesColumnRef = useRef<HTMLDivElement>(null)
@@ -736,17 +758,6 @@ function App() {
     const timer = window.setTimeout(() => { void saveState() }, 1000)
     return () => window.clearTimeout(timer)
   }, [bpm, pitchSemitones, tempoRate, harmony, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled])
-
-  useEffect(() => {
-    const handleGlobalMouseUp = (e: MouseEvent) => {
-      if (isDraggingLoop || isDraggingLoopEdge) {
-        handleLoopMouseUp(e)
-      }
-    }
-    
-    window.addEventListener('mouseup', handleGlobalMouseUp)
-    return () => window.removeEventListener('mouseup', handleGlobalMouseUp)
-  }, [isDraggingLoop, isDraggingLoopEdge])
 
   useEffect(() => {
     const handleWheel = (e: WheelEvent) => {
@@ -3777,7 +3788,7 @@ function App() {
   const handleWaveformClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement
     if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
-    if (isDraggingLoop || isDraggingLoopEdge || isDraggingClipRef.current) return
+    if (isDraggingLoop || isDraggingClipRef.current) return
     if (marqueeLiveRef.current.didDrag) return
     seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
     if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
@@ -3791,16 +3802,120 @@ function App() {
     }
   }
 
+  const loopRangeFromPointer = (
+    live: NonNullable<typeof loopDragRef.current>,
+    now: number,
+    clientX: number,
+    rect: DOMRect,
+    layoutMax: number,
+    snapTime: (t: number) => number
+  ) => {
+    if (live.kind === 'create') {
+      return loopFromDrag(snapTime(live.originTime), snapTime(now), layoutMax)
+    }
+    if (live.kind === 'start' || live.kind === 'end') {
+      return resizeLoop(live.kind, snapTime(now), live.start0, live.end0, layoutMax)
+    }
+    const rawNow = clickTimeFromX(clientX, rect.left, rect.width, layoutMax)
+    const range = moveLoop(live.start0, live.end0, rawNow - live.originTime, layoutMax)
+    if (!live.snapOn) return range
+    const snappedStart = snapTime(range.start)
+    return moveLoop(snappedStart, snappedStart + (range.end - range.start), 0, layoutMax)
+  }
+
   const handleRulerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
+    e.preventDefault()
+    e.stopPropagation()
+
+    const ruler = e.currentTarget
+    const rect = ruler.getBoundingClientRect()
+    const layoutMax = timelineMaxRef.current || 100
+    const originTime = clickTimeFromX(e.clientX, rect.left, rect.width, layoutMax)
+    const currentStart = tempLoopStart ?? loopStart
+    const currentEnd = tempLoopEnd ?? loopEnd
+    const hit = hitTestLoop(e.clientX, rect.left, rect.width, layoutMax, currentStart, currentEnd)
+    const kind: LoopHit | 'create' = hit === 'empty' ? 'create' : hit
+    const start0 = currentStart ?? originTime
+    const end0 = currentEnd ?? originTime
+    const snapOn = snapEnabled
+
+    loopDragRef.current = {
+      kind,
+      originX: e.clientX,
+      originY: e.clientY,
+      originTime,
+      start0,
+      end0,
+      moved: false,
+      snapOn
+    }
+    setIsDraggingLoop(true)
+    setLoopHoverHit(hit)
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = kind === 'body' ? 'grabbing' : rulerCursor(hit === 'empty' ? 'empty' : hit)
+
+    const snapTime = (t: number) => applyLoopSnap(t, layoutMax, snapOn, snapToGrid)
+
+    const onMove = (ev: MouseEvent) => {
+      const live = loopDragRef.current
+      if (!live) return
+      const dist = Math.hypot(ev.clientX - live.originX, ev.clientY - live.originY)
+      const now = clickTimeFromX(ev.clientX, rect.left, rect.width, layoutMax)
+      if (!live.moved && isClickGesture(dist)) return
+      live.moved = true
+      const range = loopRangeFromPointer(live, now, ev.clientX, rect, layoutMax, snapTime)
+      tempLoopStartRef.current = range.start
+      tempLoopEndRef.current = range.end
+      setTempLoopStart(range.start)
+      setTempLoopEnd(range.end)
+    }
+
+    const onUp = (ev: MouseEvent) => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      const live = loopDragRef.current
+      loopDragRef.current = null
+      setIsDraggingLoop(false)
+      const dist = live ? Math.hypot(ev.clientX - live.originX, ev.clientY - live.originY) : 0
+      if (!live || !live.moved || isClickGesture(dist)) {
+        tempLoopStartRef.current = null
+        tempLoopEndRef.current = null
+        setTempLoopStart(null)
+        setTempLoopEnd(null)
+        seekToPosition(originTime, ev.shiftKey)
+        return
+      }
+      const now = clickTimeFromX(ev.clientX, rect.left, rect.width, layoutMax)
+      const range = loopRangeFromPointer(live, now, ev.clientX, rect, layoutMax, snapTime)
+      setLoopStart(range.start)
+      setLoopEnd(range.end)
+      if (live.kind === 'create') setIsLoopEnabled(true)
+      tempLoopStartRef.current = null
+      tempLoopEndRef.current = null
+      setTempLoopStart(null)
+      setTempLoopEnd(null)
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+
+  const handleRulerMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (loopDragRef.current) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const layoutMax = timelineMaxRef.current || 100
+    const start = tempLoopStart ?? loopStart
+    const end = tempLoopEnd ?? loopEnd
+    setLoopHoverHit(hitTestLoop(e.clientX, rect.left, rect.width, layoutMax, start, end))
   }
 
   const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
     const target = e.target as HTMLElement
     if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
-    if (isLoopEnabled && target.closest('.clip-region')) return
 
     const scroller = lanesColumnRef.current?.querySelector('.lanes-scroll-content') as HTMLElement | null
     const startX = e.clientX
@@ -3898,123 +4013,27 @@ function App() {
     setLoopEnd(null)
     setIsLoopEnabled(false)
     setIsDraggingLoop(false)
-    setIsDraggingLoopEdge(null)
-    setLoopDragStart(null)
+    tempLoopStartRef.current = null
+    tempLoopEndRef.current = null
     setTempLoopStart(null)
     setTempLoopEnd(null)
-    
-    // If currently playing, disable Transport loop immediately
+    setLoopHoverHit('empty')
     if (isPlaying) {
       Tone.getTransport().loop = false
     }
   }
 
   const handleLoopToggle = () => {
-    if (isLoopEnabled) {
-      // Turning loop off - clear the region
-      setLoopStart(null)
-      setLoopEnd(null)
-      setTempLoopStart(null)
-      setTempLoopEnd(null)
-    }
-    setIsLoopEnabled(!isLoopEnabled)
+    setIsLoopEnabled(prev => !prev)
   }
 
-  const handleLoopMouseDown = (e: React.MouseEvent<HTMLDivElement>, edge?: 'start' | 'end') => {
-    if (!isLoopEnabled) return
-
-    loopGestureRef.current = { x: e.clientX, y: e.clientY, distance: 0 }
-    
-    if (edge) {
-      e.stopPropagation()
-      setIsDraggingLoopEdge(edge)
-      setTempLoopStart(loopStart)
-      setTempLoopEnd(loopEnd)
-    } else {
-      const rect = e.currentTarget.getBoundingClientRect()
-      const clickX = e.clientX - rect.left
-      const percentage = clickX / rect.width
-      const clickTime = percentage * (timelineMaxRef.current || 100)
-      
-      setIsDraggingLoop(true)
-      setLoopDragStart(clickTime)
-      setTempLoopStart(clickTime)
-      setTempLoopEnd(clickTime)
-    }
-  }
-
-  const handleLoopMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isLoopEnabled) return
-    if (!isDraggingLoop && !isDraggingLoopEdge) return
-    
-    const dx = e.clientX - loopGestureRef.current.x
-    const dy = e.clientY - loopGestureRef.current.y
-    loopGestureRef.current.distance = Math.hypot(dx, dy)
-
-    const rect = e.currentTarget.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
-    const percentage = Math.max(0, Math.min(1, clickX / rect.width))
-    const currentTime = percentage * (timelineMaxRef.current || 100)
-    
-    if (isDraggingLoop && loopDragStart !== null) {
-      if (currentTime < loopDragStart) {
-        setTempLoopStart(currentTime)
-        setTempLoopEnd(loopDragStart)
-      } else {
-        setTempLoopStart(loopDragStart)
-        setTempLoopEnd(currentTime)
-      }
-    } else if (isDraggingLoopEdge === 'start') {
-      const currentEnd = tempLoopEnd ?? loopEnd
-      if (currentEnd === null || currentTime < currentEnd) {
-        setTempLoopStart(currentTime)
-      }
-    } else if (isDraggingLoopEdge === 'end') {
-      const currentStart = tempLoopStart ?? loopStart
-      if (currentStart === null || currentTime > currentStart) {
-        setTempLoopEnd(currentTime)
-      }
-    }
-  }
-
-  const handleLoopMouseUp = (e?: MouseEvent | React.MouseEvent) => {
-    if (e) {
-      const dx = e.clientX - loopGestureRef.current.x
-      const dy = e.clientY - loopGestureRef.current.y
-      loopGestureRef.current.distance = Math.hypot(dx, dy)
-    }
-    if ((isDraggingLoop || isDraggingLoopEdge) && isClickGesture(loopGestureRef.current.distance)) {
-      if (e) {
-        const lane = (e.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
-          ?? (document.querySelector('.track-content') as HTMLElement | null)
-        if (lane) {
-          const rect = lane.getBoundingClientRect()
-          const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
-          seekToPositionRef.current(raw, e.shiftKey)
-        }
-        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-          setSelectedClipIds(new Set())
-        }
-      }
-      setTempLoopStart(null)
-      setTempLoopEnd(null)
-      setIsDraggingLoop(false)
-      setIsDraggingLoopEdge(null)
-      setLoopDragStart(null)
-      loopGestureRef.current.distance = 0
-      return
-    }
-    if (isDraggingLoop || isDraggingLoopEdge) {
-      // Commit temporary values to actual state
-      if (tempLoopStart !== null) setLoopStart(tempLoopStart)
-      if (tempLoopEnd !== null) setLoopEnd(tempLoopEnd)
-      setTempLoopStart(null)
-      setTempLoopEnd(null)
-    }
-    setIsDraggingLoop(false)
-    setIsDraggingLoopEdge(null)
-    setLoopDragStart(null)
-    loopGestureRef.current.distance = 0
+  const loopThisClip = (trackIndex: number, clipId: string) => {
+    const clip = trackStatesRef.current[trackIndex]?.clips.find(c => c.id === clipId)
+    if (!clip) return
+    const range = loopFromClip(clip.offsetSeconds, clip.duration, timelineMaxRef.current || 100)
+    setLoopStart(range.start)
+    setLoopEnd(range.end)
+    setIsLoopEnabled(true)
   }
 
   useEffect(() => {
@@ -4327,13 +4346,13 @@ function App() {
           <button
             className={`header-btn icon-only toggle-btn ${isLoopEnabled ? 'active' : ''}`}
             onClick={handleLoopToggle}
-            title="Activar loop — arrastra en el timeline para marcar zona"
+            title="Activar loop — arrastrá en la regla para marcar la zona"
             aria-label="Loop"
             aria-pressed={isLoopEnabled}
           >
             <IconRepeat size={15} />
           </button>
-          {isLoopEnabled && (loopStart !== null || loopEnd !== null) && (
+          {(loopStart !== null && loopEnd !== null) && (
             <div className="loop-indicator">
               <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
               <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
@@ -4683,7 +4702,7 @@ function App() {
             ref={sidebarScrollRef}
             onScroll={() => syncVerticalScroll('sidebar')}
           >
-            <div className="ruler-spacer" style={{ height: harmony ? 54 : 32 }}>
+            <div className="ruler-spacer" style={{ height: harmony ? RULER_HEIGHT_PX + 22 : RULER_HEIGHT_PX }}>
               {harmony && <span className="chord-key">{harmony.key.label}</span>}
             </div>
             {trackStates.map((trackState, trackIndex) => (
@@ -4823,9 +4842,20 @@ function App() {
               ))}
             </div>
           )}
-          <div className="bar-ruler" onMouseDown={handleRulerMouseDown}>
-            {rulerBars}
-          </div>
+          <TimelineRuler
+            bars={rulerBars}
+            layoutMax={getLayoutMax()}
+            loopStart={loopStart}
+            loopEnd={loopEnd}
+            tempLoopStart={tempLoopStart}
+            tempLoopEnd={tempLoopEnd}
+            loopEnabled={isLoopEnabled}
+            hoverHit={loopHoverHit}
+            dragging={isDraggingLoop}
+            onMouseDown={handleRulerMouseDown}
+            onMouseMove={handleRulerMouseMove}
+            onMouseLeave={() => { if (!loopDragRef.current) setLoopHoverHit('empty') }}
+          />
           {(() => {
             const maxDur = getLayoutMax()
             return trackStates.map((trackState, trackIndex) => {
@@ -4843,7 +4873,6 @@ function App() {
               clips={trackState.clips}
               selectedClipIds={selectedClipIds}
               isLoopEnabled={isLoopEnabled}
-              isDraggingLoopEdge={!!isDraggingLoopEdge}
               loopStart={loopStart}
               loopEnd={loopEnd}
               tempLoopStart={tempLoopStart}
@@ -4852,9 +4881,6 @@ function App() {
               onDoubleClick={handleLaneDoubleClick}
               onMouseDown={handleTrackMouseDown}
               onContextMenuTrack={openContextMenu}
-              onLoopMouseDown={handleLoopMouseDown}
-              onLoopMouseMove={handleLoopMouseMove}
-              onLoopMouseUp={handleLoopMouseUp}
               onClipClick={handleClipClick}
               onResizeStart={handleResizeStart}
               onClipDragStart={handleClipDragStart}
@@ -4951,6 +4977,13 @@ function App() {
                 />
                 <div className="context-menu-sep" />
                 <ContextMenuItem icon={<IconSplit />} label="Dividir aquí" shortcut="S" onClick={() => runContextMenuAction('split')} />
+                <ContextMenuItem
+                  icon={<IconRepeat />}
+                  label="Loop a este clip"
+                  onClick={() => {
+                    if (contextMenu.clipId) loopThisClip(contextMenu.trackIndex, contextMenu.clipId)
+                  }}
+                />
                 <ContextMenuItem icon={<IconCopyPlus />} label="Duplicar" shortcut="Ctrl+D" onClick={() => runContextMenuAction('duplicate')} />
                 <ContextMenuItem icon={<IconTrash />} label="Eliminar" shortcut="Del" danger onClick={() => runContextMenuAction('delete')} />
               </>
@@ -5013,7 +5046,7 @@ function App() {
                 <li>• <strong>Click</strong> - Seleccionar clip y mover playhead</li>
                 <li>• <strong>Cmd/Ctrl+Click</strong> - Añadir o quitar un clip de la selección</li>
                 <li>• <strong>Shift+Click</strong> - Añadir clip a la selección</li>
-                <li>• <strong>Arrastrar en área vacía</strong> - Selección rectangular (varios tracks). Shift añade, Ctrl/Cmd alterna. Con Loop activo, arrastrar marca el loop</li>
+                <li>• <strong>Arrastrar en área vacía</strong> - Selección rectangular (varios tracks). Shift añade, Ctrl/Cmd alterna</li>
                 <li>• <strong>Arrastrar clip</strong> - Mover la selección junta (tiempo y pista)</li>
                 <li>• <strong>Alt+Click en clip</strong> - Dividir en el punto clickeado</li>
                 <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
@@ -5093,8 +5126,8 @@ function App() {
               <ul>
                 <li>• <strong>Espacio</strong> - Play/Pausa solo mientras Musicalia está enfocada y visible (no desde otras pestañas, apps ni teclas de media). El playhead se queda donde paró; la próxima vez sigue desde ahí o desde donde hiciste click. Si hay una grabación en curso, la detiene. No desplaza la página ni activa el botón enfocado</li>
                 <li>• <strong>Click en timeline, regla o clip</strong> - Mover playhead (siempre visible, también en pausa)</li>
-                <li>• <strong>Arrastrar en ruler</strong> - Marcar región de loop</li>
-                <li>• <strong>Shift+Click en ruler</strong> - Marcar loop desde playhead</li>
+                <li>• <strong>Arrastrar en la regla</strong> - Marcar región de loop (no mueve clips). Los bordes se redimensionan; el recuadro se desplaza entero</li>
+                <li>• <strong>Click derecho en un clip → Loop a este clip</strong> - Ajusta el loop a ese clip</li>
               </ul>
             </div>
             <button className="btn btn-primary" onClick={() => setShowHelp(false)}>Cerrar</button>

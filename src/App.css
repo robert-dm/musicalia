@@ -440,7 +440,7 @@
 }
 
 .ruler-spacer {
-  height: 32px;
+  height: 44px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
   display: flex;
@@ -582,10 +582,13 @@
 
 .bar-ruler {
   position: relative;
-  height: 32px;
+  height: 44px;
   background: var(--bg-app);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  cursor: crosshair;
+  user-select: none;
+  z-index: 6;
 }
 
 .bar-marker {
@@ -605,11 +608,12 @@
   color: var(--accent);
   font-weight: 600;
   user-select: none;
+  pointer-events: none;
 }
 
 .beat-marker {
   position: absolute;
-  top: 20px;
+  top: 28px;
   bottom: 0;
   width: 1px;
   background: var(--border);
@@ -692,10 +696,6 @@
   height: 100%;
   user-select: none;
   overflow: visible;
-}
-
-.clip-region.dragging-loop {
-  cursor: crosshair;
 }
 
 .clip-wrapper {
@@ -961,33 +961,69 @@
   pointer-events: none;
 }
 
-.loop-marker.draggable {
-  pointer-events: auto;
-  width: 8px;
-  margin-left: -4px;
-  cursor: ew-resize;
-  transition: width var(--transition), background var(--transition);
-}
-
-.loop-marker.draggable:hover {
-  width: 12px;
-  margin-left: -6px;
-}
-
-.loop-marker.loop-start,
-.loop-marker.loop-end {
-  background: var(--loop);
-}
-
 .loop-region {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: rgba(240, 178, 122, 0.14);
+  background: color-mix(in srgb, var(--loop) 10%, transparent);
   pointer-events: none;
   z-index: 4;
-  border-left: 2px solid var(--loop);
-  border-right: 2px solid var(--loop);
+  border-left: 1px solid color-mix(in srgb, var(--loop) 35%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--loop) 35%, transparent);
+}
+
+.loop-region.armed {
+  background: color-mix(in srgb, var(--loop) 16%, transparent);
+  border-left-color: color-mix(in srgb, var(--loop) 55%, transparent);
+  border-right-color: color-mix(in srgb, var(--loop) 55%, transparent);
+}
+
+.ruler-loop-band {
+  position: absolute;
+  top: 6px;
+  height: 32px;
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--loop) 32%, var(--bg-raised));
+  border: 1px solid var(--loop);
+  border-radius: 5px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.bar-ruler.loop-armed .ruler-loop-band {
+  background: color-mix(in srgb, var(--loop) 42%, var(--bg-raised));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--loop) 35%, transparent);
+}
+
+.ruler-loop-handle {
+  position: absolute;
+  top: 6px;
+  width: 10px;
+  height: 32px;
+  margin-left: -5px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.ruler-loop-handle::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 3px;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--loop);
+}
+
+.ruler-loop-handle.start::before {
+  border-top-left-radius: 6px;
+  border-bottom-left-radius: 6px;
+}
+
+.ruler-loop-handle.end::before {
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
 }
 
 .toast,

@@ -1,5 +1,6 @@
 import { memo, useRef } from 'react'
 import { ClipWaveform } from './ClipWaveform'
+import { displayLoop } from './loopRegion'
 import { laneClipDataEqual, trackLaneDataEqual } from './trackRenderMemo'
 
 export interface LaneClip {
@@ -20,7 +21,6 @@ interface TrackLaneProps {
   clips: LaneClip[]
   selectedClipIds: Set<string>
   isLoopEnabled: boolean
-  isDraggingLoopEdge: boolean
   loopStart: number | null
   loopEnd: number | null
   tempLoopStart: number | null
@@ -29,9 +29,6 @@ interface TrackLaneProps {
   onDoubleClick: (trackIndex: number) => void
   onMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void
   onContextMenuTrack: (e: React.MouseEvent, trackIndex: number, clipId: string | null) => void
-  onLoopMouseDown: (e: React.MouseEvent<HTMLDivElement>, edge?: 'start' | 'end') => void
-  onLoopMouseMove: (e: React.MouseEvent<HTMLDivElement>) => void
-  onLoopMouseUp: (e?: MouseEvent | React.MouseEvent) => void
   onClipClick: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
   onResizeStart: (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
   onClipDragStart: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
@@ -66,6 +63,7 @@ const LaneClipView = memo(function LaneClipView({
   return (
     <div
       data-clip-id={clip.id}
+      data-clip-offset={String(clip.offsetSeconds)}
       data-render-count={renderCountRef.current}
       className={`clip-wrapper ${selected ? 'selected' : ''}`}
       style={{
@@ -115,7 +113,6 @@ export const TrackLane = memo(function TrackLane({
   clips,
   selectedClipIds,
   isLoopEnabled,
-  isDraggingLoopEdge,
   loopStart,
   loopEnd,
   tempLoopStart,
@@ -124,9 +121,6 @@ export const TrackLane = memo(function TrackLane({
   onDoubleClick,
   onMouseDown,
   onContextMenuTrack,
-  onLoopMouseDown,
-  onLoopMouseMove,
-  onLoopMouseUp,
   onClipClick,
   onResizeStart,
   onClipDragStart,
@@ -148,16 +142,7 @@ export const TrackLane = memo(function TrackLane({
       onContextMenu={(e) => onContextMenuTrack(e, trackIndex, null)}
     >
       {hasClips ? (
-        <div
-          className="clip-region"
-          onMouseDown={(e) => {
-            if (isLoopEnabled && e.button === 0 && !isDraggingLoopEdge) {
-              onLoopMouseDown(e)
-            }
-          }}
-          onMouseMove={onLoopMouseMove}
-          onMouseUp={onLoopMouseUp}
-        >
+        <div className="clip-region">
           {clips.map((clip) => (
             <LaneClipView
               key={clip.id}
@@ -171,41 +156,26 @@ export const TrackLane = memo(function TrackLane({
               onClipDragStart={onClipDragStart}
             />
           ))}
-          {(loopStart !== null || tempLoopStart !== null) && (
-            <div
-              className="loop-marker loop-start draggable"
-              style={{
-                left: `${((tempLoopStart ?? loopStart)! / maxDur) * 100}%`
-              }}
-              onMouseDown={(e) => onLoopMouseDown(e, 'start')}
-              title="Arrastra para ajustar inicio"
-            />
-          )}
-          {(loopEnd !== null || tempLoopEnd !== null) && (
-            <div
-              className="loop-marker loop-end draggable"
-              style={{
-                left: `${((tempLoopEnd ?? loopEnd)! / maxDur) * 100}%`
-              }}
-              onMouseDown={(e) => onLoopMouseDown(e, 'end')}
-              title="Arrastra para ajustar fin"
-            />
-          )}
-          {((loopStart !== null && loopEnd !== null) || (tempLoopStart !== null && tempLoopEnd !== null)) && (
-            <div
-              className="loop-region"
-              style={{
-                left: `${((tempLoopStart ?? loopStart)! / maxDur) * 100}%`,
-                width: `${(((tempLoopEnd ?? loopEnd)! - (tempLoopStart ?? loopStart)!) / maxDur) * 100}%`
-              }}
-            />
-          )}
         </div>
       ) : (
         <div className="empty-lane">
           <span className="import-hint">Doble clic o arrastrá un archivo de audio</span>
         </div>
       )}
+      {(() => {
+        const loop = displayLoop(loopStart, loopEnd, tempLoopStart, tempLoopEnd)
+        if (!loop) return null
+        return (
+          <div
+            className={`loop-region${isLoopEnabled ? ' armed' : ''}`}
+            data-testid={trackIndex === 0 ? 'lane-loop-overlay' : undefined}
+            style={{
+              left: `${(loop.start / maxDur) * 100}%`,
+              width: `${((loop.end - loop.start) / maxDur) * 100}%`
+            }}
+          />
+        )
+      })()}
       {isRecordingLane && (
         <div
           className="recording-clip"

@@ -40,6 +40,34 @@ async function writeCache(url: string, bytes: Uint8Array): Promise<void> {
   }
 }
 
+export async function fetchDemucsModelFiles(
+  graphUrl: string,
+  graphBytes: number,
+  dataUrl: string,
+  dataBytes: number,
+  onProgress: (loaded: number, total: number, cached: boolean, part: 'graph' | 'data') => void,
+  signal?: AbortSignal
+): Promise<{ graph: Uint8Array; data: Uint8Array }> {
+  const totalHint = graphBytes + dataBytes
+  const graph = await fetchModelWithProgress(
+    graphUrl,
+    graphBytes,
+    (loaded, _total, cached) => {
+      onProgress(loaded, totalHint, cached, 'graph')
+    },
+    signal
+  )
+  const data = await fetchModelWithProgress(
+    dataUrl,
+    dataBytes,
+    (loaded, _total, cached) => {
+      onProgress(graph.byteLength + loaded, totalHint, cached, 'data')
+    },
+    signal
+  )
+  return { graph, data }
+}
+
 export async function fetchModelWithProgress(
   url: string,
   expectedBytes: number,

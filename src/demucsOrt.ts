@@ -1,4 +1,5 @@
 import type * as OrtNS from 'onnxruntime-web'
+import { DEMUCS_EXTERNAL_DATA_PATH } from './demucsModel'
 
 const ORT_WASM_PATHS = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/'
 
@@ -15,32 +16,70 @@ function restoreWasmEnv(ort: typeof OrtNS, snap: ReturnType<typeof snapshotWasmE
   Object.assign(ort.env.wasm, snap)
 }
 
-export async function hasWebGPU(): Promise<boolean> {
-  const gpu = (navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown> } }).gpu
-  if (!gpu) return false
-  try {
-    return !!(await gpu.requestAdapter())
-  } catch {
-    return false
+export function isDedicatedWorker(): boolean {
+  return typeof self !== 'undefined' && typeof (self as { document?: unknown }).document === 'undefined'
+}
+
+export async function probeWebGpu(): Promise<{
+  inWorker: boolean
+  hasNavigatorGpu: boolean
+  adapter: boolean
+}> {
+  const inWorker = isDedicatedWorker()
+  const gpu = (globalThis as unknown as { navigator?: { gpu?: { requestAdapter: () => Promise<unknown> } } })
+    .navigator?.gpu
+  const hasNavigatorGpu = !!gpu
+  let adapter = false
+  if (gpu) {
+    try {
+      adapter = !!(await gpu.requestAdapter())
+    } catch (error) {
+      console.warn('[HT-Demucs] navigator.gpu.requestAdapter failed', { inWorker, error })
+    }
   }
+  console.info('[HT-Demucs] WebGPU probe', { inWorker, hasNavigatorGpu, adapter })
+  return { inWorker, hasNavigatorGpu, adapter }
+}
+
+export async function hasWebGPU(): Promise<boolean> {
+  const probe = await probeWebGpu()
+  return probe.adapter
 }
 
 export function wasmSessionOptions() {
   return {
-    graphOptimizationLevel: 'basic' as const,
+    graphOptimizationLevel: 'disabled' as const,
     enableCpuMemArena: false,
     enableMemPattern: false,
+    executionMode: 'sequential' as const,
+    intraOpNumThreads: 1,
+    interOpNumThreads: 1,
     executionProviders: ['wasm'] as const,
+    extra: {
+      session: {
+        disable_prepacking: '1',
+      },
+    },
   }
 }
 
 export function webgpuSessionOptions() {
   return {
-    graphOptimizationLevel: 'basic' as const,
+    graphOptimizationLevel: 'disabled' as const,
     enableCpuMemArena: false,
     enableMemPattern: false,
+    executionMode: 'sequential' as const,
     executionProviders: ['webgpu'] as const,
+    extra: {
+      session: {
+        disable_prepacking: '1',
+      },
+    },
   }
+}
+
+export function demucsExternalData(dataBytes: Uint8Array) {
+  return [{ path: DEMUCS_EXTERNAL_DATA_PATH, data: dataBytes }]
 }
 
 /**
@@ -80,6 +119,19 @@ export async function loadDemucsOnnxRuntime(preferWebGPU: boolean): Promise<{
     provider,
     restore: () => restoreWasmEnv(ort, snap),
   }
+}
+
+export async function createDemucsSession(
+  ort: typeof OrtNS,
+  provider: 'webgpu' | 'wasm',
+  graphBytes: Uint8Array,
+  dataBytes: Uint8Array
+): Promise<OrtNS.InferenceSession> {
+  const options = provider === 'webgpu' ? webgpuSessionOptions() : wasmSessionOptions()
+  return ort.InferenceSession.create(graphBytes, {
+    ...options,
+    externalData: demucsExternalData(dataBytes),
+  })
 }
 
 export function isMobileUserAgent(ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''): boolean {

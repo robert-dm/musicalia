@@ -160,7 +160,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0083b'
+const APP_VERSION = '0.0084b'
 
 interface ClipboardClip {
   buffer: AudioBuffer

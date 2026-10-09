@@ -1,8 +1,8 @@
 /// <reference lib="webworker" />
-import { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_URL } from './demucsModel'
+import { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_DATA_BYTES, DEMUCS_MODEL_DATA_URL, DEMUCS_MODEL_URL } from './demucsModel'
 import { inferDemucsChunks } from './demucsInfer'
 import { fetchModelWithProgress } from './modelDownload'
-import { hasWebGPU, loadDemucsOnnxRuntime, wasmSessionOptions, webgpuSessionOptions } from './demucsOrt'
+import { createDemucsSession, hasWebGPU, loadDemucsOnnxRuntime } from './demucsOrt'
 import type { StemSeparationProgress } from './stemProgress'
 
 export type DemucsWorkerRequest = {
@@ -22,15 +22,39 @@ function postProgress(progress: StemSeparationProgress): void {
   self.postMessage(msg)
 }
 
-async function createSession(
-  ort: typeof import('onnxruntime-web'),
-  provider: 'webgpu' | 'wasm',
-  modelBytes: Uint8Array,
-  onProgress: (p: StemSeparationProgress) => void
+async function loadGraphAndWeights(
+  onProgress: (p: StemSeparationProgress) => void,
+  signal?: AbortSignal
 ) {
-  onProgress({ progress: 24, stage: provider === 'webgpu' ? 'Creando sesión WebGPU…' : 'Creando sesión WASM…' })
-  const options = provider === 'webgpu' ? webgpuSessionOptions() : wasmSessionOptions()
-  return ort.InferenceSession.create(modelBytes, options)
+  const graphBytes = await fetchModelWithProgress(
+    DEMUCS_MODEL_URL,
+    DEMUCS_MODEL_BYTES,
+    (loadedBytes, total, cached) => {
+      const frac = total > 0 ? loadedBytes / total : 0
+      onProgress({
+        progress: 4 + frac * 8,
+        stage: cached
+          ? 'Modelo HT-Demucs en caché'
+          : `Descargando grafo HT-Demucs… ${Math.round(frac * 100)}%`,
+      })
+    },
+    signal
+  )
+  const dataBytes = await fetchModelWithProgress(
+    DEMUCS_MODEL_DATA_URL,
+    DEMUCS_MODEL_DATA_BYTES,
+    (loadedBytes, total, cached) => {
+      const frac = total > 0 ? loadedBytes / total : 0
+      onProgress({
+        progress: 12 + frac * 10,
+        stage: cached
+          ? 'Pesos HT-Demucs en caché'
+          : `Descargando pesos HT-Demucs… ${Math.round(frac * 100)}%`,
+      })
+    },
+    signal
+  )
+  return { graphBytes, dataBytes }
 }
 
 self.onmessage = async (event: MessageEvent<DemucsWorkerRequest>) => {
@@ -38,33 +62,29 @@ self.onmessage = async (event: MessageEvent<DemucsWorkerRequest>) => {
   if (!data || data.type !== 'run') return
   let restore: (() => void) | undefined
   try {
-    const preferWebGPU = data.preferWebGPU && await hasWebGPU()
+    const workerGpu = await hasWebGPU()
+    const preferWebGPU = data.preferWebGPU && workerGpu
+    if (data.preferWebGPU && !workerGpu) {
+      console.info('[HT-Demucs] navigator.gpu ausente en el worker; WASM en el worker')
+    }
     postProgress({
       progress: 3,
       stage: preferWebGPU ? 'Inicializando (WebGPU)…' : 'Inicializando (WASM)…',
     })
     const loaded = await loadDemucsOnnxRuntime(preferWebGPU)
     restore = loaded.restore
-    const { ort } = loaded
     let provider = loaded.provider
+    let ort = loaded.ort
 
-    const modelBytes = await fetchModelWithProgress(
-      DEMUCS_MODEL_URL,
-      DEMUCS_MODEL_BYTES,
-      (loadedBytes, total, cached) => {
-        const frac = total > 0 ? loadedBytes / total : 0
-        postProgress({
-          progress: 4 + frac * 18,
-          stage: cached
-            ? 'Modelo HT-Demucs en caché'
-            : `Descargando modelo HT-Demucs… ${Math.round(frac * 100)}%`,
-        })
-      }
-    )
+    const { graphBytes, dataBytes } = await loadGraphAndWeights(postProgress)
 
+    postProgress({
+      progress: 24,
+      stage: provider === 'webgpu' ? 'Creando sesión WebGPU…' : 'Creando sesión WASM…',
+    })
     let session
     try {
-      session = await createSession(ort, provider, modelBytes, postProgress)
+      session = await createDemucsSession(ort, provider, graphBytes, dataBytes)
     } catch (error) {
       if (provider === 'webgpu') {
         console.warn('[HT-Demucs] WebGPU falló, reintentando WASM', error)
@@ -73,12 +93,14 @@ self.onmessage = async (event: MessageEvent<DemucsWorkerRequest>) => {
         const wasm = await loadDemucsOnnxRuntime(false)
         restore = wasm.restore
         provider = 'wasm'
-        session = await createSession(wasm.ort, 'wasm', modelBytes, postProgress)
+        ort = wasm.ort
+        session = await createDemucsSession(wasm.ort, 'wasm', graphBytes, dataBytes)
       } else {
         throw error
       }
     }
-    modelBytes.fill(0)
+    graphBytes.fill(0)
+    dataBytes.fill(0)
 
     const outs = await inferDemucsChunks(ort, session, data.left, data.right, postProgress)
     try {

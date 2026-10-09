@@ -1,4 +1,4 @@
-import { downloadFraction, fetchModelWithProgress } from './modelDownload'
+import { downloadFraction, fetchDemucsModelFiles, fetchModelWithProgress } from './modelDownload'
 
 let failed = 0
 function assert(cond: boolean, msg: string) {
@@ -51,6 +51,15 @@ async function run() {
     cancelled = error instanceof Error && error.message.includes('Cancelado')
   }
   assert(cancelled, 'aborted fetch throws Spanish cancel error')
+
+  const bytesB = await fetchDemucsModelFiles(
+    'https://example.test/model.onnx',
+    8,
+    'https://example.test/model.onnx.data',
+    8,
+    () => {}
+  )
+  assert(bytesB.graph.byteLength === 8 && bytesB.data.byteLength === 8, 'pair fetch returns graph+data')
 
   globalThis.fetch = originalFetch
 }

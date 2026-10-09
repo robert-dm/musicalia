@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
 import { flushSync } from 'react-dom'
 import * as Tone from 'tone'
 import JSZip from 'jszip'
@@ -93,8 +93,8 @@ import {
 import { clipBufferSignature } from './trackRenderMemo'
 import {
   applyClipTrim,
-  applyTrimPreviewStyles,
-  deltaTimeFromLanePx,
+  applyTrimPreviewPx,
+  clearTrimPreviewPx,
   trimStatesEqual,
   type ClipTrimEdge,
   type ClipTrimState
@@ -112,8 +112,7 @@ import {
   clickTimeFromX,
   isClickGesture,
   persistSnapEnabled,
-  readStoredSnapEnabled,
-  snapActiveDuringDrag
+  readStoredSnapEnabled
 } from './playheadSeek'
 import {
   dataTransferHasFiles,
@@ -200,7 +199,6 @@ import {
   IconVolume2
 } from './uiIcons'
 import {
-  clampGroupTimeDelta,
   clampGroupTrackDelta,
   clientRectsIntersect,
   commitEditedTrackName,
@@ -211,8 +209,23 @@ import {
   pastePlacement,
   resolveTrackName
 } from './clipSelection'
+import {
+  beginClipInteract,
+  commitTimeDelta,
+  dragPreviewDx,
+  endClipInteract,
+  measurePxPerSec,
+  snappedDragTimeDelta
+} from './clipDrag'
+import {
+  ZOOM_SLIDER_MAX,
+  anchoredScrollLeft,
+  sliderToZoom,
+  wheelZoom,
+  zoomToSlider
+} from './timelineZoom'
 
-const APP_VERSION = '0.0087b'
+const APP_VERSION = '0.0088b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -346,6 +359,8 @@ function App() {
   const tempLoopStartRef = useRef<number | null>(null)
   const tempLoopEndRef = useRef<number | null>(null)
   const [horizontalZoom, setHorizontalZoom] = useState(1)
+  const horizontalZoomRef = useRef(horizontalZoom)
+  horizontalZoomRef.current = horizontalZoom
   const [verticalZoom, setVerticalZoom] = useState(1)
   const lanesColumnRef = useRef<HTMLDivElement>(null)
   const [showStemDialog, setShowStemDialog] = useState(false)
@@ -433,6 +448,8 @@ function App() {
     clipId: string
     edge: ClipTrimEdge
     startX: number
+    pxPerSec: number
+    origWidthPx: number
     orig: ClipTrimState & { bufferDuration: number }
     next: ClipTrimState
     wrapper: HTMLElement | null
@@ -818,23 +835,36 @@ function App() {
   }, [bpm, pitchSemitones, tempoRate, harmony, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled, currentProjectName, currentProjectId])
 
   useEffect(() => {
+    const scroller = lanesScrollRef.current
+    if (!scroller) return
     const handleWheel = (e: WheelEvent) => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault()
-        const delta = e.deltaY > 0 ? -0.1 : 0.1
-        setHorizontalZoom(prev => Math.max(0.5, Math.min(4, prev + delta)))
+        const rect = scroller.getBoundingClientRect()
+        const mouseX = e.clientX - rect.left
+        const oldZoom = horizontalZoomRef.current
+        const next = wheelZoom(oldZoom, e.deltaY)
+        if (next === oldZoom) return
+        const nextScroll = anchoredScrollLeft({
+          scrollLeft: scroller.scrollLeft,
+          mouseX,
+          oldZoom,
+          newZoom: next,
+          viewportWidth: scroller.clientWidth
+        })
+        horizontalZoomRef.current = next
+        setHorizontalZoom(next)
+        requestAnimationFrame(() => {
+          scroller.scrollLeft = Math.max(0, nextScroll)
+        })
       } else if (e.shiftKey) {
         e.preventDefault()
         const delta = e.deltaY > 0 ? -0.1 : 0.1
         setVerticalZoom(prev => Math.max(0.5, Math.min(3, prev + delta)))
       }
     }
-
-    const lanesColumn = lanesColumnRef.current
-    if (lanesColumn) {
-      lanesColumn.addEventListener('wheel', handleWheel, { passive: false })
-      return () => lanesColumn.removeEventListener('wheel', handleWheel)
-    }
+    scroller.addEventListener('wheel', handleWheel, { passive: false })
+    return () => scroller.removeEventListener('wheel', handleWheel)
   }, [])
 
   useEffect(() => {
@@ -2674,7 +2704,7 @@ function App() {
     isDraggingClipRef.current = false
   }
 
-  const handleClipDragStart = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
+  const handleClipDragStart = (e: React.PointerEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
     if (e.button !== 0) return
     if (trimLiveRef.current?.active) return
@@ -2690,6 +2720,10 @@ function App() {
       setSelectedClipIds(selected)
     }
 
+    const target = e.currentTarget
+    target.setPointerCapture(e.pointerId)
+    beginClipInteract()
+
     const startX = e.clientX
     const startY = e.clientY
     const startOffset = clip.offsetSeconds
@@ -2697,6 +2731,12 @@ function App() {
     const startedWithAlt = e.altKey
     const zoom = verticalZoom
     const snapOn = snapEnabled
+    e.preventDefault()
+    const layoutMax = timelineMaxRef.current || 100
+    const inner = document.querySelector('.lanes-scroll-inner') as HTMLElement | null
+    const laneEl = (document.querySelector('.track-content') as HTMLElement | null)
+    const laneWidth = (inner || laneEl)?.getBoundingClientRect().width || 1
+    const pxPerSec = measurePxPerSec(laneWidth, layoutMax)
 
     let minOffset = Infinity
     let minTrack = Infinity
@@ -2713,6 +2753,7 @@ function App() {
     if (minTrack === Infinity) minTrack = startTrack
     if (maxTrack === -Infinity) maxTrack = startTrack
 
+    let previewDx = 0
     isDraggingClipRef.current = true
     dragLiveRef.current = {
       tempOffset: startOffset,
@@ -2740,13 +2781,9 @@ function App() {
       })
     }
 
-    const applyGroupDragPreview = (timeDelta: number, trackDelta: number) => {
+    const applyGroupDragPreview = (dx: number, trackDelta: number) => {
       const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      const laneWidth = (lanes[0] as HTMLElement).getBoundingClientRect().width
-      const layoutMax = timelineMaxRef.current || 100
       const trackHeight = 88 * zoom
-      const dx = (timeDelta / layoutMax) * laneWidth
       const dy = trackDelta * trackHeight
       const selectedTracks = new Set<number>()
       document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
@@ -2769,9 +2806,7 @@ function App() {
       })
     }
 
-    const onMove = (ev: MouseEvent) => {
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
+    const onMove = (ev: PointerEvent) => {
       const deltaX = ev.clientX - startX
       const deltaY = ev.clientY - startY
       const distance = Math.hypot(deltaX, deltaY)
@@ -2780,12 +2815,26 @@ function App() {
       if (isClickGesture(distance)) return
       if (live.threshold && distance < 5) return
 
-      const firstLane = lanes[0] as HTMLElement
-      const rect = firstLane.getBoundingClientRect()
-      const deltaTime = deltaTimeFromLanePx(deltaX, rect.width, timelineMaxRef.current || 100)
-      const rawOffset = startOffset + deltaTime
-      const newOffset = snapActiveDuringDrag(snapOn, ev.shiftKey) ? snapToGrid(rawOffset) : rawOffset
-      let timeDelta = clampGroupTimeDelta(live.minOffset, newOffset - startOffset)
+      const snapped = snappedDragTimeDelta({
+        clientX: ev.clientX,
+        startX,
+        pxPerSec,
+        startOffset,
+        minOffset: live.minOffset,
+        snapEnabled: snapOn,
+        shiftKey: ev.shiftKey,
+        snapToGrid
+      })
+      const timeDelta = snapped ?? commitTimeDelta({
+        clientX: ev.clientX,
+        startX,
+        pxPerSec,
+        startOffset,
+        minOffset: live.minOffset,
+        snapEnabled: snapOn,
+        shiftKey: ev.shiftKey,
+        snapToGrid
+      })
       const trackHeight = 88 * zoom
       const rawTrackDelta = Math.round(deltaY / trackHeight)
       const trackDelta = clampGroupTrackDelta(live.minTrack, live.maxTrack, rawTrackDelta, trackStatesRef.current.length)
@@ -2793,24 +2842,30 @@ function App() {
       live.tempTrack = startTrack + trackDelta
       live.timeDelta = timeDelta
       live.trackDelta = trackDelta
+      previewDx = dragPreviewDx(ev.clientX, startX, pxPerSec, snapped)
 
       if (dragRafRef.current == null) {
         dragRafRef.current = requestAnimationFrame(() => {
           dragRafRef.current = null
-          applyGroupDragPreview(dragLiveRef.current.timeDelta, dragLiveRef.current.trackDelta)
+          applyGroupDragPreview(previewDx, dragLiveRef.current.trackDelta)
         })
       }
     }
 
-    const onUp = (ev: MouseEvent) => {
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
+    const finishPointer = (ev: PointerEvent) => {
+      try {
+        if (target.hasPointerCapture(e.pointerId)) target.releasePointerCapture(e.pointerId)
+      } catch { /* already released */ }
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', finishPointer)
+      window.removeEventListener('pointercancel', finishPointer)
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
       if (dragRafRef.current != null) {
         cancelAnimationFrame(dragRafRef.current)
         dragRafRef.current = null
       }
+      endClipInteract()
       const live = dragLiveRef.current
       isDraggingClipRef.current = false
       if (isClickGesture(live.distance) || (live.threshold && live.distance < 5)) {
@@ -2825,7 +2880,16 @@ function App() {
         return
       }
 
-      const timeDelta = live.timeDelta
+      const timeDelta = commitTimeDelta({
+        clientX: ev.clientX,
+        startX,
+        pxPerSec,
+        startOffset,
+        minOffset: live.minOffset,
+        snapEnabled: snapOn,
+        shiftKey: ev.shiftKey,
+        snapToGrid
+      })
       const trackDelta = live.trackDelta
       const currentTracks = trackStatesRef.current
       saveUndo()
@@ -2883,13 +2947,14 @@ function App() {
       setTrackStates(nextTracks)
     }
 
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', finishPointer)
+    window.addEventListener('pointercancel', finishPointer)
     document.body.style.userSelect = 'none'
     document.body.style.cursor = 'move'
   }
 
-  const handleResizeStart = (e: React.MouseEvent, trackIndex: number, clipId: string, edge: ClipTrimEdge) => {
+  const handleResizeStart = (e: React.PointerEvent, trackIndex: number, clipId: string, edge: ClipTrimEdge) => {
     e.stopPropagation()
     e.preventDefault()
     if (e.button !== 0) return
@@ -2897,7 +2962,11 @@ function App() {
     const clip = trackStatesRef.current[trackIndex]?.clips.find(c => c.id === clipId)
     if (!clip) return
 
-    const wrapper = (e.currentTarget as HTMLElement).closest('.clip-wrapper') as HTMLElement | null
+    const target = e.currentTarget
+    target.setPointerCapture(e.pointerId)
+    beginClipInteract()
+
+    const wrapper = target.closest('.clip-wrapper') as HTMLElement | null
     const waveform = wrapper?.querySelector('[data-waveform-full]') as HTMLElement | null
     const orig: ClipTrimState & { bufferDuration: number } = {
       sourceStart: clip.sourceStart,
@@ -2905,12 +2974,19 @@ function App() {
       offsetSeconds: clip.offsetSeconds,
       bufferDuration: clip.buffer.duration
     }
+    const inner = document.querySelector('.lanes-scroll-inner') as HTMLElement | null
+    const laneEl = document.querySelector('.track-content') as HTMLElement | null
+    const laneWidth = (inner || laneEl)?.getBoundingClientRect().width || 1
+    const pxPerSec = measurePxPerSec(laneWidth, timelineMaxRef.current || 100)
+    const origWidthPx = wrapper?.getBoundingClientRect().width || Math.max(1, orig.duration * pxPerSec)
     trimLiveRef.current = {
       active: true,
       trackIndex,
       clipId,
       edge,
       startX: e.clientX,
+      pxPerSec,
+      origWidthPx,
       orig,
       next: { sourceStart: orig.sourceStart, duration: orig.duration, offsetSeconds: orig.offsetSeconds },
       wrapper,
@@ -2918,47 +2994,53 @@ function App() {
     }
     dragLiveRef.current.distance = 0
 
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const live = trimLiveRef.current
       if (!live?.active) return
-      const lanes = document.querySelectorAll('.track-content')
-      if (lanes.length === 0) return
-      const laneWidth = (lanes[0] as HTMLElement).getBoundingClientRect().width
-      const deltaTime = deltaTimeFromLanePx(ev.clientX - live.startX, laneWidth, timelineMaxRef.current || 100)
+      const deltaTime = (ev.clientX - live.startX) / live.pxPerSec
       dragLiveRef.current.distance = Math.max(dragLiveRef.current.distance, Math.abs(ev.clientX - live.startX))
-      const next = applyClipTrim(live.edge, deltaTime, live.orig)
-      live.next = next
+      live.next = applyClipTrim(live.edge, deltaTime, live.orig)
       if (resizeRafRef.current == null) {
         resizeRafRef.current = requestAnimationFrame(() => {
           resizeRafRef.current = null
           const current = trimLiveRef.current
           if (!current?.active || !current.wrapper) return
-          applyTrimPreviewStyles(
+          applyTrimPreviewPx(
             current.wrapper,
             current.waveform,
             current.next,
-            current.orig.bufferDuration,
-            timelineMaxRef.current || 100
+            current.orig,
+            current.origWidthPx,
+            current.pxPerSec,
+            current.orig.bufferDuration
           )
         })
       }
     }
 
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
+    const onUp = (ev: PointerEvent) => {
+      try {
+        if (target.hasPointerCapture(e.pointerId)) target.releasePointerCapture(e.pointerId)
+      } catch { /* already released */ }
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
       if (resizeRafRef.current != null) {
         cancelAnimationFrame(resizeRafRef.current)
         resizeRafRef.current = null
       }
+      endClipInteract()
       const live = trimLiveRef.current
       trimLiveRef.current = null
       if (!live) return
-      if (trimStatesEqual(live.orig, live.next)) return
+      const deltaTime = (ev.clientX - live.startX) / live.pxPerSec
+      const next = applyClipTrim(live.edge, deltaTime, live.orig)
+      if (live.wrapper) clearTrimPreviewPx(live.wrapper)
+      if (trimStatesEqual(live.orig, next)) return
       saveUndo()
-      const { trackIndex: ti, clipId: id, next } = live
+      const { trackIndex: ti, clipId: id } = live
       setTrackStates(prev => prev.map((track, i) => {
         if (i !== ti) return track
         return {
@@ -2968,8 +3050,9 @@ function App() {
       }))
     }
 
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
     document.body.style.userSelect = 'none'
     document.body.style.cursor = 'ew-resize'
   }
@@ -4493,42 +4576,6 @@ function App() {
     }
   }, [contextMenu])
 
-  const rulerBars = useMemo(() => {
-    const maxDuration = getMaxDuration()
-    if (maxDuration === 0) return null
-    
-    const secondsPerBeat = 60 / bpm
-    const beatsPerBar = 4
-    const secondsPerBar = secondsPerBeat * beatsPerBar
-    const totalBars = Math.ceil(maxDuration / secondsPerBar)
-    const bars = []
-    
-    for (let bar = 0; bar <= totalBars; bar++) {
-      const barTime = bar * secondsPerBar
-      const position = (barTime / maxDuration) * 100
-      
-      if (position <= 100) {
-        bars.push(
-          <div key={bar} className="bar-marker" style={{ left: `${position}%` }}>
-            <span className="bar-number">{bar + 1}</span>
-          </div>
-        )
-        
-        for (let beat = 1; beat < beatsPerBar; beat++) {
-          const beatTime = barTime + beat * secondsPerBeat
-          const beatPosition = (beatTime / maxDuration) * 100
-          if (beatPosition <= 100) {
-            bars.push(
-              <div key={`${bar}-${beat}`} className="beat-marker" style={{ left: `${beatPosition}%` }} />
-            )
-          }
-        }
-      }
-    }
-    
-    return bars
-  }, [bpm, trackStates])
-
   return (
     <div
       className={`app${fileDragActive ? ' file-drag' : ''}`}
@@ -4785,16 +4832,20 @@ function App() {
             </span>
           </div>
           <div className="zoom-controls">
-            <span className="zoom-label" title="Zoom horizontal (Ctrl+Rueda)"><IconMoveHorizontal size={14} /></span>
+            <span className="zoom-label" title="Zoom horizontal (Ctrl/Cmd+Rueda)"><IconMoveHorizontal size={14} /></span>
             <input
               type="range"
               className="zoom-slider"
-              min="0.5"
-              max="4"
-              step="0.1"
-              value={horizontalZoom}
-              onChange={(e) => setHorizontalZoom(parseFloat(e.target.value))}
-              title={`Zoom horizontal: ${(horizontalZoom * 100).toFixed(0)}%`}
+              min={0}
+              max={ZOOM_SLIDER_MAX}
+              step={1}
+              value={zoomToSlider(horizontalZoom)}
+              onChange={(e) => {
+                const next = sliderToZoom(parseFloat(e.target.value))
+                horizontalZoomRef.current = next
+                setHorizontalZoom(next)
+              }}
+              title={`Zoom horizontal: ${horizontalZoom >= 10 ? horizontalZoom.toFixed(0) : horizontalZoom.toFixed(2)}×`}
             />
             <span className="zoom-label" title="Zoom vertical (Shift+Rueda)"><IconMoveVertical size={14} /></span>
             <input
@@ -5269,7 +5320,13 @@ function App() {
               }}
             />
           )}
-          <div className="lanes-scroll-inner" style={{ minWidth: `${100 * horizontalZoom}%` }}>
+          <div
+            className="lanes-scroll-inner"
+            data-testid="lanes-scroll-inner"
+            data-horizontal-zoom={String(horizontalZoom)}
+            data-layout-max={String(getLayoutMax())}
+            style={{ minWidth: `${100 * horizontalZoom}%` }}
+          >
           {harmony && (
             <div className="chord-ruler" aria-label="Acordes">
               {harmony.chords.map((chord, i) => (
@@ -5284,7 +5341,9 @@ function App() {
             </div>
           )}
           <TimelineRuler
-            bars={rulerBars}
+            scrollerRef={lanesScrollRef}
+            zoom={horizontalZoom}
+            bpm={bpm}
             layoutMax={getLayoutMax()}
             loopStart={loopStart}
             loopEnd={loopEnd}
@@ -5498,7 +5557,7 @@ function App() {
                 <li>• <strong>Cmd/Ctrl+Click</strong> - Añadir o quitar un clip de la selección</li>
                 <li>• <strong>Shift+Click</strong> - Añadir clip a la selección</li>
                 <li>• <strong>Arrastrar en área vacía</strong> - Selección rectangular (varios tracks). Shift añade, Ctrl/Cmd alterna</li>
-                <li>• <strong>Arrastrar clip</strong> - Mover la selección junta (tiempo y pista)</li>
+                <li>• <strong>Arrastrar clip</strong> - Mover la selección junta (tiempo y pista). El clip sigue el puntero al píxel; la posición se confirma al soltar. Snap solo si Snap está ON</li>
                 <li>• <strong>Alt+Click en clip</strong> - Dividir en el punto clickeado</li>
                 <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
@@ -5518,6 +5577,7 @@ function App() {
                 <li>• <strong>Soltar audio entre pistas</strong> - Inserta una pista nueva en ese lugar. Sobre una pista la coloca ahí</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
+                <li>• <strong>Zoom horizontal</strong> - De ver el tema entero (0.05×) a detalle muy fino (512×). El slider es logarítmico. Ctrl/Cmd+rueda zoom anclado al cursor</li>
                 <li>• <strong>Zoom vertical</strong> - La forma de onda queda centrada en el clip a cualquier altura (también al mínimo del slider)</li>
                 <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
                 <li>• <strong>P (Practicar encima)</strong> - Silencia ese stem y deja el resto sonando para tocar o cantar encima. El botón del transporte usa la pista seleccionada</li>

@@ -625,6 +625,15 @@
   pointer-events: none;
 }
 
+.sub-marker {
+  position: absolute;
+  top: 34px;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--border) 65%, transparent);
+  pointer-events: none;
+}
+
 .track-content {
   background: #16181d;
   cursor: pointer;
@@ -746,6 +755,7 @@
   z-index: 4;
   background: rgba(61, 214, 140, 0.18);
   transition: background var(--transition);
+  touch-action: none;
 }
 
 .clip-trim-handle.left {

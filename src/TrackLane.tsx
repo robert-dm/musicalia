@@ -30,8 +30,8 @@ interface TrackLaneProps {
   onMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void
   onContextMenuTrack: (e: React.MouseEvent, trackIndex: number, clipId: string | null) => void
   onClipClick: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
-  onResizeStart: (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
-  onClipDragStart: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
+  onResizeStart: (e: React.PointerEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
+  onClipDragStart: (e: React.PointerEvent, trackIndex: number, clipId: string) => void
   isRecordingLane?: boolean
   recordingStartOffset?: number
 }
@@ -43,8 +43,8 @@ interface LaneClipViewProps {
   selected: boolean
   onClipClick: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
   onContextMenuTrack: (e: React.MouseEvent, trackIndex: number, clipId: string | null) => void
-  onResizeStart: (e: React.MouseEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
-  onClipDragStart: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
+  onResizeStart: (e: React.PointerEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
+  onClipDragStart: (e: React.PointerEvent, trackIndex: number, clipId: string) => void
 }
 
 const LaneClipView = memo(function LaneClipView({
@@ -66,6 +66,7 @@ const LaneClipView = memo(function LaneClipView({
       data-clip-offset={String(clip.offsetSeconds)}
       data-render-count={renderCountRef.current}
       className={`clip-wrapper ${selected ? 'selected' : ''}`}
+      data-testid="clip-wrapper"
       style={{
         position: 'absolute',
         left: `${(clip.offsetSeconds / maxDur) * 100}%`,
@@ -77,14 +78,14 @@ const LaneClipView = memo(function LaneClipView({
     >
       <div
         className="clip-trim-handle left"
-        onMouseDown={(e) => onResizeStart(e, trackIndex, clip.id, 'left')}
+        onPointerDown={(e) => onResizeStart(e, trackIndex, clip.id, 'left')}
         title="Arrastra para recortar desde el inicio"
       />
       <div
         className="clip-body"
-        onMouseDown={(e) => onClipDragStart(e, trackIndex, clip.id)}
+        onPointerDown={(e) => onClipDragStart(e, trackIndex, clip.id)}
         title="Arrastra para mover (clic derecho para editar, Alt+arrastrar para duplicar)"
-        style={{ cursor: 'move' }}
+        style={{ cursor: 'move', touchAction: 'none' }}
       >
         <div className="clip-info">
           <span className="clip-filename">{clip.fileName}</span>
@@ -97,7 +98,7 @@ const LaneClipView = memo(function LaneClipView({
       </div>
       <div
         className="clip-trim-handle right"
-        onMouseDown={(e) => onResizeStart(e, trackIndex, clip.id, 'right')}
+        onPointerDown={(e) => onResizeStart(e, trackIndex, clip.id, 'right')}
         title="Arrastra para recortar desde el final"
       />
     </div>

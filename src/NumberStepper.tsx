@@ -100,6 +100,11 @@ export function NumberStepper({
     onChangeRef.current(clamp(parsed))
   }
 
+  const resetToDefault = () => {
+    setDraftValue(null)
+    onChangeRef.current(clamp(resetValue))
+  }
+
   const atMin = value <= min + 1e-9
   const atMax = value >= max - 1e-9
 
@@ -141,10 +146,16 @@ export function NumberStepper({
           e.currentTarget.select()
         }}
         onBlur={commitDraft}
+        onMouseDown={(e) => {
+          if (e.button !== 0 || e.detail < 2) return
+          e.preventDefault()
+          e.stopPropagation()
+          resetToDefault()
+        }}
         onDoubleClick={(e) => {
           e.preventDefault()
-          setDraftValue(null)
-          onChangeRef.current(clamp(resetValue))
+          e.stopPropagation()
+          resetToDefault()
         }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {

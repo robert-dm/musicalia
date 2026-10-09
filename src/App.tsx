@@ -156,7 +156,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0080b'
+const APP_VERSION = '0.00XXb'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -3206,7 +3206,7 @@ function App() {
     await loader.load(url)
     console.log('[DEBUG] After load: player.loaded=', loader.loaded, 'duration=', loader.buffer.duration)
     const buffer = loader.buffer.get() as AudioBuffer
-    const player = makeClipPlayer(loader.buffer)
+    const player = makeClipPlayer(buffer)
     player.loop = false
     applyClipPlayback(player, tempoRateRef.current, pitchRef.current)
     player.connect(trackGain)

@@ -1,0 +1,317 @@
+.drum-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px 12px;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  min-height: 260px;
+  max-height: 340px;
+}
+
+.drum-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.drum-pattern-switch,
+.drum-step-switch {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.drum-pattern-btn,
+.drum-step-switch button {
+  width: 28px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.drum-pattern-btn.active,
+.drum-step-switch button.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.drum-swing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 650;
+}
+
+.drum-swing input[type='range'] {
+  width: 72px;
+}
+
+.drum-swing em {
+  min-width: 3.2ch;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.drum-toolbar-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.drum-toolbar-btn:hover {
+  border-color: var(--accent);
+}
+
+.drum-editor-body {
+  display: grid;
+  grid-template-columns: 220px 168px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+
+.drum-pads {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  align-content: start;
+}
+
+.drum-pad {
+  height: 46px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #2a303a, #1c2028);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 0 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.drum-pad.loaded {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.drum-pad.selected {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, #31453a, #1d2a23);
+}
+
+.drum-pad-key {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.drum-pad-name {
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.drum-pad-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.drum-pad-title {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.drum-pad-knobs {
+  display: flex;
+  gap: 4px;
+}
+
+.drum-pad-flags {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.drum-pad-flags label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.drum-pad-flags select {
+  height: 22px;
+  background: var(--bg-app);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.drum-grid-wrap {
+  overflow: auto;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #12151b;
+}
+
+.drum-grid {
+  display: grid;
+  min-width: max-content;
+  padding: 8px;
+  gap: 4px;
+}
+
+.drum-grid-row {
+  display: grid;
+  gap: 3px;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
+}
+
+.drum-grid-label {
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: left;
+  padding: 0 4px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drum-grid-label.selected {
+  color: var(--accent);
+}
+
+.drum-step {
+  height: 18px;
+  border: none;
+  border-radius: 3px;
+  background: #232833;
+  cursor: pointer;
+}
+
+.drum-step.beat {
+  background: #2c3340;
+}
+
+.drum-step.v1 {
+  background: color-mix(in srgb, var(--accent) 35%, #232833);
+}
+
+.drum-step.v2 {
+  background: color-mix(in srgb, var(--accent) 70%, #122018);
+}
+
+.drum-step.v3 {
+  background: var(--accent);
+}
+
+.drum-vel-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.drum-vel-menu {
+  position: fixed;
+  z-index: 41;
+  min-width: 110px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: var(--shadow-menu);
+  display: flex;
+  flex-direction: column;
+}
+
+.drum-vel-menu button {
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.drum-vel-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.pattern-clip-preview {
+  position: absolute;
+  inset: 18px 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  pointer-events: none;
+}
+
+.pattern-clip-row {
+  display: flex;
+  gap: 1px;
+  flex: 1;
+}
+
+.pattern-clip-cell {
+  flex: 1;
+  border-radius: 1px;
+  background: transparent;
+}
+
+.pattern-clip-cell.on {
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.track-header[data-track-kind='drum'] .track-name {
+  color: var(--accent);
+}
+
+@media (max-width: 1200px) {
+  .drum-editor-body {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+
+  .drum-pad-detail {
+    display: none;
+  }
+}

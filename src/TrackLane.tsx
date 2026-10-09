@@ -10,10 +10,14 @@ export interface LaneClip {
   duration: number
   buffer: AudioBuffer
   sourceStart: number
+  kind?: string
+  patternId?: string
+  patternRows?: number[][]
 }
 
 interface TrackLaneProps {
   trackIndex: number
+  trackKind?: string
   hasClips: boolean
   isAnyClipPlaying: boolean
   height: number
@@ -30,6 +34,7 @@ interface TrackLaneProps {
   onMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void
   onContextMenuTrack: (e: React.MouseEvent, trackIndex: number, clipId: string | null) => void
   onClipClick: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
+  onClipDoubleClick?: (trackIndex: number, clipId: string) => void
   onResizeStart: (e: React.PointerEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
   onClipDragStart: (e: React.PointerEvent, trackIndex: number, clipId: string) => void
   isRecordingLane?: boolean
@@ -42,6 +47,7 @@ interface LaneClipViewProps {
   clip: LaneClip
   selected: boolean
   onClipClick: (e: React.MouseEvent, trackIndex: number, clipId: string) => void
+  onClipDoubleClick?: (trackIndex: number, clipId: string) => void
   onContextMenuTrack: (e: React.MouseEvent, trackIndex: number, clipId: string | null) => void
   onResizeStart: (e: React.PointerEvent, trackIndex: number, clipId: string, edge: 'left' | 'right') => void
   onClipDragStart: (e: React.PointerEvent, trackIndex: number, clipId: string) => void
@@ -53,6 +59,7 @@ const LaneClipView = memo(function LaneClipView({
   clip,
   selected,
   onClipClick,
+  onClipDoubleClick,
   onContextMenuTrack,
   onResizeStart,
   onClipDragStart
@@ -74,6 +81,10 @@ const LaneClipView = memo(function LaneClipView({
         height: '100%'
       }}
       onClick={(e) => onClipClick(e, trackIndex, clip.id)}
+      onDoubleClick={(e) => {
+        e.stopPropagation()
+        onClipDoubleClick?.(trackIndex, clip.id)
+      }}
       onContextMenu={(e) => onContextMenuTrack(e, trackIndex, clip.id)}
     >
       <div
@@ -90,11 +101,23 @@ const LaneClipView = memo(function LaneClipView({
         <div className="clip-info">
           <span className="clip-filename">{clip.fileName}</span>
         </div>
-        <ClipWaveform
-          buffer={clip.buffer}
-          sourceStart={clip.sourceStart}
-          duration={clip.duration}
-        />
+        {clip.kind === 'pattern' && clip.patternRows ? (
+          <div className="pattern-clip-preview" aria-hidden="true">
+            {clip.patternRows.slice(0, 8).map((row, ri) => (
+              <div key={ri} className="pattern-clip-row">
+                {row.slice(0, 16).map((cell, ci) => (
+                  <span key={ci} className={`pattern-clip-cell ${cell ? 'on' : ''}`} />
+                ))}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <ClipWaveform
+            buffer={clip.buffer}
+            sourceStart={clip.sourceStart}
+            duration={clip.duration}
+          />
+        )}
       </div>
       <div
         className="clip-trim-handle right"
@@ -107,6 +130,7 @@ const LaneClipView = memo(function LaneClipView({
 
 export const TrackLane = memo(function TrackLane({
   trackIndex,
+  trackKind,
   hasClips,
   isAnyClipPlaying,
   height,
@@ -123,6 +147,7 @@ export const TrackLane = memo(function TrackLane({
   onMouseDown,
   onContextMenuTrack,
   onClipClick,
+  onClipDoubleClick,
   onResizeStart,
   onClipDragStart,
   isRecordingLane = false,
@@ -135,6 +160,7 @@ export const TrackLane = memo(function TrackLane({
     <div
       className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
       data-track-index={trackIndex}
+      data-track-kind={trackKind === 'drum' ? 'drum' : 'audio'}
       data-render-count={renderCountRef.current}
       style={{ height: `${height}px` }}
       onClick={onWaveformClick}
@@ -152,6 +178,7 @@ export const TrackLane = memo(function TrackLane({
               clip={clip}
               selected={selectedClipIds.has(clip.id)}
               onClipClick={onClipClick}
+              onClipDoubleClick={onClipDoubleClick}
               onContextMenuTrack={onContextMenuTrack}
               onResizeStart={onResizeStart}
               onClipDragStart={onClipDragStart}
@@ -160,7 +187,11 @@ export const TrackLane = memo(function TrackLane({
         </div>
       ) : (
         <div className="empty-lane">
-          <span className="import-hint">Doble clic o arrastrá un archivo de audio</span>
+          <span className="import-hint">
+            {trackKind === 'drum'
+              ? 'Doble clic para abrir pads y secuenciador'
+              : 'Doble clic o arrastrá un archivo de audio'}
+          </span>
         </div>
       )}
       {(() => {

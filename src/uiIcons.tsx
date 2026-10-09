@@ -326,6 +326,18 @@ export function IconMoveVertical(props: IconProps) {
   )
 }
 
+export function IconDrum(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <ellipse cx="12" cy="8" rx="8" ry="3" />
+      <path d="M4 8v8c0 1.7 3.6 3 8 3s8-1.3 8-3V8" />
+      <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
+      <path d="m8 5 2 4" />
+      <path d="m16 5-2 4" />
+    </Svg>
+  )
+}
+
 export function ContextMenuItem({
   icon,
   label,

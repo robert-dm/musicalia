@@ -10,7 +10,7 @@ import { DEFAULT_STEM_QUALITY, type StemQuality } from './stemQuality'
 import { decorateProgress, type StemSeparationProgress } from './stemProgress'
 import { sessionHasAudio, shouldApplyDetectedBpm } from './sessionBpm'
 import { demucsLanes, selectAudibleStems, skippedStemNote, spleeterLanes, type StemLane } from './stemTracks'
-import { autosaveProject, loadProject, clearProject, saveAudioBuffer, loadAudioBuffer } from './projectManager'
+import { autosaveProject, loadProject, clearProject, saveAudioBuffer, loadAudioBuffer, writeAutosaveNow } from './projectManager'
 import {
   register,
   login,
@@ -206,7 +206,8 @@ import {
   IconSplit,
   IconStop,
   IconTrash,
-  IconVolume2
+  IconVolume2,
+  IconDrum
 } from './uiIcons'
 import {
   clampGroupTrackDelta,
@@ -234,8 +235,36 @@ import {
   wheelZoom,
   zoomToSlider
 } from './timelineZoom'
+import {
+  createEmptyDrumKit,
+  expandDrumKit,
+  nextDrumTrackName,
+  padKeyIndex,
+  updatePad,
+  type DrumKit,
+  type PatternId
+} from './drumKit'
+import { hydrateDrumKit, isDrumTrackKind } from './drumSerialize'
+import { synthesizeStarterKit } from './drumSynth'
+import { DrumEngine } from './drumEngine'
+import { DrumEditor } from './DrumEditor'
+import { lastScheduledDrumEvents } from './drumPlayback'
+import {
+  clipBufferDuration,
+  defaultPatternClipDuration,
+  isPatternClip,
+  padIdbKey,
+  padZipName,
+  patternClipFileName,
+  programBasicBeat,
+  projectClipPayload,
+  projectDrumPayload,
+  renderDrumHitsOffline,
+  silentPatternBuffer,
+  trackKindOf
+} from './drumProject'
 
-const APP_VERSION = '0.0089b'
+const APP_VERSION = '0.0090b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -244,6 +273,8 @@ interface ClipboardClip {
   duration: number
   relTime: number
   relTrack: number
+  kind?: 'audio' | 'pattern'
+  patternId?: PatternId
 }
 
 interface ContextMenuState {
@@ -266,6 +297,8 @@ interface Clip {
   sourceStart: number
   duration: number
   selected?: boolean
+  kind?: 'audio' | 'pattern'
+  patternId?: PatternId
 }
 
 interface TrackState {
@@ -277,6 +310,8 @@ interface TrackState {
   automation: AutomationLane[]
   clips: Clip[]
   name?: string
+  kind?: 'audio' | 'drum'
+  drum?: DrumKit
 }
 
 function App() {
@@ -308,6 +343,11 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const localFileInputRef = useRef<HTMLInputElement>(null)
   const [selectedTrack, setSelectedTrack] = useState<number | null>(null)
+  const [drumEditorTrack, setDrumEditorTrack] = useState<number | null>(null)
+  const [drumSelectedPad, setDrumSelectedPad] = useState(0)
+  const drumEngineRef = useRef(new DrumEngine())
+  const bpmRef = useRef(bpm)
+  bpmRef.current = bpm
   const [fileDragActive, setFileDragActive] = useState(false)
   const trackGainsRef = useRef<Tone.Gain[]>([])
   const trackChainsRef = useRef<TrackFxChain[]>([])
@@ -364,6 +404,12 @@ function App() {
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const [loopStart, setLoopStart] = useState<number | null>(null)
   const [loopEnd, setLoopEnd] = useState<number | null>(null)
+  const loopStartRef = useRef(loopStart)
+  const loopEndRef = useRef(loopEnd)
+  const isLoopEnabledRef = useRef(isLoopEnabled)
+  loopStartRef.current = loopStart
+  loopEndRef.current = loopEnd
+  isLoopEnabledRef.current = isLoopEnabled
   const [tempLoopStart, setTempLoopStart] = useState<number | null>(null)
   const [tempLoopEnd, setTempLoopEnd] = useState<number | null>(null)
   const tempLoopStartRef = useRef<number | null>(null)
@@ -498,6 +544,8 @@ function App() {
         solo: t.solo,
         volume: t.volume,
         name: t.name,
+        kind: t.kind,
+        drum: t.drum,
         ...serializeTrackAudio(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
@@ -507,6 +555,8 @@ function App() {
           duration: c.duration,
           id: c.id,
           selected: c.selected,
+          kind: c.kind,
+          patternId: c.patternId,
           buffer: c.buffer,
           playerBuffer: c.player.buffer
         }))
@@ -604,7 +654,9 @@ function App() {
             offsetSeconds: clipData.offsetSeconds,
             sourceStart: clipData.sourceStart,
             duration: clipData.duration,
-            selected: clipData.selected
+            selected: clipData.selected,
+            kind: clipData.kind ?? existingClip.kind,
+            patternId: clipData.patternId ?? existingClip.patternId
           }
         } else {
           const player = makeClipPlayer()
@@ -623,7 +675,9 @@ function App() {
             id: clipData.id,
             sourceStart: clipData.sourceStart,
             duration: clipData.duration,
-            selected: clipData.selected
+            selected: clipData.selected,
+            kind: clipData.kind,
+            patternId: clipData.patternId
           }
         }
       }))
@@ -640,6 +694,8 @@ function App() {
         solo: !!t.solo,
         volume: typeof t.volume === 'number' ? t.volume : DEFAULT_TRACK_VOLUME,
         name: t.name,
+        kind: trackKindOf(t.kind),
+        drum: t.drum,
         ...hydrateTrackAudio(t),
         clips: clips.filter(c => c !== null)
       }
@@ -711,7 +767,74 @@ function App() {
     return player
   }
 
+  const makePatternClip = (args: {
+    patternId?: PatternId | string
+    offsetSeconds: number
+    duration: number
+    trackIndex: number
+    id?: string
+  }): Clip => {
+    const buffer = silentPatternBuffer()
+    const player = makeClipPlayer(buffer)
+    const dest = trackGainsRef.current[args.trackIndex]
+    if (dest) player.connect(dest)
+    const patternId = (args.patternId === 'B' || args.patternId === 'C' || args.patternId === 'D' ? args.patternId : 'A') as PatternId
+    return {
+      player,
+      fileName: patternClipFileName(patternId),
+      isPlaying: false,
+      buffer,
+      startPosition: 0,
+      offsetSeconds: args.offsetSeconds,
+      id: args.id || `clip-${Date.now()}-${Math.random()}`,
+      sourceStart: 0,
+      duration: Math.max(0.05, args.duration),
+      kind: 'pattern',
+      patternId
+    }
+  }
+
+  const hydrateClipFromSaved = (clipData: any, buffer: AudioBuffer | null, trackIdx: number): Clip | null => {
+    const patterned = isPatternClip(clipData)
+    const audio = patterned ? (buffer ?? silentPatternBuffer()) : buffer
+    if (!audio) return null
+    const player = makeClipPlayer()
+    player.buffer = new Tone.ToneAudioBuffer(audio)
+    player.loop = false
+    if (trackGainsRef.current[trackIdx]) player.connect(trackGainsRef.current[trackIdx])
+    return {
+      player,
+      fileName: clipData.fileName || (patterned ? patternClipFileName(clipData.patternId) : 'Clip'),
+      isPlaying: false,
+      buffer: audio,
+      startPosition: clipData.startPosition ?? 0,
+      offsetSeconds: clipData.offsetSeconds || 0,
+      id: clipData.id || `clip-${Date.now()}-${trackIdx}-${Math.random()}`,
+      sourceStart: clipData.sourceStart ?? 0,
+      duration: clipData.duration ?? (patterned ? defaultPatternClipDuration(bpmRef.current) : audio.duration),
+      kind: patterned ? 'pattern' : 'audio',
+      patternId: patterned ? ((clipData.patternId === 'B' || clipData.patternId === 'C' || clipData.patternId === 'D' ? clipData.patternId : 'A') as PatternId) : undefined
+    }
+  }
+
+  const hydrateDrumFromSaved = async (t: any, trackIdx: number, wavMap?: Map<string, AudioBuffer>): Promise<DrumKit | undefined> => {
+    if (!isDrumTrackKind(t.kind) && !t.drum) return undefined
+    const padCount = Array.isArray(t.drum?.pads) ? t.drum.pads.length : 8
+    const buffers = await Promise.all(Array.from({ length: padCount }, async (_, padIdx) => {
+      const named = t.drum?.pads?.[padIdx]?.audioFile
+      if (wavMap && named && wavMap.has(named)) return wavMap.get(named) ?? null
+      if (wavMap) {
+        const fallback = wavMap.get(padZipName(trackIdx, padIdx))
+        if (fallback) return fallback
+      }
+      const key = t.drum?.pads?.[padIdx]?.audioBufferKey || padIdbKey(trackIdx, padIdx)
+      return loadAudioBuffer(key)
+    }))
+    return hydrateDrumKit(t.drum, buffers)
+  }
+
   const startClipAtSongTime = (clip: Clip, songTime: number): boolean => {
+    if (isPatternClip(clip)) return false
     applyClipPlayback(clip.player, tempoRateRef.current, pitchRef.current)
     const clipStart = clip.offsetSeconds
     const clipEnd = clip.offsetSeconds + clip.duration
@@ -734,6 +857,20 @@ function App() {
     return false
   }
 
+  const scheduleDrums = (songTime: number) => {
+    drumEngineRef.current.reschedule({
+      tracks: trackStatesRef.current,
+      destinations: trackGainsRef.current,
+      bpm: bpmRef.current,
+      songTime,
+      playOriginSong: playOriginSongRef.current,
+      tempoRate: tempoRateRef.current,
+      loopStart: loopStartRef.current,
+      loopEnd: loopEndRef.current,
+      loopEnabled: isLoopEnabledRef.current
+    })
+  }
+
   const retargetPlayingClips = (songTime: number) => {
     trackStatesRef.current.forEach((track) => {
       track.clips.forEach((clip) => {
@@ -741,6 +878,7 @@ function App() {
         clip.isPlaying = startClipAtSongTime(clip, songTime)
       })
     })
+    scheduleDrums(songTime)
   }
 
   const applyTrackAudioNow = (trackIndex: number, patch?: Partial<TrackState>) => {
@@ -798,25 +936,27 @@ function App() {
       const tracks = await Promise.all(trackStates.map(async (t, i) => {
         const savedClips = await Promise.all(t.clips.map(async (clip, clipIdx) => {
           const bufferKey = `audio-buffer-${i}-${clipIdx}`
-          if (writeBuffers) {
+          if (writeBuffers && !isPatternClip(clip)) {
             await saveAudioBuffer(bufferKey, clip.buffer)
           }
           return {
-            fileName: clip.fileName,
-            startPosition: clip.startPosition,
-            audioBufferKey: bufferKey,
-            offsetSeconds: clip.offsetSeconds,
-            id: clip.id,
-            sourceStart: clip.sourceStart,
-            duration: clip.duration
+            ...projectClipPayload(clip, i, clipIdx),
+            audioBufferKey: isPatternClip(clip) ? undefined : bufferKey
           }
         }))
+        if (writeBuffers && t.drum) {
+          await Promise.all(t.drum.pads.map(async (pad, padIdx) => {
+            if (pad.buffer) await saveAudioBuffer(padIdbKey(i, padIdx), pad.buffer)
+          }))
+        }
         
         return {
           name: resolveTrackName(t.name, i),
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
+          kind: trackKindOf(t.kind),
+          drum: projectDrumPayload(t.drum, i),
           ...serializeTrackAudio(t),
           clips: savedClips
         }
@@ -968,33 +1108,21 @@ function App() {
         
         // Handle new format with clips array
         const loadedClips = await Promise.all((t.clips || []).map(async (clipData: any) => {
-          const buffer = await loadAudioBuffer(clipData.audioBufferKey)
-          if (!buffer) return null
-          
-          const toneBuffer = new Tone.ToneAudioBuffer(buffer)
-          const player = makeClipPlayer()
-          player.buffer = toneBuffer
-          player.loop = false
-          player.connect(trackGainsRef.current[i])
-          
-          return {
-            player,
-            fileName: clipData.fileName,
-            isPlaying: false,
-            buffer,
-            startPosition: clipData.startPosition,
-            offsetSeconds: clipData.offsetSeconds || getCountInSeconds(),
-            id: clipData.id || `clip-${Date.now()}-${i}-${Math.random()}`,
-            sourceStart: clipData.sourceStart ?? 0,
-            duration: clipData.duration ?? buffer.duration
+          if (isPatternClip(clipData)) {
+            return hydrateClipFromSaved(clipData, null, i)
           }
+          const buffer = clipData.audioBufferKey ? await loadAudioBuffer(clipData.audioBufferKey) : null
+          return hydrateClipFromSaved(clipData, buffer, i)
         }))
+        const drum = await hydrateDrumFromSaved(t, i)
         
         return {
           mute: !!t.mute,
           solo: !!t.solo,
           volume: typeof t.volume === 'number' ? t.volume : DEFAULT_TRACK_VOLUME,
           name: resolveTrackName(t.name, i),
+          kind: trackKindOf(t.kind),
+          drum,
           ...hydrateTrackAudio(t),
           clips: loadedClips.filter(c => c !== null) as Clip[]
         }
@@ -1179,16 +1307,10 @@ function App() {
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
+          kind: trackKindOf(t.kind),
+          drum: projectDrumPayload(t.drum, trackIdx),
           ...serializeTrackAudio(t),
-          clips: t.clips.map((clip, clipIdx) => ({
-            fileName: clip.fileName,
-            startPosition: clip.startPosition,
-            offsetSeconds: clip.offsetSeconds,
-            id: clip.id,
-            sourceStart: clip.sourceStart,
-            duration: clip.duration,
-            audioFile: `audio_${trackIdx}_${clipIdx}.wav`
-          }))
+          clips: t.clips.map((clip, clipIdx) => projectClipPayload(clip, trackIdx, clipIdx))
         }))
       }
       
@@ -1200,8 +1322,17 @@ function App() {
       
       for (let trackIdx = 0; trackIdx < trackStates.length; trackIdx++) {
         const track = trackStates[trackIdx]
+        if (track.drum) {
+          for (let padIdx = 0; padIdx < track.drum.pads.length; padIdx++) {
+            const pad = track.drum.pads[padIdx]
+            if (!pad.buffer) continue
+            const wavData = encodeAudioBufferWAV(pad.buffer)
+            zip.file(padZipName(trackIdx, padIdx), wavData.buffer as ArrayBuffer, { compression: 'STORE' })
+          }
+        }
         for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
           const clip = track.clips[clipIdx]
+          if (isPatternClip(clip)) continue
           
           let audioFileName: string
           if (bufferMap.has(clip.buffer)) {
@@ -1280,16 +1411,10 @@ function App() {
           mute: t.mute,
           solo: t.solo,
           volume: t.volume,
+          kind: trackKindOf(t.kind),
+          drum: projectDrumPayload(t.drum, trackIdx),
           ...serializeTrackAudio(t),
-          clips: t.clips.map((clip, clipIdx) => ({
-            fileName: clip.fileName,
-            startPosition: clip.startPosition,
-            offsetSeconds: clip.offsetSeconds,
-            id: clip.id,
-            sourceStart: clip.sourceStart,
-            duration: clip.duration,
-            audioFile: `audio_${trackIdx}_${clipIdx}.wav`
-          }))
+          clips: t.clips.map((clip, clipIdx) => projectClipPayload(clip, trackIdx, clipIdx))
         }))
       }
       
@@ -1301,8 +1426,17 @@ function App() {
       
       for (let trackIdx = 0; trackIdx < trackStates.length; trackIdx++) {
         const track = trackStates[trackIdx]
+        if (track.drum) {
+          for (let padIdx = 0; padIdx < track.drum.pads.length; padIdx++) {
+            const pad = track.drum.pads[padIdx]
+            if (!pad.buffer) continue
+            const wavData = encodeAudioBufferWAV(pad.buffer)
+            zip.file(padZipName(trackIdx, padIdx), wavData.buffer as ArrayBuffer, { compression: 'STORE' })
+          }
+        }
         for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
           const clip = track.clips[clipIdx]
+          if (isPatternClip(clip)) continue
           
           let audioFileName: string
           if (bufferMap.has(clip.buffer)) {
@@ -1421,40 +1555,25 @@ function App() {
       
       const newTrackStates = await Promise.all(projectData.tracks.map(async (t: any, trackIdx: number) => {
         const clips = await Promise.all((t.clips || []).map(async (clipData: any) => {
+          if (isPatternClip(clipData)) {
+            return hydrateClipFromSaved(clipData, null, trackIdx)
+          }
           const audioBuffer = audioFiles.get(clipData.audioFile)
           if (!audioBuffer) {
             console.warn(`Audio file not found: ${clipData.audioFile}`)
             return null
           }
-          
-          const player = makeClipPlayer()
-          player.buffer = new Tone.ToneAudioBuffer(audioBuffer)
-          player.loop = false
-          
-          if (!trackGainsRef.current[trackIdx]) {
-            console.warn(`Track gain ${trackIdx} not available`)
-            return null
-          }
-          player.connect(trackGainsRef.current[trackIdx])
-          
-          return {
-            player,
-            fileName: clipData.fileName,
-            isPlaying: false,
-            buffer: audioBuffer,
-            startPosition: clipData.startPosition,
-            offsetSeconds: clipData.offsetSeconds,
-            id: clipData.id,
-            sourceStart: clipData.sourceStart ?? 0,
-            duration: clipData.duration ?? audioBuffer.duration
-          }
+          return hydrateClipFromSaved(clipData, audioBuffer, trackIdx)
         }))
+        const drum = await hydrateDrumFromSaved(t, trackIdx, audioFiles)
         
         return {
           name: resolveTrackName(t.name, trackIdx),
           mute: !!t.mute,
           solo: !!t.solo,
           volume: typeof t.volume === 'number' ? t.volume : DEFAULT_TRACK_VOLUME,
+          kind: trackKindOf(t.kind),
+          drum,
           ...hydrateTrackAudio(t),
           clips: clips.filter(c => c !== null) as Clip[]
         }
@@ -1626,7 +1745,10 @@ function App() {
         trackStates[i].clips.map(clip => clip.offsetSeconds + clip.duration)
       ))
       const totalDuration = maxDuration + countInSeconds
-      const sampleRate = trackStates[effectiveIndices[0]].clips[0].buffer.sampleRate
+      const sampleRate = effectiveIndices
+        .flatMap((i) => trackStates[i].clips)
+        .find((clip) => !isPatternClip(clip))
+        ?.buffer.sampleRate || 44100
       
       if (exportMixed) {
         // Export all tracks mixed into one file
@@ -1659,11 +1781,16 @@ function App() {
           gainNode.gain.value = track.volume
           gainNode.connect(offlineContext.destination)
           
-          for (const clip of track.clips) {
-            const source = offlineContext.createBufferSource()
-            source.buffer = clip.buffer
-            source.connect(gainNode)
-            source.start(clip.offsetSeconds + countInSeconds, clip.sourceStart, clip.duration)
+          if (track.kind === 'drum' && track.drum) {
+            renderDrumHitsOffline(offlineContext, gainNode, track.drum, track.clips, bpm, countInSeconds)
+          } else {
+            for (const clip of track.clips) {
+              if (isPatternClip(clip)) continue
+              const source = offlineContext.createBufferSource()
+              source.buffer = clip.buffer
+              source.connect(gainNode)
+              source.start(clip.offsetSeconds + countInSeconds, clip.sourceStart, clip.duration)
+            }
           }
         }
         
@@ -1716,11 +1843,16 @@ function App() {
           gainNode.gain.value = track.volume
           gainNode.connect(offlineContext.destination)
           
-          for (const clip of track.clips) {
-            const source = offlineContext.createBufferSource()
-            source.buffer = clip.buffer
-            source.connect(gainNode)
-            source.start(clip.offsetSeconds + countInSeconds, clip.sourceStart, clip.duration)
+          if (track.kind === 'drum' && track.drum) {
+            renderDrumHitsOffline(offlineContext, gainNode, track.drum, track.clips, bpm, countInSeconds)
+          } else {
+            for (const clip of track.clips) {
+              if (isPatternClip(clip)) continue
+              const source = offlineContext.createBufferSource()
+              source.buffer = clip.buffer
+              source.connect(gainNode)
+              source.start(clip.offsetSeconds + countInSeconds, clip.sourceStart, clip.duration)
+            }
           }
           
           const renderedBuffer = await offlineContext.startRendering()
@@ -1981,6 +2113,7 @@ function App() {
     })
     
     setTrackStates(updatedStates)
+    scheduleDrums(startTime)
     setIsPlaying(true)
     isPlayingRef.current = true
     setIsPaused(false)
@@ -2025,6 +2158,7 @@ function App() {
       return
     }
     Tone.getTransport().pause()
+    drumEngineRef.current.stopAll()
     
     if (playheadAnimationRef.current !== null) {
       cancelAnimationFrame(playheadAnimationRef.current)
@@ -2063,6 +2197,7 @@ function App() {
     isPlayingRef.current = false
     
     Tone.getTransport().stop()
+    drumEngineRef.current.stopAll()
     
     if (playheadAnimationRef.current !== null) {
       cancelAnimationFrame(playheadAnimationRef.current)
@@ -2344,7 +2479,9 @@ function App() {
       offsetSeconds: clipToSplit.offsetSeconds,
       id: `${clipToSplit.id}-part1`,
       sourceStart: clipToSplit.sourceStart,
-      duration: splitOffset
+      duration: splitOffset,
+      kind: clipToSplit.kind,
+      patternId: clipToSplit.patternId
     })
     
     updatedClips.push({
@@ -2355,8 +2492,10 @@ function App() {
       startPosition: 0,
       offsetSeconds: splitTime,
       id: `${clipToSplit.id}-part2`,
-      sourceStart: clipToSplit.sourceStart + splitOffset,
-      duration: clipToSplit.duration - splitOffset
+      sourceStart: isPatternClip(clipToSplit) ? 0 : clipToSplit.sourceStart + splitOffset,
+      duration: clipToSplit.duration - splitOffset,
+      kind: clipToSplit.kind,
+      patternId: clipToSplit.patternId
     })
     
     clipToSplit.player.dispose()
@@ -2415,7 +2554,9 @@ function App() {
       offsetSeconds: clipToSplit.offsetSeconds,
       id: `${clipToSplit.id}-part1`,
       sourceStart: clipToSplit.sourceStart,
-      duration: splitOffset
+      duration: splitOffset,
+      kind: clipToSplit.kind,
+      patternId: clipToSplit.patternId
     })
     
     updatedClips.push({
@@ -2426,8 +2567,10 @@ function App() {
       startPosition: 0,
       offsetSeconds: splitTime,
       id: `${clipToSplit.id}-part2`,
-      sourceStart: clipToSplit.sourceStart + splitOffset,
-      duration: clipToSplit.duration - splitOffset
+      sourceStart: isPatternClip(clipToSplit) ? 0 : clipToSplit.sourceStart + splitOffset,
+      duration: clipToSplit.duration - splitOffset,
+      kind: clipToSplit.kind,
+      patternId: clipToSplit.patternId
     })
     
     clipToSplit.player.dispose()
@@ -2464,13 +2607,15 @@ function App() {
       duration: clip.duration,
       offsetSeconds: clip.offsetSeconds,
       trackIndex
-    }))).map(({ buffer, fileName, sourceStart, duration, relTime, relTrack }) => ({
+    }))).map(({ buffer, fileName, sourceStart, duration, relTime, relTrack }, i) => ({
       buffer,
       fileName,
       sourceStart,
       duration,
       relTime,
-      relTrack
+      relTrack,
+      kind: items[i].clip.kind,
+      patternId: items[i].clip.patternId
     })))
     return items.length
   }
@@ -2527,7 +2672,9 @@ function App() {
         offsetSeconds: place.offsetSeconds,
         id: `clip-${Date.now()}-${i}-${Math.random()}`,
         sourceStart: item.sourceStart,
-        duration: item.duration
+        duration: item.duration,
+        kind: item.kind,
+        patternId: item.patternId
       }
       newTrackStates[place.trackIndex].clips.push(newClip)
       newIds.add(newClip.id)
@@ -2584,7 +2731,9 @@ function App() {
       offsetSeconds: clip.offsetSeconds + clip.duration,
       id: `clip-${Date.now()}-${Math.random()}`,
       sourceStart: clip.sourceStart,
-      duration: clip.duration
+      duration: clip.duration,
+      kind: clip.kind,
+      patternId: clip.patternId
     }
     
     const newTrackStates = [...trackStates]
@@ -2982,7 +3131,7 @@ function App() {
       sourceStart: clip.sourceStart,
       duration: clip.duration,
       offsetSeconds: clip.offsetSeconds,
-      bufferDuration: clip.buffer.duration
+      bufferDuration: clipBufferDuration(clip)
     }
     const inner = document.querySelector('.lanes-scroll-inner') as HTMLElement | null
     const laneEl = document.querySelector('.track-content') as HTMLElement | null
@@ -3141,12 +3290,24 @@ function App() {
           setTrackDeleteConfirm(null)
         } else if (contextMenu) {
           closeContextMenu()
+        } else if (drumEditorTrack != null) {
+          setDrumEditorTrack(null)
         } else if (selectedClipIds.size > 0) {
           setSelectedClipIds(new Set())
         } else if (selectedAutoPoint) {
           setSelectedAutoPoint(null)
         }
         return
+      }
+      const drumTarget = drumEditorTrack ?? (selectedTrack != null && trackStates[selectedTrack]?.kind === 'drum' ? selectedTrack : null)
+      if (drumTarget != null && !cmdOrCtrl && !e.altKey) {
+        const pad = padKeyIndex(e.key)
+        if (pad >= 0) {
+          e.preventDefault()
+          setDrumSelectedPad(pad)
+          auditionPad(drumTarget, pad)
+          return
+        }
       }
       if (e.key === 's' && cmdOrCtrl && e.shiftKey) {
         e.preventDefault()
@@ -3221,7 +3382,7 @@ function App() {
     
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm, selectedAutoPoint])
+  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm, selectedAutoPoint, drumEditorTrack, selectedTrack])
 
   useEffect(() => {
     const mediaSession = typeof navigator !== 'undefined' ? navigator.mediaSession : null
@@ -3269,6 +3430,10 @@ function App() {
 
   const handleLaneClick = async (trackIndex: number) => {
     const track = trackStates[trackIndex]
+    if (track.kind === 'drum') {
+      openDrumEditor(trackIndex)
+      return
+    }
 
     if (track.clips.length > 0) {
       // If track has clips, do nothing on empty space click
@@ -3347,6 +3512,12 @@ function App() {
     }
     setSelectedTrack(trackIndex)
     pendingOffsetRef.current = next.offsetSeconds
+    if (trackStatesRef.current[trackIndex]?.kind === 'drum') {
+      await loadPadFromFile(trackIndex, drumSelectedPad, next.file)
+      setSelectedTrack(trackIndex)
+      void processNextImport()
+      return
+    }
     const { supported, reason } = isStemSeparationSupported()
     if (!supported) {
       console.warn('Stem separation not supported:', reason)
@@ -4001,6 +4172,12 @@ function App() {
     setSelectedClipIds(planned.selectedIds)
     if (selectedTrack === trackIndex) setSelectedTrack(null)
     else if (selectedTrack !== null && selectedTrack > trackIndex) setSelectedTrack(selectedTrack - 1)
+    setDrumEditorTrack((prev) => {
+      if (prev === trackIndex) return null
+      if (prev != null && prev > trackIndex) return prev - 1
+      return prev
+    })
+    drumEngineRef.current.disposeTrack(trackIndex)
     setRecordArmedIndex((prev) => armedIndexAfterDelete(prev, trackIndex))
     if (recordingTrackIndex != null) {
       if (recordingThis) setRecordingTrackIndex(null)
@@ -4045,6 +4222,7 @@ function App() {
       return next
     })
     setRecordingTrackIndex((prev) => remapNullableIndexAfterInsert(prev, insertAt))
+    setDrumEditorTrack((prev) => remapNullableIndexAfterInsert(prev, insertAt))
     if (recordLiveRef.current) {
       recordLiveRef.current.trackIndex = remapIndexAfterInsert(recordLiveRef.current.trackIndex, insertAt)
     }
@@ -4079,6 +4257,113 @@ function App() {
     return at
   }
 
+  const auditionPad = (trackIndex: number, padIndex: number) => {
+    const track = trackStatesRef.current[trackIndex]
+    const dest = trackGainsRef.current[trackIndex]
+    if (!track?.drum || !dest) return
+    drumEngineRef.current.trigger(trackIndex, padIndex, track.drum, dest, 2)
+  }
+
+  const patchDrumKit = (trackIndex: number, kit: DrumKit) => {
+    const apply = (tracks: TrackState[]) => {
+      const next = tracks.map((track, i) => (i === trackIndex ? { ...track, drum: kit } : track))
+      trackStatesRef.current = next
+      return next
+    }
+    setTrackStates((prev) => apply(prev))
+    if (isPlayingRef.current) scheduleDrums(getSongTime())
+  }
+
+  const loadPadFromFile = async (trackIndex: number, padIndex: number, file: File) => {
+    await ensureAudio()
+    const arrayBuffer = await file.arrayBuffer()
+    const buffer = await Tone.getContext().rawContext.decodeAudioData(arrayBuffer.slice(0))
+    const track = trackStatesRef.current[trackIndex]
+    if (!track?.drum) return
+    const name = file.name.replace(/\.[^.]+$/, '')
+    saveUndo()
+    const kit = updatePad(track.drum, padIndex, { buffer, name: name || track.drum.pads[padIndex]?.name })
+    patchDrumKit(trackIndex, kit)
+    const dest = trackGainsRef.current[trackIndex]
+    if (dest) drumEngineRef.current.loadPad(trackIndex, padIndex, buffer, dest)
+    showClipToast(`Sample en ${kit.pads[padIndex]?.name || 'pad'}`)
+  }
+
+  const openDrumEditor = (trackIndex: number, patternId?: PatternId) => {
+    const track = trackStatesRef.current[trackIndex]
+    if (!track || track.kind !== 'drum') return
+    if (patternId && track.drum && track.drum.activePattern !== patternId) {
+      patchDrumKit(trackIndex, { ...track.drum, activePattern: patternId })
+    }
+    setSelectedTrack(trackIndex)
+    setDrumEditorTrack(trackIndex)
+  }
+
+  const placePatternClip = (trackIndex: number) => {
+    const track = trackStatesRef.current[trackIndex]
+    if (!track?.drum) return
+    saveUndo()
+    const pattern = track.drum.patterns[track.drum.activePattern]
+    const clip = makePatternClip({
+      patternId: track.drum.activePattern,
+      offsetSeconds: snapEnabled ? snapToGrid(playheadPositionRef.current) : playheadPositionRef.current,
+      duration: defaultPatternClipDuration(bpmRef.current, pattern.stepCount, 1),
+      trackIndex
+    })
+    const next = trackStatesRef.current.map((t, i) => (
+      i === trackIndex ? { ...t, clips: [...t.clips, clip] } : t
+    ))
+    trackStatesRef.current = next
+    setTrackStates(next)
+    setSelectedClipIds(new Set([clip.id]))
+    showClipToast(`Patrón ${track.drum.activePattern} colocado`)
+    if (isPlayingRef.current) scheduleDrums(getSongTime())
+  }
+
+  const insertDrumTrackAt = async (index?: number) => {
+    closeContextMenu()
+    saveUndo()
+    await Tone.start()
+    await ensureAudio()
+    const kitBuffers = await synthesizeStarterKit()
+    const starter = createEmptyDrumKit()
+    starter.pads = starter.pads.map((pad, i) => ({ ...pad, buffer: kitBuffers[i] ?? null }))
+    const at = Math.max(0, Math.min(trackStatesRef.current.length, index ?? trackStatesRef.current.length))
+    const joinSolo = newLaneJoinsSolo(trackStatesRef.current)
+    const name = nextDrumTrackName(trackStatesRef.current.map((t) => t.name))
+    if (index != null) {
+      spliceNewChainAt(at)
+      remapAllAfterInsert(at)
+    } else {
+      ensureTrackGains(trackStatesRef.current.length + 1)
+    }
+    const clip = makePatternClip({
+      patternId: 'A',
+      offsetSeconds: 0,
+      duration: defaultPatternClipDuration(bpmRef.current, 16, 4),
+      trackIndex: at
+    })
+    const track: TrackState = {
+      ...createEmptyTrack(name),
+      solo: joinSolo,
+      kind: 'drum',
+      drum: starter,
+      clips: [clip]
+    }
+    const next = trackStatesRef.current.slice()
+    next.splice(at, 0, track)
+    trackStatesRef.current = next
+    applyAllTrackAudio()
+    setTrackStates(next)
+    setSelectedTrack(at)
+    setDrumEditorTrack(at)
+    setDrumSelectedPad(0)
+    showClipToast('Pista de pads creada')
+    return at
+  }
+
+  const addDrumTrack = () => insertDrumTrackAt()
+
   const commitTrackReorder = (from: number, to: number) => {
     if (from === to) return
     const tracks = trackStatesRef.current
@@ -4107,6 +4392,7 @@ function App() {
       return n
     })
     setRecordingTrackIndex((prev) => remapNullableIndexAfterMove(prev, from, to))
+    setDrumEditorTrack((prev) => remapNullableIndexAfterMove(prev, from, to))
     if (recordLiveRef.current) {
       recordLiveRef.current.trackIndex = remapIndexAfterMove(recordLiveRef.current.trackIndex, from, to)
     }
@@ -4295,8 +4581,20 @@ function App() {
   }
 
   const handleLaneDoubleClick = (trackIndex: number) => {
+    if (trackStatesRef.current[trackIndex]?.kind === 'drum') {
+      openDrumEditor(trackIndex)
+      return
+    }
     if (trackStates[trackIndex].clips.length === 0) {
       void handleLaneClick(trackIndex)
+    }
+  }
+
+  const handleClipDoubleClick = (trackIndex: number, clipId: string) => {
+    const track = trackStatesRef.current[trackIndex]
+    const clip = track?.clips.find((c) => c.id === clipId)
+    if (track?.kind === 'drum') {
+      openDrumEditor(trackIndex, clip?.patternId)
     }
   }
 
@@ -4585,6 +4883,77 @@ function App() {
       document.removeEventListener('wheel', onScroll)
     }
   }, [contextMenu])
+
+  useEffect(() => {
+    const api = {
+      addDrumTrack: () => addDrumTrack(),
+      play: () => handlePlayRef.current(),
+      programBasicBeat: (trackIndex?: number) => {
+        const idx = trackIndex ?? trackStatesRef.current.findIndex((t) => t.kind === 'drum')
+        const track = trackStatesRef.current[idx]
+        if (!track?.drum) return false
+        patchDrumKit(idx, programBasicBeat(track.drum))
+        return true
+      },
+      openEditor: (trackIndex?: number) => {
+        const idx = trackIndex ?? trackStatesRef.current.findIndex((t) => t.kind === 'drum')
+        if (idx >= 0) openDrumEditor(idx)
+      },
+      getSchedule: () => lastScheduledDrumEvents.slice(),
+      getSnapshot: () => trackStatesRef.current
+        .filter((t) => t.kind === 'drum' && t.drum)
+        .map((t) => ({
+          name: t.name,
+          kind: t.kind,
+          padNames: t.drum!.pads.map((p) => p.name),
+          padLoaded: t.drum!.pads.map((p) => !!p.buffer),
+          patternA: t.drum!.patterns.A.rows,
+          clipCount: t.clips.length,
+          clips: t.clips.map((c) => ({ kind: c.kind, patternId: c.patternId, duration: c.duration }))
+        })),
+      flushAutosave: async () => {
+        const tracks = await Promise.all(trackStatesRef.current.map(async (t, i) => {
+          const savedClips = t.clips.map((clip, clipIdx) => ({
+            ...projectClipPayload(clip, i, clipIdx),
+            audioBufferKey: isPatternClip(clip) ? undefined : `audio-buffer-${i}-${clipIdx}`
+          }))
+          await Promise.all(t.clips.map(async (clip, clipIdx) => {
+            if (!isPatternClip(clip)) await saveAudioBuffer(`audio-buffer-${i}-${clipIdx}`, clip.buffer)
+          }))
+          if (t.drum) {
+            await Promise.all(t.drum.pads.map(async (pad, padIdx) => {
+              if (pad.buffer) await saveAudioBuffer(padIdbKey(i, padIdx), pad.buffer)
+            }))
+          }
+          return {
+            name: resolveTrackName(t.name, i),
+            mute: t.mute,
+            solo: t.solo,
+            volume: t.volume,
+            kind: trackKindOf(t.kind),
+            drum: projectDrumPayload(t.drum, i),
+            ...serializeTrackAudio(t),
+            clips: savedClips
+          }
+        }))
+        await writeAutosaveNow({
+          id: currentProjectIdRef.current || undefined,
+          name: currentProjectName,
+          bpm: bpmRef.current,
+          loopStart: loopStartRef.current,
+          loopEnd: loopEndRef.current,
+          playheadPosition: playheadPositionRef.current,
+          tracks,
+          metronomeEnabled,
+          isLoopEnabled: isLoopEnabledRef.current
+        })
+      }
+    }
+    ;(window as unknown as { __musicaliaDrums?: typeof api }).__musicaliaDrums = api
+    return () => {
+      delete (window as unknown as { __musicaliaDrums?: typeof api }).__musicaliaDrums
+    }
+  })
 
   return (
     <div
@@ -5221,6 +5590,7 @@ function App() {
                 <TrackHeader
                   trackIndex={trackIndex}
                   name={trackState.name}
+                  kind={trackState.kind}
                   mute={trackState.mute}
                   solo={trackState.solo}
                   volume={trackState.volume}
@@ -5279,28 +5649,40 @@ function App() {
               </div>
             ))}
           </div>
-          <button
-            type="button"
-            className="add-track-button"
-            data-testid="add-track-button"
-            title="Agregar pista"
-            onClick={addEmptyTrack}
-            onContextMenu={(e) => {
-              e.preventDefault()
-              e.stopPropagation()
-              setContextMenu({
-                x: e.clientX,
-                y: e.clientY,
-                trackIndex: trackStates.length - 1,
-                clipId: null,
-                time: 0,
-                kind: 'empty'
-              })
-            }}
-          >
-            <IconPlus size={14} />
-            Agregar pista
-          </button>
+          <div className="add-track-group">
+            <button
+              type="button"
+              className="add-track-button"
+              data-testid="add-track-button"
+              title="Agregar pista"
+              onClick={addEmptyTrack}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                setContextMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  trackIndex: trackStates.length - 1,
+                  clipId: null,
+                  time: 0,
+                  kind: 'empty'
+                })
+              }}
+            >
+              <IconPlus size={14} />
+              Agregar pista
+            </button>
+            <button
+              type="button"
+              className="add-track-button add-drum-track-button"
+              data-testid="add-drum-track"
+              title="Agregar pista de pads"
+              onClick={() => { void addDrumTrack() }}
+            >
+              <IconDrum size={14} />
+              Batería (pads)
+            </button>
+          </div>
         </div>
         <div 
           className="resize-handle"
@@ -5386,11 +5768,21 @@ function App() {
             <div className="track-stack" key={trackIndex} data-testid={`lane-stack-${trackIndex}`}>
             <TrackLane
               trackIndex={trackIndex}
+              trackKind={trackState.kind}
               hasClips={trackState.clips.length > 0}
               isAnyClipPlaying={trackState.clips.some(c => c.isPlaying)}
               height={88 * verticalZoom}
               maxDur={maxDur}
-              clips={trackState.clips}
+              clips={
+                trackState.kind === 'drum' && trackState.drum
+                  ? trackState.clips.map((clip) => ({
+                      ...clip,
+                      patternRows: clip.kind === 'pattern'
+                        ? trackState.drum!.patterns[clip.patternId ?? trackState.drum!.activePattern]?.rows
+                        : undefined
+                    }))
+                  : trackState.clips
+              }
               selectedClipIds={selectedClipIds}
               isLoopEnabled={isLoopEnabled}
               loopStart={loopStart}
@@ -5402,6 +5794,7 @@ function App() {
               onMouseDown={handleTrackMouseDown}
               onContextMenuTrack={openContextMenu}
               onClipClick={handleClipClick}
+              onClipDoubleClick={handleClipDoubleClick}
               onResizeStart={handleResizeStart}
               onClipDragStart={handleClipDragStart}
               isRecordingLane={isRecording && recordingTrackIndex === trackIndex}
@@ -5483,6 +5876,11 @@ function App() {
                   onClick={() => insertEmptyTrackAt(contextMenu.trackIndex + 1)}
                 />
                 <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
+                <ContextMenuItem
+                  icon={<IconDrum />}
+                  label="Insertar pista de pads"
+                  onClick={() => { void insertDrumTrackAt(contextMenu.trackIndex + 1) }}
+                />
                 <div className="context-menu-sep" />
                 <ContextMenuItem
                   icon={<IconTrash />}
@@ -5493,7 +5891,14 @@ function App() {
                 />
               </>
             ) : contextMenu.kind === 'empty' ? (
-              <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
+              <>
+                <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
+                <ContextMenuItem
+                  icon={<IconDrum />}
+                  label="Insertar pista de pads"
+                  onClick={() => { void addDrumTrack() }}
+                />
+              </>
             ) : contextMenu.clipId ? (
               <>
                 <ContextMenuItem icon={<IconScissors />} label="Cortar" shortcut="Ctrl+X" onClick={() => runContextMenuAction('cut')} />
@@ -5528,6 +5933,11 @@ function App() {
                 />
                 <div className="context-menu-sep" />
                 <ContextMenuItem icon={<IconPlus />} label="Agregar pista" onClick={addEmptyTrack} />
+                <ContextMenuItem
+                  icon={<IconDrum />}
+                  label="Insertar pista de pads"
+                  onClick={() => { void insertDrumTrackAt(contextMenu.trackIndex + 1) }}
+                />
               </>
             )}
           </div>
@@ -5564,6 +5974,32 @@ function App() {
         </div>
       )}
 
+      {drumEditorTrack != null && trackStates[drumEditorTrack]?.drum && (
+        <div className="drum-editor-dock" data-testid="drum-editor-dock">
+          <div className="drum-editor-dock-bar">
+            <strong>{resolveTrackName(trackStates[drumEditorTrack].name, drumEditorTrack)}</strong>
+            <span className="drum-editor-dock-hint">Q W E R / A S D F · doble clic en la pista o el clip</span>
+            <button type="button" className="drum-toolbar-btn" onClick={() => setDrumEditorTrack(null)}>
+              Cerrar
+            </button>
+          </div>
+          <DrumEditor
+            kit={trackStates[drumEditorTrack].drum!}
+            selectedPad={drumSelectedPad}
+            onSelectPad={setDrumSelectedPad}
+            onChangeKit={(kit) => patchDrumKit(drumEditorTrack, kit)}
+            onAudition={(index) => auditionPad(drumEditorTrack, index)}
+            onLoadPadFile={(index, file) => { void loadPadFromFile(drumEditorTrack, index, file) }}
+            onExpandPads={() => {
+              const kit = trackStates[drumEditorTrack]?.drum
+              if (kit) patchDrumKit(drumEditorTrack, expandDrumKit(kit))
+            }}
+            onPlaceClip={() => placePatternClip(drumEditorTrack)}
+            onPickFile={(index) => setDrumSelectedPad(index)}
+          />
+        </div>
+      )}
+
       {showHelp && (
         <div className="drive-projects-modal">
           <div className="modal-content help-modal" style={{ maxWidth: '600px' }}>
@@ -5594,6 +6030,7 @@ function App() {
                 <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
                 <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar, Insertar pista arriba/abajo, Agregar pista, Eliminar pista</li>
                 <li>• <strong>+ Agregar pista</strong> - Añade una pista vacía al final (Pista 9, 10, …). También en una pista vacía o zona vacía (clic derecho). Se puede deshacer</li>
+                <li>• <strong>Batería (pads)</strong> - Pista de sampler estilo Redrum: 8 pads (hasta 16), kit inicial sintetizado y secuenciador de 16/32 pasos. Click derecho → Insertar pista de pads. Doble clic abre el editor</li>
                 <li>• <strong>Soltar audio entre pistas</strong> - Inserta una pista nueva en ese lugar. Sobre una pista la coloca ahí</li>
                 <li>• <strong>Cmd/Ctrl+Z</strong> - Deshacer (incluye nombre, clips, volumen, mute y solo)</li>
                 <li>• <strong>Volumen de pista</strong> - El audio cambia al arrastrar; el valor se guarda al soltar</li>
@@ -5635,7 +6072,8 @@ function App() {
               <ul>
                 <li>• <strong>Cmd/Ctrl+S</strong> - Guardar proyecto localmente</li>
                 <li>• <strong>Shift+Cmd/Ctrl+S</strong> - Guardar como... (nueva ubicación)</li>
-                <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead</li>
+                <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead (S dispara el pad si el editor de batería está abierto)</li>
+                <li>• <strong>Q W E R / A S D F</strong> - Dispara los pads de la pista de batería seleccionada o con el editor abierto</li>
                 <li>• <strong>Cmd/Ctrl+X</strong> - Cortar clips seleccionados</li>
                 <li>• <strong>Cmd/Ctrl+C</strong> - Copiar clips seleccionados</li>
                 <li>• <strong>Cmd/Ctrl+V</strong> - Pegar selección en playhead (posiciones relativas)</li>

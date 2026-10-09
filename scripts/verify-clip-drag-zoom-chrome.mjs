@@ -71,6 +71,10 @@ async function serveDist() {
 }
 
 async function measureAndDrag(page, nPx) {
+  await page.locator('[data-testid="clip-wrapper"]').evaluate((el) => {
+    el.scrollIntoView({ block: 'center', inline: 'center' })
+  })
+  await page.waitForTimeout(80)
   const before = await page.evaluate((n) => {
     const inner = document.querySelector('[data-testid="lanes-scroll-inner"]')
     const clip = document.querySelector('[data-testid="clip-wrapper"]')
@@ -80,15 +84,19 @@ async function measureAndDrag(page, nPx) {
     const zoom = Number(inner.getAttribute('data-horizontal-zoom') || '1')
     const innerBox = inner.getBoundingClientRect()
     const box = body.getBoundingClientRect()
+    const startX = Math.max(box.left + 8, Math.min(box.right - 8, window.innerWidth * 0.4))
+    const startY = box.top + box.height / 2
     return {
       zoom,
       layout,
       innerWidth: innerBox.width,
       pxPerSec: innerBox.width / layout,
       before: Number(clip.getAttribute('data-clip-offset')),
-      startX: box.left + Math.min(24, Math.max(8, box.width / 3)),
-      startY: box.top + box.height / 2,
-      n
+      startX,
+      startY,
+      n,
+      clipWidth: box.width,
+      boxLeft: box.left
     }
   }, nPx)
   await page.mouse.move(before.startX, before.startY)
@@ -97,11 +105,14 @@ async function measureAndDrag(page, nPx) {
   await page.mouse.up()
   await page.waitForTimeout(120)
   const after = Number(await page.getAttribute('[data-testid="clip-wrapper"]', 'data-clip-offset'))
+  const expected = nPx / before.pxPerSec
+  const delta = after - before.before
   return {
     ...before,
     after,
-    delta: after - before.before,
-    expected: nPx / before.pxPerSec
+    delta,
+    expected,
+    pixelError: Math.abs(delta * before.pxPerSec - nPx)
   }
 }
 
@@ -158,7 +169,7 @@ async function main() {
   await browser.close()
   server.close()
 
-  const mismatches = results.filter((r) => Math.abs(r.delta - r.expected) > 0.02)
+  const mismatches = results.filter((r) => r.pixelError > 1.25)
   const out = {
     ok: mismatches.length === 0,
     version,

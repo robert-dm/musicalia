@@ -24,7 +24,6 @@ export interface TrackLaneDataProps {
   clips: unknown
   selectedClipIds: unknown
   isLoopEnabled: boolean
-  isDraggingLoopEdge: boolean
   loopStart: number | null
   loopEnd: number | null
   tempLoopStart: number | null
@@ -62,7 +61,6 @@ export function trackLaneDataEqual(prev: TrackLaneDataProps, next: TrackLaneData
     prev.clips === next.clips &&
     prev.selectedClipIds === next.selectedClipIds &&
     prev.isLoopEnabled === next.isLoopEnabled &&
-    prev.isDraggingLoopEdge === next.isDraggingLoopEdge &&
     prev.loopStart === next.loopStart &&
     prev.loopEnd === next.loopEnd &&
     prev.tempLoopStart === next.tempLoopStart &&

@@ -75,7 +75,6 @@ const laneA = {
   clips,
   selectedClipIds: selected,
   isLoopEnabled: false,
-  isDraggingLoopEdge: false,
   loopStart: null,
   loopEnd: null,
   tempLoopStart: null,

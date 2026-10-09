@@ -16,12 +16,31 @@ import {
   login,
   verifyAuth,
   clearAuth,
+  hasAuth,
   type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
 import { encodeAudioBufferWAV } from './wav'
 import { TrackHeader } from './TrackHeader'
 import { TrackLane } from './TrackLane'
+import { MyProjectsDialog } from './MyProjectsDialog'
+import {
+  buildRegistryEntry,
+  deleteFileHandle,
+  ensureHandlePermission,
+  hasFileSystemAccess,
+  idsMatch,
+  listProjectRegistry,
+  loadFileHandle,
+  newProjectId,
+  persistFileHandle,
+  pickMusicaliaFile,
+  readProjectIdFromJson,
+  removeProjectRegistry,
+  updateProjectLocationNote,
+  upsertProjectRegistry,
+  type ProjectRegistryEntry
+} from './projectRegistry'
 import { TimelineRuler } from './TimelineRuler'
 import {
   applyLoopSnap,
@@ -157,6 +176,7 @@ import {
   IconDownload,
   IconFilePlus,
   IconFolderOpen,
+  IconList,
   IconLogIn,
   IconLogOut,
   IconMagnet,
@@ -192,7 +212,7 @@ import {
   resolveTrackName
 } from './clipSelection'
 
-const APP_VERSION = '0.0086b'
+const APP_VERSION = '0.0087b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -366,6 +386,13 @@ function App() {
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [authLoading, setAuthLoading] = useState(false)
   const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null)
+  const currentProjectIdRef = useRef<string | null>(null)
+  const [showMyProjects, setShowMyProjects] = useState(false)
+  const [myProjects, setMyProjects] = useState<ProjectRegistryEntry[]>([])
+  const [myProjectsLoading, setMyProjectsLoading] = useState(false)
+  const [myProjectsError, setMyProjectsError] = useState<string | null>(null)
+  const [myProjectsHint, setMyProjectsHint] = useState<string | null>(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string>('')
@@ -769,6 +796,8 @@ function App() {
       }))
       
       const state = {
+        id: currentProjectIdRef.current || undefined,
+        name: currentProjectName,
         bpm,
         pitchSemitones,
         tempoRate,
@@ -786,7 +815,7 @@ function App() {
     
     const timer = window.setTimeout(() => { void saveState() }, 1000)
     return () => window.clearTimeout(timer)
-  }, [bpm, pitchSemitones, tempoRate, harmony, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled])
+  }, [bpm, pitchSemitones, tempoRate, harmony, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled, currentProjectName, currentProjectId])
 
   useEffect(() => {
     const handleWheel = (e: WheelEvent) => {
@@ -847,6 +876,11 @@ function App() {
       }
       setLoopStart(state.loopStart)
       setLoopEnd(state.loopEnd)
+      if (state.id) {
+        currentProjectIdRef.current = state.id
+        setCurrentProjectId(state.id)
+      }
+      if (state.name) setCurrentProjectName(state.name)
       commitPlayhead(state.playheadPosition)
       if (state.metronomeEnabled !== undefined) setMetronomeEnabled(state.metronomeEnabled)
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
@@ -944,6 +978,9 @@ function App() {
     console.log(`[New Project] Starting new project, gen=${projectLoadGenRef.current}`)
     await clearProject()
     setCurrentProjectName('Proyecto sin título')
+    currentProjectIdRef.current = null
+    setCurrentProjectId(null)
+    setCurrentFileHandle(null)
     window.location.reload()
   }
   
@@ -986,9 +1023,40 @@ function App() {
   const handleLogout = () => {
     clearAuth()
     setCurrentUser(null)
+    setShowMyProjects(false)
+    setMyProjects([])
     setToastMessage('Sesión cerrada')
     setShowToast(true)
     setTimeout(() => setShowToast(false), 3000)
+  }
+
+  const ensureProjectId = () => {
+    if (currentProjectIdRef.current) return currentProjectIdRef.current
+    const id = newProjectId()
+    currentProjectIdRef.current = id
+    setCurrentProjectId(id)
+    return id
+  }
+
+  const registerSavedProject = async (projectName: string, fileName: string, handle?: FileSystemFileHandle | null) => {
+    const id = ensureProjectId()
+    if (handle) {
+      setCurrentFileHandle(handle)
+      await persistFileHandle(id, handle)
+    }
+    if (!currentUser && !hasAuth()) return
+    try {
+      const entries = await upsertProjectRegistry(buildRegistryEntry({
+        id,
+        name: projectName,
+        fileName,
+        bpm,
+        trackCount: trackStatesRef.current.length
+      }))
+      setMyProjects(entries)
+    } catch (error) {
+      console.warn('[Registry] No se pudo actualizar Mis proyectos:', error)
+    }
   }
 
   const handleSaveToLocal = async (saveAs = false) => {
@@ -1008,7 +1076,7 @@ function App() {
       
       // Otherwise, ask for file location FIRST (before any async work)
       // This preserves user activation for showSaveFilePicker
-      const fileName = `${currentProjectName.replace(/[^a-z0-9]/gi, '_')}.musicalia`
+      const fileName = `${sanitizeFilename(currentProjectName) || 'proyecto'}.musicalia`
       
       if ('showSaveFilePicker' in window) {
         try {
@@ -1020,8 +1088,9 @@ function App() {
             }]
           })
           
-          // Extract the project name from the chosen file name
-          const savedFileName = handle.name.replace(/\.musicalia$/, '').replace(/_/g, ' ')
+          // Keep the in-app name unless the user picked a different file name
+          const chosenBase = String(handle.name || fileName).replace(/\.musicalia$/i, '').trim()
+          const savedFileName = chosenBase || currentProjectName
           setCurrentProjectName(savedFileName)
           setCurrentFileHandle(handle)
           
@@ -1054,6 +1123,7 @@ function App() {
       
       const projectData = {
         version: APP_VERSION,
+        id: ensureProjectId(),
         name: projectName,
         bpm,
         pitchSemitones,
@@ -1133,6 +1203,7 @@ function App() {
       setToastMessage(`✅ Proyecto guardado: ${projectName}`)
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
+      await registerSavedProject(projectName, fileHandle.name || `${projectName}.musicalia`, fileHandle)
       
       console.log(`[Save] Project saved successfully: ${projectName}`)
     } catch (err: any) {
@@ -1153,6 +1224,7 @@ function App() {
       
       const projectData = {
         version: APP_VERSION,
+        id: ensureProjectId(),
         name: currentProjectName,
         bpm,
         pitchSemitones,
@@ -1235,6 +1307,7 @@ function App() {
       setToastMessage(`✅ Proyecto descargado: ${currentProjectName}`)
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
+      await registerSavedProject(currentProjectName, fileName)
       
       console.log(`[Save] Project downloaded: ${currentProjectName}`)
     } catch (err: any) {
@@ -1247,7 +1320,7 @@ function App() {
   }
   
 
-  const handleOpenFromLocal = async (file: File) => {
+  const handleOpenFromLocal = async (file: File, opts?: { expectedId?: string; fileHandle?: FileSystemFileHandle | null }) => {
     try {
       setExportProgress('Cargando proyecto...')
       setUploadProgress(5)
@@ -1264,6 +1337,18 @@ function App() {
       
       const projectJson = await projectFile.async('string')
       const projectData = JSON.parse(projectJson)
+      const fileId = readProjectIdFromJson(projectData)
+      if (opts?.expectedId && !idsMatch(opts.expectedId, fileId)) {
+        const ok = window.confirm('Este archivo no coincide con el proyecto de la lista (otro id). ¿Abrirlo de todos modos?')
+        if (!ok) return
+      }
+      const resolvedId = fileId || opts?.expectedId || newProjectId()
+      currentProjectIdRef.current = resolvedId
+      setCurrentProjectId(resolvedId)
+      if (opts?.fileHandle) {
+        setCurrentFileHandle(opts.fileHandle)
+        void persistFileHandle(resolvedId, opts.fileHandle)
+      }
       
       setUploadProgress(20)
       setExportProgress('Cargando audio...')
@@ -1373,6 +1458,88 @@ function App() {
     } finally {
       setUploadProgress(0)
       setExportProgress('')
+    }
+  }
+
+  const openMyProjects = async () => {
+    if (!currentUser && !hasAuth()) {
+      setShowAuth(true)
+      setAuthMode('login')
+      return
+    }
+    setShowMyProjects(true)
+    setMyProjectsHint(null)
+    setMyProjectsError(null)
+    setMyProjectsLoading(true)
+    try {
+      setMyProjects(await listProjectRegistry())
+    } catch (error: any) {
+      setMyProjectsError(error.message || 'Error al listar proyectos')
+    } finally {
+      setMyProjectsLoading(false)
+    }
+  }
+
+  const openFromRegistry = async (entry: ProjectRegistryEntry) => {
+    setMyProjectsError(null)
+    try {
+      const handle = await loadFileHandle(entry.id)
+      if (handle) {
+        const allowed = await ensureHandlePermission(handle, 'read')
+        if (allowed) {
+          try {
+            const file = await handle.getFile()
+            await handleOpenFromLocal(file, { expectedId: entry.id, fileHandle: handle })
+            setShowMyProjects(false)
+            return
+          } catch {
+            // Handle expired or file moved — fall through to picker
+          }
+        }
+      }
+      const missingMsg = `«${entry.fileName}» no está en esta computadora. Elegí el archivo .musicalia correspondiente.`
+      setMyProjectsHint(missingMsg)
+      window.alert(missingMsg)
+      const picked = await pickMusicaliaFile()
+      await handleOpenFromLocal(picked.file, { expectedId: entry.id, fileHandle: picked.handle })
+      setShowMyProjects(false)
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return
+      setMyProjectsError(error?.message || 'No se pudo abrir el proyecto')
+    }
+  }
+
+  const removeFromRegistry = async (entry: ProjectRegistryEntry) => {
+    if (!window.confirm(`¿Quitar «${entry.name}» de la lista? El archivo local no se borra.`)) return
+    try {
+      const entries = await removeProjectRegistry(entry.id)
+      setMyProjects(entries)
+      await deleteFileHandle(entry.id)
+    } catch (error: any) {
+      setMyProjectsError(error.message || 'Error al quitar el proyecto de la lista')
+    }
+  }
+
+  const saveLocationNote = async (id: string, note: string) => {
+    try {
+      setMyProjects(await updateProjectLocationNote(id, note))
+    } catch (error: any) {
+      setMyProjectsError(error.message || 'Error al guardar la ubicación')
+    }
+  }
+
+  const handleOpenProjectClick = async () => {
+    if (!hasFileSystemAccess()) {
+      localFileInputRef.current?.click()
+      return
+    }
+    try {
+      const picked = await pickMusicaliaFile()
+      await handleOpenFromLocal(picked.file, { fileHandle: picked.handle })
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return
+      setErrorMessage(error.message || 'Error al abrir proyecto local')
+      setTimeout(() => setErrorMessage(null), 5000)
     }
   }
 
@@ -4429,11 +4596,21 @@ function App() {
           </button>
           <button
             className="header-btn"
-            onClick={() => localFileInputRef.current?.click()}
+            onClick={() => { void handleOpenProjectClick() }}
             title="Abrir proyecto"
           >
             <IconFolderOpen />
             <span className="btn-label">Abrir</span>
+          </button>
+          <button
+            className="header-btn"
+            data-testid="my-projects-button"
+            onClick={() => { void openMyProjects() }}
+            title="Mis proyectos"
+            aria-label="Mis proyectos"
+          >
+            <IconList />
+            <span className="btn-label">Mis proyectos</span>
           </button>
         </div>
 
@@ -4824,6 +5001,19 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {showMyProjects && (
+        <MyProjectsDialog
+          entries={myProjects}
+          loading={myProjectsLoading}
+          error={myProjectsError}
+          hint={myProjectsHint}
+          onClose={() => setShowMyProjects(false)}
+          onOpen={(entry) => { void openFromRegistry(entry) }}
+          onRemove={(entry) => { void removeFromRegistry(entry) }}
+          onLocationNote={(id, note) => { void saveLocationNote(id, note) }}
+        />
       )}
 
       {showAuth && (
@@ -5380,8 +5570,10 @@ function App() {
               
               <h3>Guardar y Abrir</h3>
               <ul>
-                <li>• <strong>Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe)</li>
+                <li>• <strong>Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe). El audio nunca sube a la nube</li>
                 <li>• <strong>Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>
+                <li>• <strong>Mis proyectos</strong> - Con sesión iniciada, cada Guardar anota nombre, archivo, fecha, BPM y pistas. Solo metadatos: el .musicalia sigue en tu disco. Si el archivo está en esta computadora se abre directo; si no, elegís el .musicalia. Quitar borra la entrada, no el archivo</li>
+                <li>• <strong>Ubicación</strong> - El navegador no revela la ruta completa. Podés anotar carpeta o disco a mano</li>
                 <li>• Los proyectos incluyen todo el audio y stems sin rehacer separación</li>
               </ul>
               

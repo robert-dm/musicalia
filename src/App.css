@@ -1327,6 +1327,87 @@
   line-height: 1.7;
 }
 
+.my-projects-modal {
+  max-width: 720px;
+}
+
+.my-projects-hint {
+  color: var(--accent) !important;
+}
+
+.my-projects-error {
+  color: var(--danger) !important;
+}
+
+.my-projects-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 16px;
+}
+
+.my-projects-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.my-projects-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.my-projects-name {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.my-projects-file {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.my-projects-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.my-projects-location {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.my-projects-location input {
+  height: 28px;
+  padding: 0 8px;
+}
+
+.my-projects-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.my-projects-actions .btn {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 @media (max-width: 1500px) {
   .audio-diagnostics {
     display: none;

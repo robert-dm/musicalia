@@ -138,9 +138,10 @@ export async function PATCH(request: Request) {
     if (typeof body.id !== 'string' || !body.id.trim()) {
       return Response.json({ error: 'id requerido' }, { status: 400 })
     }
+    const id = body.id.trim()
     const note = typeof body.locationNote === 'string' ? body.locationNote.trim() : ''
     const entries = (await loadEntries(session.userId)).map((entry) => (
-      entry.id === body.id.trim() ? { ...entry, locationNote: note } : entry
+      entry.id === id ? { ...entry, locationNote: note } : entry
     ))
     await saveEntries(session.userId, entries)
     return Response.json({ entries })

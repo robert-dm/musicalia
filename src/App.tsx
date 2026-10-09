@@ -62,9 +62,19 @@ import {
   clampTempoRate,
   createClipPlayer,
   effectiveBpm,
+  MAX_PITCH_SEMITONES,
+  MAX_TEMPO_RATE,
+  MIN_PITCH_SEMITONES,
+  MIN_TEMPO_RATE,
+  PITCH_SEMITONE_RESET,
+  PITCH_SEMITONE_STEP,
   songTimeFromWall,
+  TEMPO_RATE_RESET,
+  TEMPO_RATE_STEP,
   wallDelayForSong
 } from './clipPlayer'
+import { NumberStepper } from './NumberStepper'
+import { formatPitchSemitones, formatTempoRate, parsePitchSemitones, parseTempoRate } from './numberStepper'
 import {
   AISLAR_TRANSPORT_TITLE,
   newLaneJoinsSolo,
@@ -225,7 +235,7 @@ import {
   zoomToSlider
 } from './timelineZoom'
 
-const APP_VERSION = '0.0088b'
+const APP_VERSION = '0.0089b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -4737,7 +4747,7 @@ function App() {
         <div className="tb-sep" aria-hidden="true" />
 
         <div className="tb-group tb-tempo" role="group" aria-label="Tempo">
-          <div className="bpm-control">
+          <div className="bpm-control" data-testid="bpm-control">
             <span className="bpm-label">BPM</span>
             <input
               type="number"
@@ -4747,39 +4757,48 @@ function App() {
               min="20"
               max="300"
             />
-            {Math.abs(tempoRate - 1) > 0.001 && (
-              <span className="bpm-effective" title="BPM que suena con la velocidad actual">
-                → {effectiveBpm(bpm, tempoRate)}
-              </span>
-            )}
+            <span
+              className="bpm-effective"
+              data-testid="bpm-effective"
+              data-active={Math.abs(tempoRate - 1) > 0.001 ? 'true' : 'false'}
+              title="BPM que suena con la velocidad actual"
+            >
+              → {effectiveBpm(bpm, tempoRate)}
+            </span>
           </div>
           <div className="pitch-tempo-controls">
-            <label className="pt-field" title="Tono global, ±12 semitonos">
+            <div className="pt-field" title="Tono global, ±12 semitonos">
               <span>Tono</span>
-              <input
-                type="range"
-                min={-12}
-                max={12}
-                step={1}
+              <NumberStepper
                 value={pitchSemitones}
-                onChange={(e) => handlePitch(parseInt(e.target.value, 10))}
-                aria-label="Tono en semitonos"
+                min={MIN_PITCH_SEMITONES}
+                max={MAX_PITCH_SEMITONES}
+                step={PITCH_SEMITONE_STEP}
+                resetValue={PITCH_SEMITONE_RESET}
+                format={formatPitchSemitones}
+                parse={parsePitchSemitones}
+                clamp={clampPitchSemitones}
+                onChange={handlePitch}
+                ariaLabel="Tono en semitonos"
+                testId="tono-stepper"
               />
-              <span className="pt-value">{pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones}</span>
-            </label>
-            <label className="pt-field" title="Velocidad 0.5x–1.5x (GrainPlayer)">
+            </div>
+            <div className="pt-field" title="Velocidad 0.5x–1.5x (GrainPlayer)">
               <span>Vel.</span>
-              <input
-                type="range"
-                min={0.5}
-                max={1.5}
-                step={0.05}
+              <NumberStepper
                 value={tempoRate}
-                onChange={(e) => handleTempoRate(parseFloat(e.target.value))}
-                aria-label="Velocidad de reproducción"
+                min={MIN_TEMPO_RATE}
+                max={MAX_TEMPO_RATE}
+                step={TEMPO_RATE_STEP}
+                resetValue={TEMPO_RATE_RESET}
+                format={formatTempoRate}
+                parse={parseTempoRate}
+                clamp={clampTempoRate}
+                onChange={handleTempoRate}
+                ariaLabel="Velocidad de reproducción"
+                testId="vel-stepper"
               />
-              <span className="pt-value">{tempoRate.toFixed(2)}x</span>
-            </label>
+            </div>
           </div>
           <button
             className={`header-btn icon-only toggle-btn ${metronomeEnabled ? 'active' : ''}`}
@@ -4792,6 +4811,7 @@ function App() {
           </button>
           <button
             className={`header-btn toggle-btn ${snapEnabled ? 'active' : ''}`}
+            data-testid="snap-toggle"
             aria-pressed={snapEnabled}
             onClick={() => {
               setSnapEnabled(prev => {
@@ -4803,7 +4823,7 @@ function App() {
             title={`Snap ${snapEnabled ? 'ON' : 'OFF'}. Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras`}
           >
             <IconMagnet />
-            <span className="btn-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
+            <span className="btn-label snap-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
           </button>
           <button
             className={`header-btn icon-only toggle-btn ${isLoopEnabled ? 'active' : ''}`}
@@ -5588,8 +5608,8 @@ function App() {
 
               <h3>Tono, tempo y práctica</h3>
               <ul>
-                <li>• <strong>Tono</strong> - ±12 semitonos en todo el proyecto (GrainPlayer, independiente de la velocidad)</li>
-                <li>• <strong>Velocidad</strong> - 0.5x a 1.5x. El BPM que suena aparece al lado del BPM del proyecto (p. ej. 120 → 90)</li>
+                <li>• <strong>Tono</strong> - −/+ de a 0.5 semitonos (±12). Doble clic en el valor vuelve a 0. Se puede escribir un número exacto</li>
+                <li>• <strong>Velocidad</strong> - −/+ de a 0.05x (0.50x–1.50x). Doble clic vuelve a 1.00x. El BPM que suena queda al lado del BPM del proyecto (p. ej. 120 → 90)</li>
                 <li>• <strong>Detectar acordes</strong> - Analiza la mezcla o una pista con chroma espectral en el navegador. Muestra la tonalidad (p. ej. La menor) y etiquetas sobre la regla. Pulsá de nuevo para recalcular. Es una heurística: en temas densos o con distorsión puede equivocarse</li>
               </ul>
 

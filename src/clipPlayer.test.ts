@@ -22,9 +22,12 @@ function assert(cond: boolean, msg: string) {
 assert(clampTempoRate(1) === 1, 'identity tempo')
 assert(clampTempoRate(0.2) === 0.5, 'tempo floor 0.5x')
 assert(clampTempoRate(3) === 1.5, 'tempo cap 1.5x')
-assert(clampPitchSemitones(3.7) === 4, 'pitch rounds to semitone')
+assert(clampTempoRate(1.03) === 1.05, 'tempo quantizes to 0.05x')
+assert(clampPitchSemitones(3.7) === 3.5, 'pitch quantizes to 0.5 semitone')
 assert(clampPitchSemitones(-20) === -12, 'pitch floor')
 assert(clampPitchSemitones(20) === 12, 'pitch cap')
+assert(clampPitchSemitones(0.4) === 0.5, 'pitch 0.4 → 0.5')
+assert(clampPitchSemitones(-0.2) === 0, 'pitch −0.2 → 0')
 assert(effectiveBpm(120, 0.5) === 60, 'half speed shows 60 BPM')
 assert(effectiveBpm(120, 1.5) === 180, '1.5x shows 180 BPM')
 assert(wallDelayForSong(4, 0.5) === 8, 'half speed waits twice as long')
@@ -38,6 +41,8 @@ assert(
 const node = { playbackRate: 1, detune: 0 }
 applyClipPlayback(node, 0.75, -5)
 assert(node.playbackRate === 0.75 && node.detune === -500, 'grain player rate + detune in cents')
+applyClipPlayback(node, 1, 0.5)
+assert(node.playbackRate === 1 && node.detune === 50, 'half-semitone detune is 50 cents')
 
 type FakeNative = { duration: number; length: number }
 type FakeWrapper = {

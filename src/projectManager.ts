@@ -2,6 +2,8 @@ import { get, set, del } from 'idb-keyval'
 import { encodeWAV, decodeWAV } from './wav'
 
 interface ProjectState {
+  id?: string
+  name?: string
   bpm: number
   loopStart: number | null
   loopEnd: number | null

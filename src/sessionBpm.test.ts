@@ -1,4 +1,4 @@
-import { sessionHasAudio, shouldApplyDetectedBpm } from './sessionBpm'
+import { firstImportOffset, sessionHasAudio, shouldApplyDetectedBpm } from './sessionBpm'
 
 let failed = 0
 function assert(cond: boolean, msg: string) {
@@ -34,6 +34,11 @@ assert(
   !shouldApplyDetectedBpm({ hasExistingAudio: true, bpmManuallySet: false, detectedBpm: 88 }),
   'stem split / recording after first track keeps existing BPM'
 )
+assert(firstImportOffset(false, 70) === 0, 'first song always at 0')
+assert(firstImportOffset(false, 81) === 0, 'playhead ~1:21 does not place the first song')
+assert(firstImportOffset(false, undefined) === 0, 'first song ignores missing offset')
+assert(firstImportOffset(true, 12.5) === 12.5, 'later import keeps drop time')
+assert(firstImportOffset(true, undefined) === 0, 'later import without offset is 0')
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

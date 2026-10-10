@@ -8,7 +8,7 @@ import { StemFallbackDialog, StemSplitDialog, StemSplitProgress } from './StemSp
 import { separateStems, isStemSeparationSupported } from './stemSeparator'
 import { DEFAULT_STEM_QUALITY, type StemQuality } from './stemQuality'
 import { decorateProgress, type StemSeparationProgress } from './stemProgress'
-import { sessionHasAudio, shouldApplyDetectedBpm } from './sessionBpm'
+import { firstImportOffset, sessionHasAudio, shouldApplyDetectedBpm } from './sessionBpm'
 import { demucsLanes, selectAudibleStems, skippedStemNote, spleeterLanes, type StemLane } from './stemTracks'
 import { autosaveProject, loadProject, clearProject, saveAudioBuffer, loadAudioBuffer, writeAutosaveNow } from './projectManager'
 import {
@@ -264,7 +264,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0090b'
+const APP_VERSION = '0.0091b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -1042,7 +1042,6 @@ function App() {
       ensureTrackGains(state.tracks.length)
       
       setBpm(state.bpm)
-      bpmManuallySetRef.current = true
       const loadedPitch = clampPitchSemitones(Number((state as { pitchSemitones?: unknown }).pitchSemitones) || 0)
       const loadedRate = clampTempoRate(Number((state as { tempoRate?: unknown }).tempoRate) || 1)
       pitchRef.current = loadedPitch
@@ -1135,6 +1134,7 @@ function App() {
       }
       
       setTrackStates(newTrackStates)
+      bpmManuallySetRef.current = sessionHasAudio(newTrackStates)
       console.log(`[Mount] Local project loaded successfully`)
     })
   }, [])
@@ -1585,7 +1585,6 @@ function App() {
       }
       
       setBpm(projectData.bpm || 120)
-      bpmManuallySetRef.current = true
       const loadedPitch = clampPitchSemitones(Number(projectData.pitchSemitones) || 0)
       const loadedRate = clampTempoRate(Number(projectData.tempoRate) || 1)
       Tone.getTransport().bpm.value = effectiveBpm(projectData.bpm || 120, loadedRate)
@@ -1602,6 +1601,7 @@ function App() {
       setLoopEnd(projectData.loopEnd ?? null)
       commitPlayhead(projectData.playheadPosition || 0)
       setTrackStates(newTrackStates)
+      bpmManuallySetRef.current = sessionHasAudio(newTrackStates)
       setCurrentProjectName(projectData.name || 'Proyecto sin título')
       
       setUploadProgress(100)
@@ -3758,7 +3758,7 @@ function App() {
       isPlaying: false,
       buffer,
       startPosition: 0,
-      offsetSeconds: offsetSeconds ?? getCountInSeconds(),
+      offsetSeconds: firstImportOffset(sessionHasAudio(trackStatesRef.current), offsetSeconds),
       id: `clip-${Date.now()}-${Math.random()}`,
       sourceStart: 0,
       duration: buffer.duration
@@ -3780,25 +3780,27 @@ function App() {
 
   const maybeApplyDetectedBpm = async (buffer: AudioBuffer) => {
     const hasExistingAudio = sessionHasAudio(trackStatesRef.current)
-    if (hasExistingAudio || bpmManuallySetRef.current) return
+    if (hasExistingAudio) return
     const bpmResult = await detectBPM(buffer)
     if (!shouldApplyDetectedBpm({
       hasExistingAudio,
       bpmManuallySet: bpmManuallySetRef.current,
       detectedBpm: bpmResult.bpm
     })) {
-      if (!bpmResult.bpm) {
+      if (!bpmResult.bpm && !bpmManuallySetRef.current) {
         console.log('[BPM] Detection failed, keeping current BPM')
-        setErrorMessage('No se pudo detectar el tempo')
-        setTimeout(() => setErrorMessage(null), 3000)
+        setToastMessage('No se pudo detectar el tempo')
+        setShowToast(true)
+        setTimeout(() => setShowToast(false), 3000)
       }
       return
     }
     console.log('[BPM] Detected:', bpmResult.bpm)
     setBpm(bpmResult.bpm as number)
     Tone.getTransport().bpm.value = effectiveBpm(bpmResult.bpm as number, tempoRateRef.current)
-    setErrorMessage(`Tempo: ${bpmResult.bpm}`)
-    setTimeout(() => setErrorMessage(null), 3000)
+    setToastMessage(`Tempo detectado: ${bpmResult.bpm} BPM`)
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 4000)
   }
 
   const processStemSeparation = async (
@@ -3822,15 +3824,17 @@ function App() {
     await maybeApplyDetectedBpm(originalBuffer)
 
     const startedAt = Date.now()
-    const reportProgress = (progress: { progress: number; stage: string }) => {
-      setStemProgress(decorateProgress(progress, startedAt))
+    let progressFloor = 0
+    const reportProgress = (progress: { progress: number; stage: string; etaSeconds?: number }) => {
+      progressFloor = Math.max(progressFloor, progress.progress)
+      setStemProgress(decorateProgress({ ...progress, progress: progressFloor }, startedAt, progressFloor))
     }
 
     let lanes: StemLane[]
     if (quality === 'demucs') {
       const { separateStemsDemucs } = await import('./demucsSeparator')
       const stems = await separateStemsDemucs(originalBuffer, reportProgress, abortController.signal)
-      const { kept, skipped } = selectAudibleStems(demucsLanes(stems))
+      const { kept, skipped } = selectAudibleStems(demucsLanes(stems), originalBuffer)
       if (kept.length === 0) {
         throw new Error('HT-Demucs no produjo pistas audibles. Prueba Básica / Rápida o una sola pista.')
       }
@@ -3868,7 +3872,7 @@ function App() {
       })
     }
     ensureTrackGains(newTrackStates.length)
-    const stemOffset = offsetSeconds ?? getCountInSeconds()
+    const stemOffset = firstImportOffset(sessionHasAudio(trackStatesRef.current), offsetSeconds)
 
     for (let i = 0; i < lanes.length; i++) {
       const targetTrackIndex = startTrackIndex + i

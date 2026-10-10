@@ -22,10 +22,10 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
     }
     
     const mt = new MusicTempo(audioToAnalyze)
-    const bpm = mt.tempo
+    const bpm = normalizeDetectedBpm(mt.tempo)
     
-    if (bpm && bpm >= 60 && bpm <= 200) {
-      return { bpm: Math.round(bpm), confidence: 0.8 }
+    if (bpm != null) {
+      return { bpm, confidence: 0.8 }
     }
     
     return { bpm: null, confidence: 0 }
@@ -33,6 +33,16 @@ export async function detectBPM(audioBuffer: AudioBuffer): Promise<BPMDetectionR
     console.error('BPM detection error:', error)
     return { bpm: null, confidence: 0 }
   }
+}
+
+/** Fold half-time / double-time guesses into a typical song range. */
+export function normalizeDetectedBpm(raw: unknown): number | null {
+  let bpm = Number(raw)
+  if (!Number.isFinite(bpm) || bpm <= 0) return null
+  while (bpm < 70) bpm *= 2
+  while (bpm > 160) bpm /= 2
+  if (bpm < 60 || bpm > 200) return null
+  return Math.round(bpm)
 }
 
 function convertToMono(audioBuffer: AudioBuffer): Float32Array {

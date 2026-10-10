@@ -14,3 +14,10 @@ export function shouldApplyDetectedBpm(input: {
   if (input.bpmManuallySet) return false
   return true
 }
+
+/** First song in an empty session always starts at 0:00 / bar 1. */
+export function firstImportOffset(hasExistingAudio: boolean, requestedOffset?: number): number {
+  if (!hasExistingAudio) return 0
+  const n = Number(requestedOffset)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}

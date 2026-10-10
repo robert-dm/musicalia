@@ -49,6 +49,7 @@ export function StemSplitDialog({ onConfirm, onCancel }: StemSplitDialogProps) {
         <p className="modal-note">
           <strong>Básica / Rápida</strong> usa Spleeter (4 pistas, ~80 MB, más rápido).
           {' '}<strong>Mejor calidad</strong> usa HT-Demucs 6 pistas (~136 MB): Voz, Batería, Bajo, Guitarra, Piano y Otros.
+          {' '}<strong>Guitarra agrupa todas las guitarras</strong> (HT-Demucs 6s no las separa).
           Las pistas casi silenciosas se omiten. La primera vez se descarga el modelo.
           <br /><br />
           <strong>Requisitos:</strong> navegador moderno y varios GB de RAM.

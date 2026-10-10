@@ -38,8 +38,10 @@ export const SPLEETER_LANE_ORDER: Array<{ id: keyof SpleeterStemBuffers; name: s
   { id: 'other', name: 'Other' },
 ]
 
-export const NEAR_SILENT_PEAK = 0.004
-export const NEAR_SILENT_RMS = 0.0004
+/** Absolute floor: quieter than this is empty (Evenflow piano/otros sit below / near this). */
+export const SILENT_RMS_DBFS = -45
+/** Relative floor: less than 2% of mix energy is leftover bleed, not a real part. */
+export const SILENT_ENERGY_RATIO = 0.02
 
 export function stemPeakRms(buffer: AudioBuffer): { peak: number; rms: number } {
   let peak = 0
@@ -57,9 +59,22 @@ export function stemPeakRms(buffer: AudioBuffer): { peak: number; rms: number } 
   return { peak, rms: count > 0 ? Math.sqrt(sumSq / count) : 0 }
 }
 
-export function isNearSilent(buffer: AudioBuffer): boolean {
-  const { peak, rms } = stemPeakRms(buffer)
-  return peak < NEAR_SILENT_PEAK && rms < NEAR_SILENT_RMS
+export function rmsToDbfs(rms: number): number {
+  if (!(rms > 0) || !Number.isFinite(rms)) return -Infinity
+  return 20 * Math.log10(rms)
+}
+
+export function stemEnergyRatio(stemRms: number, mixRms: number): number {
+  if (!(mixRms > 0) || !Number.isFinite(mixRms)) return 1
+  if (!(stemRms > 0) || !Number.isFinite(stemRms)) return 0
+  return (stemRms * stemRms) / (mixRms * mixRms)
+}
+
+export function isNearSilent(buffer: AudioBuffer, mixRms?: number): boolean {
+  const { rms } = stemPeakRms(buffer)
+  if (rmsToDbfs(rms) < SILENT_RMS_DBFS) return true
+  if (mixRms != null && mixRms > 0 && stemEnergyRatio(rms, mixRms) < SILENT_ENERGY_RATIO) return true
+  return false
 }
 
 export function spleeterLanes(stems: SpleeterStemBuffers): StemLane[] {
@@ -78,11 +93,15 @@ export function demucsLanes(stems: DemucsStemBuffers): StemLane[] {
   }))
 }
 
-export function selectAudibleStems(lanes: StemLane[]): { kept: StemLane[]; skipped: StemLane[] } {
+export function selectAudibleStems(
+  lanes: StemLane[],
+  mix?: AudioBuffer | { rms: number }
+): { kept: StemLane[]; skipped: StemLane[] } {
+  const mixRms = mix && 'getChannelData' in mix ? stemPeakRms(mix).rms : mix?.rms
   const kept: StemLane[] = []
   const skipped: StemLane[] = []
   for (const lane of lanes) {
-    if (isNearSilent(lane.buffer)) skipped.push(lane)
+    if (isNearSilent(lane.buffer, mixRms)) skipped.push(lane)
     else kept.push(lane)
   }
   return { kept, skipped }
@@ -91,7 +110,5 @@ export function selectAudibleStems(lanes: StemLane[]): { kept: StemLane[]; skipp
 export function skippedStemNote(skipped: StemLane[]): string | null {
   if (skipped.length === 0) return null
   const names = skipped.map((lane) => lane.name).join(', ')
-  return skipped.length === 1
-    ? `Pista casi silenciosa omitida: ${names}`
-    : `Pistas casi silenciosas omitidas: ${names}`
+  return `Se omitieron: ${names} (sin contenido)`
 }

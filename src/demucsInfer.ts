@@ -7,11 +7,12 @@ import {
   DEMUCS_STEM_ROWS,
   DEMUCS_STRIDE,
   demucsChunkCount,
+  edgeAwareWindow,
   makeTransitionWindow,
   normalizeOverlapAdd,
   packStereoChunk,
 } from './demucsChunking'
-import { interpolateChunkProgress, type StemSeparationProgress } from './stemProgress'
+import { etaFromChunkMs, interpolateChunkProgress, phaseProgress, type StemSeparationProgress } from './stemProgress'
 
 export type DemucsChannelPair = readonly [Float32Array, Float32Array]
 
@@ -37,7 +38,7 @@ export async function inferDemucsChunks(
 ): Promise<DemucsChannelPair[]> {
   const total = left.length
   const nChunks = demucsChunkCount(total)
-  const window = makeTransitionWindow(DEMUCS_N_SAMPLES, DEMUCS_OVERLAP)
+  const baseWindow = makeTransitionWindow(DEMUCS_N_SAMPLES, DEMUCS_OVERLAP)
   const outs: DemucsChannelPair[] = DEMUCS_STEM_ROWS.map(
     () => [new Float32Array(total), new Float32Array(total)] as const
   )
@@ -50,11 +51,15 @@ export async function inferDemucsChunks(
     const end = Math.min(start + DEMUCS_N_SAMPLES, total)
     const clen = end - start
     const chunkStart = Date.now()
+    const window = edgeAwareWindow(baseWindow, i, nChunks)
+    const inferStart = phaseProgress('infer', 0)
+    const inferEnd = phaseProgress('infer', 1)
 
     const pulse = setInterval(() => {
       onProgress?.({
-        progress: interpolateChunkProgress(i, nChunks, Date.now() - chunkStart, estimatedChunkMs, 30, 90),
+        progress: interpolateChunkProgress(i, nChunks, Date.now() - chunkStart, estimatedChunkMs, inferStart, inferEnd),
         stage: `Procesando bloque ${i + 1}/${nChunks}…`,
+        etaSeconds: etaFromChunkMs(nChunks - i, estimatedChunkMs),
       })
     }, 400)
 
@@ -86,13 +91,14 @@ export async function inferDemucsChunks(
 
     estimatedChunkMs = Date.now() - chunkStart
     onProgress?.({
-      progress: interpolateChunkProgress(i + 1, nChunks, estimatedChunkMs, estimatedChunkMs, 30, 90),
+      progress: interpolateChunkProgress(i + 1, nChunks, estimatedChunkMs, estimatedChunkMs, inferStart, inferEnd),
       stage: `Procesando bloque ${i + 1}/${nChunks}…`,
+      etaSeconds: etaFromChunkMs(nChunks - i - 1, estimatedChunkMs),
     })
     await new Promise((r) => setTimeout(r, 0))
   }
 
-  onProgress?.({ progress: 92, stage: 'Reconstruyendo pistas…' })
+  onProgress?.({ progress: phaseProgress('assemble', 0.4), stage: 'Reconstruyendo pistas…' })
   normalizeOverlapAdd(outs.flatMap(([l, r]) => [l, r]), weight)
   return outs
 }

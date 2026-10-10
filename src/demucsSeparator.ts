@@ -9,6 +9,7 @@
  */
 
 import { resampleChannel } from './audioResample'
+import { DEMUCS_SAMPLE_RATE } from './demucsChunking'
 import { channelsAtDemucsRate, inferDemucsChunks, type DemucsChannelPair } from './demucsInfer'
 import { mapDemucsError } from './demucsErrors'
 export { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_DATA_BYTES, DEMUCS_MODEL_URL, DEMUCS_MODEL_DATA_URL } from './demucsModel'
@@ -27,7 +28,7 @@ import {
 } from './demucsOrt'
 import type { DemucsWorkerRequest, DemucsWorkerResponse } from './demucsWorker'
 import { fetchDemucsModelFiles } from './modelDownload'
-import { makeProgressReporter, type StemSeparationProgress } from './stemProgress'
+import { makeProgressReporter, phaseProgress, type StemSeparationProgress } from './stemProgress'
 import type { DemucsStemBuffers } from './stemTracks'
 
 const WATCHDOG_MS = 5 * 60 * 1000
@@ -53,14 +54,20 @@ function toStereoBuffer(
   return buffer
 }
 
+function toOriginalRate(left: Float32Array, right: Float32Array, sampleRate: number, length: number): AudioBuffer {
+  const l = sampleRate === DEMUCS_SAMPLE_RATE ? left : resampleChannel(left, DEMUCS_SAMPLE_RATE, sampleRate)
+  const r = sampleRate === DEMUCS_SAMPLE_RATE ? right : resampleChannel(right, DEMUCS_SAMPLE_RATE, sampleRate)
+  return toStereoBuffer(l, r, sampleRate, length)
+}
+
 function pairsToStems(outs: DemucsChannelPair[], sampleRate: number, length: number): DemucsStemBuffers {
   return {
-    drums: toStereoBuffer(outs[0][0], outs[0][1], sampleRate, length),
-    bass: toStereoBuffer(outs[1][0], outs[1][1], sampleRate, length),
-    other: toStereoBuffer(outs[2][0], outs[2][1], sampleRate, length),
-    vocals: toStereoBuffer(outs[3][0], outs[3][1], sampleRate, length),
-    guitar: toStereoBuffer(outs[4][0], outs[4][1], sampleRate, length),
-    piano: toStereoBuffer(outs[5][0], outs[5][1], sampleRate, length),
+    drums: toOriginalRate(outs[0][0], outs[0][1], sampleRate, length),
+    bass: toOriginalRate(outs[1][0], outs[1][1], sampleRate, length),
+    other: toOriginalRate(outs[2][0], outs[2][1], sampleRate, length),
+    vocals: toOriginalRate(outs[3][0], outs[3][1], sampleRate, length),
+    guitar: toOriginalRate(outs[4][0], outs[4][1], sampleRate, length),
+    piano: toOriginalRate(outs[5][0], outs[5][1], sampleRate, length),
   }
 }
 
@@ -115,7 +122,7 @@ async function runInWorker(
     worker.onmessage = (event: MessageEvent<DemucsWorkerResponse>) => {
       const msg = event.data
       if (msg.type === 'progress') {
-        onProgress({ progress: msg.progress, stage: msg.stage })
+        onProgress({ progress: msg.progress, stage: msg.stage, etaSeconds: msg.etaSeconds })
         return
       }
       signal?.removeEventListener('abort', abort)
@@ -151,7 +158,7 @@ async function runOnMainThread(
         const frac = total > 0 ? loadedBytes / total : 0
         const label = part === 'graph' ? 'grafo' : 'pesos'
         onProgress({
-          progress: 4 + frac * 18,
+          progress: phaseProgress('download', part === 'graph' ? frac * 0.45 : 0.45 + frac * 0.55),
           stage: cached
             ? `Modelo HT-Demucs (${label}) en caché`
             : `Descargando ${label} HT-Demucs… ${Math.round(frac * 100)}%`,
@@ -161,7 +168,7 @@ async function runOnMainThread(
     )
     throwIfAborted(signal)
     onProgress({
-      progress: 24,
+      progress: phaseProgress('session', 0.4),
       stage: loaded.provider === 'webgpu' ? 'Creando sesión WebGPU…' : 'Creando sesión WASM…',
     })
 
@@ -171,13 +178,14 @@ async function runOnMainThread(
     } catch (error) {
       if (loaded.provider !== 'webgpu') throw error
       console.warn('[HT-Demucs] WebGPU falló, usando WASM', error)
-      onProgress({ progress: 25, stage: 'WebGPU no disponible, usando WASM…' })
+      onProgress({ progress: phaseProgress('session', 0.7), stage: 'WebGPU no disponible, usando WASM…' })
       loaded.restore()
       loaded = await loadDemucsOnnxRuntime(false)
       session = await createDemucsSession(loaded.ort, 'wasm', files.graph, files.data)
     }
     files.graph.fill(0)
     files.data.fill(0)
+    onProgress({ progress: phaseProgress('session', 1), stage: 'Sesión lista. Separando…' })
 
     throwIfAborted(signal)
     const outs = await inferDemucsChunks(loaded.ort, session, left, right, onProgress, signal)
@@ -228,18 +236,20 @@ export async function separateStemsDemucs(
       )
     }
 
-    wrapped({ progress: 1, stage: 'Inicializando HT-Demucs…' })
+    wrapped({ progress: phaseProgress('init', 0.4), stage: 'Inicializando HT-Demucs…' })
     // Probe GPU on the page thread. Dedicated module workers in Chrome often
     // lack navigator.gpu even when the tab can use WebGPU.
     const preferWebGPU = await hasWebGPU()
     wrapped({
-      progress: 3,
+      progress: phaseProgress('init', 1),
       stage: preferWebGPU ? 'Inicializando (WebGPU)…' : 'Inicializando (WASM)…',
     })
 
     const origLeft = audioBuffer.getChannelData(0)
     const origRight = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : origLeft
+    wrapped({ progress: phaseProgress('decode', 0.3), stage: 'Preparando audio…' })
     const { left, right } = channelsAtDemucsRate(origLeft, origRight, audioBuffer.sampleRate, resampleChannel)
+    wrapped({ progress: phaseProgress('decode', 1), stage: 'Audio a 44.1 kHz' })
 
     let outs: DemucsChannelPair[]
     if (preferWebGPU) {
@@ -248,7 +258,7 @@ export async function separateStemsDemucs(
       } catch (error) {
         if (signal?.aborted) throw error
         console.warn('[HT-Demucs] WebGPU en hilo principal falló, WASM en worker', error)
-        wrapped({ progress: 4, stage: 'WebGPU no disponible, usando WASM…' })
+        wrapped({ progress: phaseProgress('session', 0.2), stage: 'WebGPU no disponible, usando WASM…' })
         outs = await runInWorker(left, right, false, wrapped, signal)
       }
     } else {
@@ -257,7 +267,7 @@ export async function separateStemsDemucs(
       } catch (error) {
         if (signal?.aborted) throw error
         console.warn('[HT-Demucs] worker no disponible, usando hilo principal', error)
-        wrapped({ progress: 4, stage: 'Worker no disponible, usando hilo principal…' })
+        wrapped({ progress: phaseProgress('session', 0.2), stage: 'Worker no disponible, usando hilo principal…' })
         outs = await runOnMainThread(left, right, false, wrapped, signal)
       }
     }
@@ -268,10 +278,10 @@ export async function separateStemsDemucs(
       )
     }
 
-    wrapped({ progress: 96, stage: 'Creando pistas…' })
+    wrapped({ progress: phaseProgress('assemble', 1), stage: 'Alineando con el original…' })
     const result = pairsToStems(outs, audioBuffer.sampleRate, audioBuffer.length)
     validateDemucsStems(result)
-    wrapped({ progress: 100, stage: 'Completado' })
+    wrapped({ progress: phaseProgress('tracks', 1), stage: 'Completado' })
     return result
   } catch (error) {
     throw mapDemucsError(error)

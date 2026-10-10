@@ -23,6 +23,28 @@ export function makeTransitionWindow(seg: number, overlap: number): Float32Array
   return w
 }
 
+/** First/last chunks keep full gain at the song edges so OLA does not invent leading/trailing silence. */
+export function edgeAwareWindow(
+  base: Float32Array,
+  chunkIndex: number,
+  chunkCount: number,
+  overlap = DEMUCS_OVERLAP
+): Float32Array {
+  if (chunkCount <= 1) {
+    const flat = new Float32Array(base.length)
+    flat.fill(1)
+    return flat
+  }
+  const w = base.slice()
+  if (chunkIndex === 0) {
+    for (let i = 0; i < overlap && i < w.length; i++) w[i] = 1
+  }
+  if (chunkIndex === chunkCount - 1) {
+    for (let i = 0; i < overlap && i < w.length; i++) w[w.length - overlap + i] = 1
+  }
+  return w
+}
+
 export function demucsChunkCount(totalSamples: number, stride = DEMUCS_STRIDE): number {
   if (totalSamples <= 0) return 1
   return Math.max(1, Math.ceil(totalSamples / stride))

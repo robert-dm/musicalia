@@ -3,7 +3,7 @@ import { DEMUCS_MODEL_BYTES, DEMUCS_MODEL_DATA_BYTES, DEMUCS_MODEL_DATA_URL, DEM
 import { inferDemucsChunks } from './demucsInfer'
 import { fetchModelWithProgress } from './modelDownload'
 import { createDemucsSession, hasWebGPU, loadDemucsOnnxRuntime } from './demucsOrt'
-import type { StemSeparationProgress } from './stemProgress'
+import { phaseProgress, type StemSeparationProgress } from './stemProgress'
 
 export type DemucsWorkerRequest = {
   type: 'run'
@@ -13,12 +13,17 @@ export type DemucsWorkerRequest = {
 }
 
 export type DemucsWorkerResponse =
-  | { type: 'progress'; progress: number; stage: string }
+  | { type: 'progress'; progress: number; stage: string; etaSeconds?: number }
   | { type: 'done'; stems: Array<[Float32Array, Float32Array]> }
   | { type: 'error'; message: string }
 
 function postProgress(progress: StemSeparationProgress): void {
-  const msg: DemucsWorkerResponse = { type: 'progress', progress: progress.progress, stage: progress.stage }
+  const msg: DemucsWorkerResponse = {
+    type: 'progress',
+    progress: progress.progress,
+    stage: progress.stage,
+    etaSeconds: progress.etaSeconds,
+  }
   self.postMessage(msg)
 }
 
@@ -32,7 +37,7 @@ async function loadGraphAndWeights(
     (loadedBytes, total, cached) => {
       const frac = total > 0 ? loadedBytes / total : 0
       onProgress({
-        progress: 4 + frac * 8,
+        progress: phaseProgress('download', frac * 0.45),
         stage: cached
           ? 'Modelo HT-Demucs en caché'
           : `Descargando grafo HT-Demucs… ${Math.round(frac * 100)}%`,
@@ -46,7 +51,7 @@ async function loadGraphAndWeights(
     (loadedBytes, total, cached) => {
       const frac = total > 0 ? loadedBytes / total : 0
       onProgress({
-        progress: 12 + frac * 10,
+        progress: phaseProgress('download', 0.45 + frac * 0.55),
         stage: cached
           ? 'Pesos HT-Demucs en caché'
           : `Descargando pesos HT-Demucs… ${Math.round(frac * 100)}%`,
@@ -68,7 +73,7 @@ self.onmessage = async (event: MessageEvent<DemucsWorkerRequest>) => {
       console.info('[HT-Demucs] navigator.gpu ausente en el worker; WASM en el worker')
     }
     postProgress({
-      progress: 3,
+      progress: phaseProgress('init', 1),
       stage: preferWebGPU ? 'Inicializando (WebGPU)…' : 'Inicializando (WASM)…',
     })
     const loaded = await loadDemucsOnnxRuntime(preferWebGPU)
@@ -79,7 +84,7 @@ self.onmessage = async (event: MessageEvent<DemucsWorkerRequest>) => {
     const { graphBytes, dataBytes } = await loadGraphAndWeights(postProgress)
 
     postProgress({
-      progress: 24,
+      progress: phaseProgress('session', 0.4),
       stage: provider === 'webgpu' ? 'Creando sesión WebGPU…' : 'Creando sesión WASM…',
     })
     let session
@@ -88,7 +93,7 @@ self.onmessage = async (event: MessageEvent<DemucsWorkerRequest>) => {
     } catch (error) {
       if (provider === 'webgpu') {
         console.warn('[HT-Demucs] WebGPU falló, reintentando WASM', error)
-        postProgress({ progress: 25, stage: 'WebGPU no disponible, usando WASM…' })
+        postProgress({ progress: phaseProgress('session', 0.7), stage: 'WebGPU no disponible, usando WASM…' })
         loaded.restore()
         const wasm = await loadDemucsOnnxRuntime(false)
         restore = wasm.restore
@@ -101,6 +106,7 @@ self.onmessage = async (event: MessageEvent<DemucsWorkerRequest>) => {
     }
     graphBytes.fill(0)
     dataBytes.fill(0)
+    postProgress({ progress: phaseProgress('session', 1), stage: 'Sesión lista. Separando…' })
 
     const outs = await inferDemucsChunks(ort, session, data.left, data.right, postProgress)
     try {

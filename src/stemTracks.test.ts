@@ -59,7 +59,33 @@ const stems = {
 const { kept, skipped } = selectAudibleStems(demucsLanes(stems))
 assert(kept.map((l) => l.name).join(',') === 'Voz,Batería,Bajo,Otros', 'keeps audible Demucs stems')
 assert(skipped.map((l) => l.name).join(',') === 'Guitarra,Piano', 'skips silent guitar/piano')
-assert((skippedStemNote(skipped) || '').includes('Guitarra'), 'Spanish skip note')
+assert((skippedStemNote(skipped) || '') === 'Se omitieron: Guitarra, Piano (sin contenido)', 'Spanish skip note')
+
+function constRms(rms: number, length = 1000): AudioBuffer {
+  const data = new Float32Array(length)
+  data.fill(rms)
+  return {
+    numberOfChannels: 1,
+    length,
+    sampleRate: 44100,
+    duration: length / 44100,
+    getChannelData: () => data,
+  } as unknown as AudioBuffer
+}
+
+const mixish = { rms: 0.15 }
+const bleed = constRms(0.015)
+assert(isNearSilent(bleed, mixish.rms), '2% energy vs mix is omitted')
+assert(!isNearSilent(loud, mixish.rms), 'real part vs mix is kept')
+assert(isNearSilent(constRms(0.002), mixish.rms), 'Evenflow-like piano (-54 dBFS) is omitted')
+assert(!isNearSilent(constRms(0.06), mixish.rms), 'guitar-level stem is kept')
+
+// Measured on Evenflow via scripts/verify-evenflow-stems.mts (chunks 0 + 25).
+const evenflowMix = 0.0899
+assert(isNearSilent(constRms(0.000019), evenflowMix), 'Evenflow piano (−94 dBFS) is omitted')
+assert(isNearSilent(constRms(0.0000095), evenflowMix), 'Evenflow other (−100 dBFS) is omitted')
+assert(!isNearSilent(constRms(0.0148), evenflowMix), 'Evenflow guitar is kept')
+assert(!isNearSilent(constRms(0.0129), evenflowMix), 'Evenflow bass is kept')
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

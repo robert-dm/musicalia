@@ -6,6 +6,7 @@ import {
   DEMUCS_STRIDE,
   accumulateStemChannel,
   demucsChunkCount,
+  edgeAwareWindow,
   makeTransitionWindow,
   normalizeOverlapAdd,
   packStereoChunk,
@@ -38,6 +39,10 @@ assert(demucsChunkCount(DEMUCS_STRIDE + 1) === 2, 'one sample over stride is two
 
 const w = makeTransitionWindow(8, 4)
 assert(almost(w[0], 0) && almost(w[3], 1) && almost(w[4], 1) && almost(w[7], 0), 'linspace fade window')
+const first = edgeAwareWindow(w, 0, 3, 4)
+assert(almost(first[0], 1) && almost(first[7], 0), 'first chunk has no leading fade')
+const last = edgeAwareWindow(w, 2, 3, 4)
+assert(almost(last[0], 0) && almost(last[7], 1), 'last chunk has no trailing fade')
 
 const left = new Float32Array([1, 2, 3, 4, 5])
 const right = new Float32Array([9, 8, 7, 6, 5])

@@ -19,7 +19,7 @@ export const STEM_QUALITY_OPTIONS: StemQualityOption[] = [
     id: 'demucs',
     label: 'Mejor calidad',
     blurb:
-      'HT-Demucs 6 pistas (Voz, Batería, Bajo, Guitarra, Piano, Otros). ~136 MB. Tarda más y usa más memoria. Las pistas casi silenciosas se omiten.',
+      'HT-Demucs 6 pistas (Voz, Batería, Bajo, Guitarra, Piano, Otros). Guitarra agrupa todas las guitarras: el modelo no las separa. ~136 MB. Tarda más y usa más memoria. Las pistas casi silenciosas se omiten.',
   },
 ]
 

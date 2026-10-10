@@ -24,6 +24,10 @@ assert(!isStemQuality('other'), 'rejects unknown quality')
 assert(stemQualityOption('demucs').label.includes('calidad'), 'Demucs label mentions calidad')
 assert(STEM_QUALITY_OPTIONS[0].blurb.toLowerCase().includes('spleeter'), 'basic blurb names Spleeter')
 assert(STEM_QUALITY_OPTIONS[1].blurb.toLowerCase().includes('6'), 'quality blurb mentions 6 stems')
+assert(
+  STEM_QUALITY_OPTIONS[1].blurb.toLowerCase().includes('todas las guitarra'),
+  'quality blurb says guitarra groups all guitars'
+)
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

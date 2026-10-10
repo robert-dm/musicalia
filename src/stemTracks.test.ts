@@ -80,6 +80,13 @@ assert(!isNearSilent(loud, mixish.rms), 'real part vs mix is kept')
 assert(isNearSilent(constRms(0.002), mixish.rms), 'Evenflow-like piano (-54 dBFS) is omitted')
 assert(!isNearSilent(constRms(0.06), mixish.rms), 'guitar-level stem is kept')
 
+// Measured on Evenflow via scripts/verify-evenflow-stems.mts (chunks 0 + 25).
+const evenflowMix = 0.0899
+assert(isNearSilent(constRms(0.000019), evenflowMix), 'Evenflow piano (−94 dBFS) is omitted')
+assert(isNearSilent(constRms(0.0000095), evenflowMix), 'Evenflow other (−100 dBFS) is omitted')
+assert(!isNearSilent(constRms(0.0148), evenflowMix), 'Evenflow guitar is kept')
+assert(!isNearSilent(constRms(0.0129), evenflowMix), 'Evenflow bass is kept')
+
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)
   process.exit(1)

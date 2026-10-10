@@ -5,9 +5,9 @@
  *   npx tsx scripts/verify-evenflow-stems.mts [/path/to/evenflow.mp3]
  */
 import { execFileSync } from 'node:child_process'
-import { createRequire } from 'node:module'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { DEMUCS_N_SAMPLES, DEMUCS_STEM_ROWS, DEMUCS_STRIDE } from '../src/demucsChunking.ts'
 import { createDemucsSession, loadDemucsOnnxRuntime } from '../src/demucsOrt.ts'
@@ -61,9 +61,34 @@ async function detectFromMix(left: Float32Array, right: Float32Array, sampleRate
   return detectBPM(buffer)
 }
 
-function pointWasmPaths() {
-  const require = createRequire(import.meta.url)
-  return join(dirname(require.resolve('onnxruntime-web/package.json')), 'dist') + '/'
+function wasmDistDir() {
+  return fileURLToPath(new URL('../node_modules/onnxruntime-web/dist/', import.meta.url))
+}
+
+async function createVerifySession() {
+  const graph = new Uint8Array(readFileSync(MODEL_PATH))
+  const data = new Uint8Array(readFileSync(MODEL_DATA))
+  try {
+    const ortNode = await import('onnxruntime-node') as typeof import('onnxruntime-node')
+    console.log('session create via onnxruntime-node')
+    const session = await ortNode.InferenceSession.create(graph, {
+      executionProviders: ['cpu'],
+      graphOptimizationLevel: 'disabled',
+      enableCpuMemArena: false,
+      enableMemPattern: false,
+      externalData: [{ path: DEMUCS_EXTERNAL_DATA_PATH, data }],
+    })
+    return { ort: ortNode, session, restore: () => undefined }
+  } catch (error) {
+    console.warn('onnxruntime-node unavailable, using onnxruntime-web', error instanceof Error ? error.message : error)
+  }
+  const loaded = await loadDemucsOnnxRuntime(false)
+  loaded.ort.env.wasm.wasmPaths = wasmDistDir()
+  loaded.ort.env.wasm.numThreads = 1
+  loaded.ort.env.wasm.proxy = false
+  console.log('session create via onnxruntime-web', wasmDistDir())
+  const session = await createDemucsSession(loaded.ort, 'wasm', graph, data)
+  return { ort: loaded.ort, session, restore: loaded.restore }
 }
 
 async function runChunks(
@@ -74,15 +99,8 @@ async function runChunks(
   if (!existsSync(MODEL_PATH) || !existsSync(MODEL_DATA)) {
     throw new Error(`missing ${MODEL_PATH} or ${MODEL_DATA}`)
   }
-  const loaded = await loadDemucsOnnxRuntime(false)
+  const loaded = await createVerifySession()
   try {
-    loaded.ort.env.wasm.wasmPaths = pointWasmPaths()
-    loaded.ort.env.wasm.numThreads = 1
-    loaded.ort.env.wasm.proxy = false
-    const graph = new Uint8Array(readFileSync(MODEL_PATH))
-    const data = new Uint8Array(readFileSync(MODEL_DATA))
-    console.log('session create', MODEL_PATH, 'external', DEMUCS_EXTERNAL_DATA_PATH)
-    const session = await createDemucsSession(loaded.ort, 'wasm', graph, data)
 
     const acc = DEMUCS_STEM_ROWS.map(() => new Float32Array(left.length))
     const mixSlice = new Float32Array(left.length)
@@ -97,11 +115,11 @@ async function runChunks(
       chunk.set(left.subarray(start, end), 0)
       chunk.set(right.subarray(start, end), DEMUCS_N_SAMPLES)
       const t0 = Date.now()
-      const results = await session.run({
+      const results = await loaded.session.run({
         mix: new loaded.ort.Tensor('float32', chunk, [1, 2, DEMUCS_N_SAMPLES]),
       })
       console.log(`chunk ${i} ${Date.now() - t0}ms`)
-      const stems = results.stems ?? results[session.outputNames[0]]
+      const stems = results.stems ?? results[loaded.session.outputNames[0]]
       const dataOut = stems.data as Float32Array
       for (let row = 0; row < DEMUCS_STEM_ROWS.length; row++) {
         const offset = row * 2 * DEMUCS_N_SAMPLES
@@ -112,12 +130,18 @@ async function runChunks(
     }
 
     try {
-      session.release()
+      loaded.session.release()
     } catch {
       /* ignore */
     }
 
     const mixRms = channelRms(mixSlice.subarray(0, Math.max(used, 1)))
+    const edge = Math.min(4410, acc[0].length)
+    const leading = DEMUCS_STEM_ROWS.map((name, row) => ({
+      name,
+      first100msRms: channelRms(acc[row].subarray(0, edge)),
+    }))
+    console.log('leading_100ms', JSON.stringify(leading))
     const rows = DEMUCS_STEM_ROWS.map((name, row) => {
       const rms = channelRms(acc[row])
       return {
@@ -128,7 +152,7 @@ async function runChunks(
         omit: rmsToDbfs(rms) < SILENT_RMS_DBFS || stemEnergyRatio(rms, mixRms) < SILENT_ENERGY_RATIO,
       }
     })
-    return { mixRms, mixDbfs: rmsToDbfs(mixRms), rows }
+    return { mixRms, mixDbfs: rmsToDbfs(mixRms), rows, leading }
   } finally {
     loaded.restore()
   }

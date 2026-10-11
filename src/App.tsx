@@ -178,6 +178,7 @@ import {
   nudgeClipOffsetSeconds,
   persistRecordLatencySettings,
   placeRecordedClip,
+  onsetTimesSeconds,
   peakTimeSeconds,
   songTimeOfContextTime,
   type RecordLatencySettings
@@ -5171,22 +5172,28 @@ function App() {
         isPlayingRef.current = true
         stampPlayOrigin(0)
         const capture = await startPcmCapture(ctx, dest.stream)
+        await new Promise((resolve) => window.setTimeout(resolve, 80))
+        const gap = 0.25
         const clickAt = ctx.currentTime + delaySec
-        const click = ctx.createBuffer(1, Math.max(8, Math.round(0.008 * ctx.sampleRate)), ctx.sampleRate)
-        const data = click.getChannelData(0)
-        for (let i = 0; i < data.length; i++) {
-          data[i] = Math.sin((2 * Math.PI * 1000 * i) / ctx.sampleRate)
-        }
+        const train = makeClickTrain(ctx.sampleRate, { count: 2, interval: gap, clickMs: 8 })
+        const click = ctx.createBuffer(1, train.length, ctx.sampleRate)
+        click.getChannelData(0).set(train)
         const src = ctx.createBufferSource()
         src.buffer = click
         src.connect(dest)
         src.start(clickAt)
-        await new Promise((resolve) => window.setTimeout(resolve, (delaySec + 0.3) * 1000))
+        await new Promise((resolve) => window.setTimeout(resolve, (delaySec + gap + 0.45) * 1000))
+        void src
         const captured = capture.stop()
         Tone.getTransport().stop()
         isPlayingRef.current = false
         const buffer = pcmChunksToAudioBuffer(ctx, captured.chunks, captured.sampleRate)
-        const peak = peakTimeSeconds(buffer)
+        const onsets = onsetTimesSeconds(buffer, 0.08, 0.12)
+        if (onsets.length < 2) {
+          throw new Error(`expected two loopback clicks, got ${onsets.length}`)
+        }
+        const peak = onsets[0]
+        const peak2 = onsets[1]
         const offset = placeRecordedClip({
           firstContextTime: captured.firstContextTime,
           fallbackSong: 0,
@@ -5199,10 +5206,16 @@ function App() {
         return {
           offset,
           peak,
+          peak2,
           got: offset + peak,
           expected,
           errorMs: (offset + peak - expected) * 1000,
-          firstContextTime: captured.firstContextTime
+          spacingMs: (peak2 - peak) * 1000,
+          onsets,
+          firstContextTime: captured.firstContextTime,
+          duration: buffer.duration,
+          frames: captured.chunks.length,
+          sampleRate: captured.sampleRate
         }
       }
     }

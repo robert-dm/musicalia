@@ -11,6 +11,7 @@ import {
   mixToMono,
   nudgeClipOffsetSeconds,
   parseLatencyMs,
+  onsetTimesSeconds,
   peakTimeSeconds,
   placeRecordedClip,
   songTimeOfContextTime
@@ -81,6 +82,20 @@ const peakBuf = {
   getChannelData: () => new Float32Array([0, 0.1, 0.9, 0.2, 0, 0, 0, 0])
 }
 assert(almost(peakTimeSeconds(peakBuf), 0.25), 'peak time is sample index / sr')
+
+const twoClicks = {
+  numberOfChannels: 1,
+  length: 20,
+  sampleRate: 10,
+  getChannelData: () => {
+    const d = new Float32Array(20)
+    d[3] = 0.9
+    d[13] = 0.8
+    return d
+  }
+}
+const onsets = onsetTimesSeconds(twoClicks, 0.5, 0.4)
+assert(onsets.length === 2 && almost(onsets[1] - onsets[0], 1), 'finds two click onsets')
 
 assert(almost(songTimeOfContextTime(2.5, 10, 2, 1), 10.5), 'context time maps to song time')
 assert(almost(songTimeOfContextTime(2.5, 10, 2, 0.5), 10.25), 'tempo rate scales the mapping')

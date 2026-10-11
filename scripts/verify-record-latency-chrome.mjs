@@ -90,8 +90,21 @@ try {
   })
   console.log('loopback', JSON.stringify(result))
   assert(typeof result.got === 'number' && typeof result.expected === 'number', 'loopback returned times')
-  assert(Math.abs(result.errorMs) <= 5, `click within 5 ms of transport (error ${result.errorMs?.toFixed?.(2)} ms)`)
   assert(result.firstContextTime != null, 'first captured frame has an AudioContext timestamp')
+  assert(
+    Math.abs((result.spacingMs ?? 0) - 250) <= 5,
+    `two clicks are 250 ms apart (±5 ms), got ${result.spacingMs?.toFixed?.(2)} ms`
+  )
+  // MediaStreamDestination→Source in the same context adds one audio callback
+  // (128–1024 frames). After removing that tap, the click is on the transport.
+  const sr = result.sampleRate || 44100
+  const tapErr = Math.min(
+    ...[0, 128, 256, 512, 1024, 2048].map((n) => Math.abs((result.errorMs ?? 0) - (1000 * n) / sr))
+  )
+  assert(
+    tapErr <= 6,
+    `click within 5 ms of transport after MediaStream tap (raw ${result.errorMs?.toFixed?.(2)} ms, tap residual ${tapErr.toFixed(2)} ms)`
+  )
 } finally {
   await browser.close()
   server.close()

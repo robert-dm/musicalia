@@ -200,17 +200,21 @@ export function mixToMono(channels: ArrayLike<Float32Array>): Float32Array {
   return out
 }
 
-export function peakTimeSeconds(buffer: {
-  numberOfChannels: number
-  length: number
-  sampleRate: number
-  getChannelData: (ch: number) => Float32Array
-}): number {
+export function peakTimeSeconds(
+  buffer: {
+    numberOfChannels: number
+    length: number
+    sampleRate: number
+    getChannelData: (ch: number) => Float32Array
+  },
+  skipSeconds = 0
+): number {
   let best = 0
   let at = 0
+  const skip = Math.max(0, Math.floor((skipSeconds || 0) * buffer.sampleRate))
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
     const data = buffer.getChannelData(ch)
-    for (let i = 0; i < data.length; i++) {
+    for (let i = skip; i < data.length; i++) {
       const a = Math.abs(data[i])
       if (a > best) {
         best = a
@@ -219,6 +223,29 @@ export function peakTimeSeconds(buffer: {
     }
   }
   return buffer.sampleRate > 0 ? at / buffer.sampleRate : 0
+}
+
+/** Onsets above `threshold`, each followed by a refractory gap. */
+export function onsetTimesSeconds(
+  buffer: {
+    numberOfChannels: number
+    length: number
+    sampleRate: number
+    getChannelData: (ch: number) => Float32Array
+  },
+  threshold = 0.25,
+  refractorySeconds = 0.08
+): number[] {
+  const times: number[] = []
+  const data = buffer.getChannelData(0)
+  const gap = Math.max(1, Math.floor(refractorySeconds * buffer.sampleRate))
+  for (let i = 0; i < data.length; i++) {
+    if (Math.abs(data[i]) >= threshold) {
+      times.push(i / buffer.sampleRate)
+      i += gap - 1
+    }
+  }
+  return times
 }
 
 export function songTimeOfContextTime(

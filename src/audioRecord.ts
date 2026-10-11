@@ -149,9 +149,68 @@ export function pcmChunksToAudioBuffer(
   return buffer
 }
 
+export const RECORD_WORKLET_NAME = 'musicalia-record'
+
+export const RECORD_WORKLET_SOURCE = `
+class MusicaliaRecordProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0]
+    if (input && input.length && input[0] && input[0].length) {
+      const channels = new Array(input.length)
+      const transfer = []
+      for (let i = 0; i < input.length; i++) {
+        const copy = new Float32Array(input[i])
+        channels[i] = copy
+        transfer.push(copy.buffer)
+      }
+      this.port.postMessage({ t: currentTime, c: channels }, transfer)
+    }
+    return true
+  }
+}
+registerProcessor('${RECORD_WORKLET_NAME}', MusicaliaRecordProcessor)
+`
+
+const workletReady = new WeakMap<AudioContext, Promise<boolean>>()
+
+export async function ensureRecordWorklet(ctx: AudioContext): Promise<boolean> {
+  if (!ctx.audioWorklet || typeof ctx.audioWorklet.addModule !== 'function') return false
+  const existing = workletReady.get(ctx)
+  if (existing) {
+    try {
+      return await existing
+    } catch {
+      return false
+    }
+  }
+  const pending = (async () => {
+    const blob = new Blob([RECORD_WORKLET_SOURCE], { type: 'text/javascript' })
+    const url = URL.createObjectURL(blob)
+    try {
+      await ctx.audioWorklet.addModule(url)
+      return true
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  })()
+  workletReady.set(ctx, pending)
+  try {
+    return await pending
+  } catch {
+    workletReady.delete(ctx)
+    return false
+  }
+}
+
 export interface PcmCapture {
   peaks: number[]
-  stop: () => { chunks: Float32Array[][]; sampleRate: number; peaks: number[] }
+  firstContextTime: number | null
+  stop: () => {
+    chunks: Float32Array[][]
+    sampleRate: number
+    peaks: number[]
+    firstContextTime: number | null
+  }
 }
 
 export function nativeAudioContext(ctx: unknown): AudioContext {
@@ -172,47 +231,90 @@ export function nativeAudioContext(ctx: unknown): AudioContext {
   throw new Error('No se pudo iniciar la captura de audio')
 }
 
-export function startPcmCapture(ctx: AudioContext, stream: MediaStream): PcmCapture {
+function pushCapturedFrame(
+  channels: ArrayLike<Float32Array>,
+  chunks: Float32Array[][],
+  peaks: number[]
+): void {
+  const frame: Float32Array[] = []
+  let peak = 0
+  for (let ch = 0; ch < channels.length; ch++) {
+    const data = channels[ch]
+    const copy = data instanceof Float32Array ? new Float32Array(data) : Float32Array.from(data)
+    frame.push(copy)
+    for (let i = 0; i < copy.length; i++) {
+      const a = Math.abs(copy[i])
+      if (a > peak) peak = a
+    }
+  }
+  if (frame.length) {
+    chunks.push(frame)
+    peaks.push(peak)
+  }
+}
+
+export async function startPcmCapture(ctx: AudioContext, stream: MediaStream): Promise<PcmCapture> {
   const native = nativeAudioContext(ctx)
   const source = native.createMediaStreamSource(stream)
-  const channelCount = Math.max(1, source.channelCount || 1)
-  const processor = native.createScriptProcessor(4096, channelCount, 1)
   const mute = native.createGain()
   mute.gain.value = 0
   const chunks: Float32Array[][] = []
   const peaks: number[] = []
+  let firstContextTime: number | null = null
+  const disconnect: Array<() => void> = []
 
-  processor.onaudioprocess = (event) => {
-    const input = event.inputBuffer
-    const frame: Float32Array[] = []
-    let peak = 0
-    for (let ch = 0; ch < input.numberOfChannels; ch++) {
-      const data = input.getChannelData(ch)
-      const copy = new Float32Array(data.length)
-      copy.set(data)
-      frame.push(copy)
-      for (let i = 0; i < data.length; i++) {
-        const a = Math.abs(data[i])
-        if (a > peak) peak = a
+  const useWorklet = await ensureRecordWorklet(native)
+  if (useWorklet && typeof AudioWorkletNode !== 'undefined') {
+    const node = new AudioWorkletNode(native, RECORD_WORKLET_NAME, {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1]
+    })
+    node.port.onmessage = (event: MessageEvent<{ t?: number; c?: Float32Array[] }>) => {
+      const data = event.data
+      if (firstContextTime == null && typeof data?.t === 'number') firstContextTime = data.t
+      if (data?.c?.length) pushCapturedFrame(data.c, chunks, peaks)
+    }
+    source.connect(node)
+    node.connect(mute)
+    mute.connect(native.destination)
+    disconnect.push(() => {
+      try { node.port.onmessage = null } catch { /* ignore */ }
+      try { node.disconnect() } catch { /* already disconnected */ }
+    })
+  } else {
+    const channelCount = Math.max(1, source.channelCount || 1)
+    const processor = native.createScriptProcessor(4096, channelCount, 1)
+    processor.onaudioprocess = (event) => {
+      const input = event.inputBuffer
+      if (firstContextTime == null) {
+        firstContextTime = native.currentTime - input.duration
       }
+      const frame: Float32Array[] = []
+      for (let ch = 0; ch < input.numberOfChannels; ch++) frame.push(input.getChannelData(ch))
+      pushCapturedFrame(frame, chunks, peaks)
     }
-    if (frame.length) {
-      chunks.push(frame)
-      peaks.push(peak)
-    }
+    source.connect(processor)
+    processor.connect(mute)
+    mute.connect(native.destination)
+    disconnect.push(() => {
+      try { processor.disconnect() } catch { /* already disconnected */ }
+    })
   }
 
-  source.connect(processor)
-  processor.connect(mute)
-  mute.connect(native.destination)
+  disconnect.push(() => {
+    try { source.disconnect() } catch { /* already disconnected */ }
+    try { mute.disconnect() } catch { /* already disconnected */ }
+  })
 
   return {
     peaks,
+    get firstContextTime() {
+      return firstContextTime
+    },
     stop() {
-      try { processor.disconnect() } catch { /* already disconnected */ }
-      try { source.disconnect() } catch { /* already disconnected */ }
-      try { mute.disconnect() } catch { /* already disconnected */ }
-      return { chunks, sampleRate: native.sampleRate, peaks }
+      for (const fn of disconnect) fn()
+      return { chunks, sampleRate: native.sampleRate, peaks, firstContextTime }
     }
   }
 }

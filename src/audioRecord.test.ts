@@ -1,4 +1,6 @@
 import {
+  RECORD_WORKLET_NAME,
+  RECORD_WORKLET_SOURCE,
   armedIndexAfterDelete,
   compensatedRecordOffset,
   micConstraints,
@@ -90,6 +92,8 @@ assert(
   nativeAudioContext({ _nativeContext: native, rawContext: {} }) === (native as unknown as AudioContext),
   'unwraps Tone/standardized-audio-context'
 )
+assert(RECORD_WORKLET_SOURCE.includes(RECORD_WORKLET_NAME), 'worklet source registers the processor')
+assert(RECORD_WORKLET_SOURCE.includes('currentTime'), 'worklet stamps AudioContext frame time')
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

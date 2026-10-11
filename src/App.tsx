@@ -153,7 +153,6 @@ import {
 } from './trackOrder'
 import {
   armedIndexAfterDelete,
-  compensatedRecordOffset,
   drawRecordingPeaks,
   listAudioInputDevices,
   micErrorMessage,
@@ -162,12 +161,28 @@ import {
   pcmChunksToAudioBuffer,
   persistMicDeviceId,
   readStoredMicDeviceId,
-  recordLatencySeconds,
   requestMicStream,
   resolveRecordTrack,
   startPcmCapture,
   type PcmCapture
 } from './audioRecord'
+import {
+  autoRecordLatencySeconds,
+  calibratedSecondsForDevice,
+  clampLatencyMs,
+  effectiveRecordLatencySeconds,
+  findDelaySeconds,
+  loadRecordLatencySettings,
+  makeClickTrain,
+  mixToMono,
+  nudgeClipOffsetSeconds,
+  persistRecordLatencySettings,
+  placeRecordedClip,
+  peakTimeSeconds,
+  songTimeOfContextTime,
+  type RecordLatencySettings
+} from './recordLatency'
+import { ClipLatencyDialog, RecordLatencyPanel } from './RecordLatencyPanel'
 import {
   clearMediaSessionHandlers,
   isSpaceKey,
@@ -179,6 +194,7 @@ import {
 import {
   ContextMenuItem,
   IconCircleHelp,
+  IconClock,
   IconClipboardPaste,
   IconCopy,
   IconCopyPlus,
@@ -264,7 +280,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0091b'
+const APP_VERSION = '0.0092b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -323,6 +339,10 @@ function App() {
   const [recordLayoutTick, setRecordLayoutTick] = useState(0)
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([])
   const [micDeviceId, setMicDeviceId] = useState<string | null>(() => readStoredMicDeviceId())
+  const [recordLatencySettings, setRecordLatencySettings] = useState<RecordLatencySettings>(() => loadRecordLatencySettings())
+  const [showLatencyPanel, setShowLatencyPanel] = useState(false)
+  const [calibratingLatency, setCalibratingLatency] = useState(false)
+  const [clipLatencyEdit, setClipLatencyEdit] = useState<{ trackIndex: number; clipId: string; ms: number } | null>(null)
   const [bpm, setBpm] = useState(120)
   const [pitchSemitones, setPitchSemitones] = useState(0)
   const [tempoRate, setTempoRate] = useState(1)
@@ -335,6 +355,7 @@ function App() {
   const practiceIndexRef = useRef<number | null>(null)
   const playOriginSongRef = useRef(0)
   const playOriginWallRef = useRef(0)
+  const playOriginContextRef = useRef(0)
   const [metronomeEnabled, setMetronomeEnabled] = useState(true)
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
   const [countInBars, _setCountInBars] = useState(2)
@@ -441,6 +462,12 @@ function App() {
     startedPlayback: boolean
   } | null>(null)
   const recordElapsedRef = useRef<HTMLSpanElement>(null)
+  const lastRecordMetaRef = useRef<{
+    offsetSeconds: number
+    firstContextTime: number | null
+    latencySeconds: number
+    peakTime: number
+  } | null>(null)
   const isRecordingRef = useRef(false)
   const lastRecordLayoutRef = useRef(0)
   const stopRecordingRef = useRef<(opts?: { then?: 'stop' | 'pause' | 'keep'; commit?: boolean }) => Promise<void>>(async () => {})
@@ -751,6 +778,44 @@ function App() {
       Tone.now(),
       tempoRateRef.current
     )
+  }
+
+  const stampPlayOrigin = (songTime: number) => {
+    playOriginSongRef.current = songTime
+    playOriginWallRef.current = Tone.now()
+    try {
+      playOriginContextRef.current = nativeAudioContext(Tone.getContext().rawContext).currentTime
+    } catch {
+      playOriginContextRef.current = playOriginWallRef.current
+    }
+  }
+
+  const currentRecordCompensation = (stream?: MediaStream | null) => {
+    let ctx: { baseLatency?: number; outputLatency?: number } = {}
+    try {
+      ctx = nativeAudioContext(Tone.getContext().rawContext)
+    } catch {
+      /* audio not started */
+    }
+    const track = stream?.getAudioTracks()[0]
+    const autoSeconds = autoRecordLatencySeconds(ctx, track)
+    const settingsDeviceId = track?.getSettings?.().deviceId
+    const deviceId = (typeof settingsDeviceId === 'string' && settingsDeviceId)
+      || micDeviceId
+    const calibratedSeconds = calibratedSecondsForDevice(recordLatencySettings, deviceId)
+    const latencySeconds = effectiveRecordLatencySeconds({
+      autoSeconds,
+      calibratedSeconds,
+      manualSeconds: recordLatencySettings.manualMs / 1000
+    })
+    return {
+      autoSeconds,
+      calibratedSeconds,
+      latencySeconds,
+      autoMs: autoSeconds * 1000,
+      calibratedMs: calibratedSeconds == null ? null : calibratedSeconds * 1000,
+      appliedMs: latencySeconds * 1000
+    }
   }
 
   const applyAllClipPlayback = (tracks = trackStatesRef.current) => {
@@ -2079,8 +2144,7 @@ function App() {
     Tone.getTransport().loop = false
     Tone.getTransport().seconds = startTime
     Tone.getTransport().start()
-    playOriginSongRef.current = startTime
-    playOriginWallRef.current = Tone.now()
+    stampPlayOrigin(startTime)
     applyAllClipPlayback()
     
     const startingInsideGap = startTime < countInSeconds
@@ -2133,13 +2197,11 @@ function App() {
         if (isLoopEnabled && loopStart !== null && loopEnd !== null && currentTime >= loopEnd) {
           const span = Math.max(0.05, loopEnd - loopStart)
           currentTime = loopStart + ((currentTime - loopStart) % span)
-          playOriginSongRef.current = currentTime
-          playOriginWallRef.current = Tone.now()
+          stampPlayOrigin(currentTime)
           retargetPlayingClips(currentTime)
         } else if (!isLoopEnabled && !recordLiveRef.current && maxDuration > 0 && currentTime >= maxDuration) {
           currentTime = 0
-          playOriginSongRef.current = 0
-          playOriginWallRef.current = Tone.now()
+          stampPlayOrigin(0)
           Tone.getTransport().seconds = 0
           retargetPlayingClips(0)
         }
@@ -2240,7 +2302,7 @@ function App() {
     setRecordingTrackIndex(null)
     const after = opts?.then ?? 'stop'
     const commit = opts?.commit !== false
-    let captured: { chunks: Float32Array[][]; sampleRate: number } | null = null
+    let captured: { chunks: Float32Array[][]; sampleRate: number; firstContextTime: number | null } | null = null
     try {
       captured = live.capture.stop()
     } catch (err) {
@@ -2257,8 +2319,21 @@ function App() {
         if (buffer.duration >= 0.05) {
           await ensureAudio()
           ensureTrackGains(trackStatesRef.current.length)
-          const latency = recordLatencySeconds(ctx)
-          const offset = compensatedRecordOffset(live.startOffset, latency)
+          const compensation = currentRecordCompensation(live.stream)
+          const offset = placeRecordedClip({
+            firstContextTime: captured.firstContextTime,
+            fallbackSong: live.startOffset,
+            playOriginSong: playOriginSongRef.current,
+            playOriginContext: playOriginContextRef.current,
+            tempoRate: tempoRateRef.current,
+            latencySeconds: compensation.latencySeconds
+          })
+          lastRecordMetaRef.current = {
+            offsetSeconds: offset,
+            firstContextTime: captured.firstContextTime,
+            latencySeconds: compensation.latencySeconds,
+            peakTime: peakTimeSeconds(buffer)
+          }
           const player = makeClipPlayer()
           player.loop = false
           player.buffer = new Tone.ToneAudioBuffer(buffer)
@@ -2313,6 +2388,90 @@ function App() {
     persistMicDeviceId(deviceId)
   }
 
+  const updateManualLatencyMs = (ms: number) => {
+    const next = { ...recordLatencySettings, manualMs: clampLatencyMs(ms) }
+    setRecordLatencySettings(next)
+    persistRecordLatencySettings(next)
+  }
+
+  const runLatencyCalibration = async () => {
+    if (isRecordingRef.current || calibratingLatency) return
+    setCalibratingLatency(true)
+    try {
+      await ensureAudio()
+      const stream = await requestMicStream(micDeviceId)
+      const ctx = nativeAudioContext(Tone.getContext().rawContext)
+      const capture = await startPcmCapture(ctx, stream)
+      const clicks = makeClickTrain(ctx.sampleRate)
+      const buffer = ctx.createBuffer(1, clicks.length, ctx.sampleRate)
+      buffer.getChannelData(0).set(clicks)
+      const src = ctx.createBufferSource()
+      src.buffer = buffer
+      src.connect(ctx.destination)
+      src.start()
+      await new Promise((resolve) => {
+        src.onended = () => resolve(undefined)
+        window.setTimeout(resolve, (clicks.length / ctx.sampleRate) * 1000 + 300)
+      })
+      const captured = capture.stop()
+      stream.getTracks().forEach((track) => track.stop())
+      try { src.disconnect() } catch { /* ignore */ }
+      const recorded = pcmChunksToAudioBuffer(ctx, captured.chunks, captured.sampleRate)
+      const channels: Float32Array[] = []
+      for (let ch = 0; ch < recorded.numberOfChannels; ch++) channels.push(recorded.getChannelData(ch))
+      const seconds = findDelaySeconds(clicks, mixToMono(channels), captured.sampleRate)
+      const ms = Math.round(seconds * 1000)
+      if (ms < 8) {
+        setToastMessage('No se escuchó el clic. Subí el volumen o acercá el micrófono.')
+        setShowToast(true)
+        setTimeout(() => setShowToast(false), 4000)
+        return
+      }
+      const deviceId = stream.getAudioTracks()[0]?.getSettings().deviceId || micDeviceId || 'default'
+      const next: RecordLatencySettings = {
+        ...recordLatencySettings,
+        devices: {
+          ...recordLatencySettings.devices,
+          [deviceId]: { calibratedMs: ms, updatedAt: Date.now() }
+        }
+      }
+      setRecordLatencySettings(next)
+      persistRecordLatencySettings(next)
+      setToastMessage(`Latencia calibrada: ${ms} ms`)
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 4000)
+    } catch (err) {
+      setErrorMessage(micErrorMessage(err))
+      setTimeout(() => setErrorMessage(null), 4000)
+    } finally {
+      setCalibratingLatency(false)
+    }
+  }
+
+  const applyClipLatencyNudge = () => {
+    if (!clipLatencyEdit) return
+    const { trackIndex, clipId, ms } = clipLatencyEdit
+    saveUndo()
+    const next = [...trackStatesRef.current]
+    const track = next[trackIndex]
+    if (!track) {
+      setClipLatencyEdit(null)
+      return
+    }
+    next[trackIndex] = {
+      ...track,
+      clips: track.clips.map((clip) =>
+        clip.id === clipId
+          ? { ...clip, offsetSeconds: nudgeClipOffsetSeconds(clip.offsetSeconds, ms) }
+          : clip
+      )
+    }
+    trackStatesRef.current = next
+    setTrackStates(next)
+    setClipLatencyEdit(null)
+    showClipToast(ms === 0 ? 'Sin cambio de latencia' : `Clip desplazado ${ms > 0 ? '−' : '+'}${Math.abs(ms)} ms`)
+  }
+
   const handleRecord = async () => {
     if (isRecordingRef.current) {
       await stopRecording({ then: 'stop' })
@@ -2353,27 +2512,46 @@ function App() {
       trackStatesRef.current = nextTracks
     }
 
-    const startOffset = playheadPositionRef.current
+    const startedPlayback = Tone.getTransport().state !== 'started'
+    const placeholder: PcmCapture = {
+      peaks: [],
+      firstContextTime: null,
+      stop: () => ({ chunks: [], sampleRate: 44100, peaks: [], firstContextTime: null })
+    }
+    recordLiveRef.current = {
+      trackIndex,
+      startOffset: playheadPositionRef.current,
+      capture: placeholder,
+      stream,
+      el: null,
+      canvas: null,
+      startedPlayback
+    }
+    if (startedPlayback) {
+      await handlePlay()
+    } else {
+      const armed = trackStatesRef.current[trackIndex]
+      armed?.clips.forEach((clip) => {
+        if (clip.player.state === 'started') clip.player.stop()
+        clip.isPlaying = false
+      })
+    }
+
     const ctx = Tone.getContext().rawContext as AudioContext
     let capture: PcmCapture
     try {
-      capture = startPcmCapture(ctx, stream)
+      capture = await startPcmCapture(ctx, stream)
     } catch (err) {
       console.error('[record] capture failed', err)
       stream.getTracks().forEach((track) => track.stop())
+      recordLiveRef.current = null
       setErrorMessage('No se pudo iniciar la captura de audio')
       setTimeout(() => setErrorMessage(null), 4000)
       return
     }
-
-    recordLiveRef.current = {
-      trackIndex,
-      startOffset,
-      capture,
-      stream,
-      el: null,
-      canvas: null,
-      startedPlayback: Tone.getTransport().state !== 'started'
+    if (recordLiveRef.current) {
+      recordLiveRef.current.capture = capture
+      recordLiveRef.current.startOffset = playheadPositionRef.current
     }
     isRecordingRef.current = true
     flushSync(() => {
@@ -2391,15 +2569,6 @@ function App() {
       recordLiveRef.current.canvas = preview.canvas
     }
 
-    if (Tone.getTransport().state !== 'started') {
-      await handlePlay()
-    } else {
-      const armed = trackStatesRef.current[trackIndex]
-      armed?.clips.forEach((clip) => {
-        if (clip.player.state === 'started') clip.player.stop()
-        clip.isPlaying = false
-      })
-    }
     if (recordLiveRef.current && !trackStatesRef.current[trackIndex] && nextTracks[trackIndex]) {
       const restored = [...trackStatesRef.current, nextTracks[trackIndex]]
       ensureTrackGains(restored.length)
@@ -2821,6 +2990,9 @@ function App() {
       if (splitTime > clip.offsetSeconds && splitTime < clip.offsetSeconds + clip.duration) {
         await splitClipAt(trackIndex, splitTime)
       }
+    }
+    if (action === 'latency') {
+      setClipLatencyEdit({ trackIndex, clipId: clip.id, ms: 0 })
     }
   }
 
@@ -3980,8 +4152,7 @@ function App() {
     applyAllClipPlayback()
     if (isPlayingRef.current) {
       const song = getSongTime()
-      playOriginSongRef.current = song
-      playOriginWallRef.current = Tone.now()
+      stampPlayOrigin(song)
       retargetPlayingClips(song)
     }
   }
@@ -4571,8 +4742,7 @@ function App() {
     const clampedSeconds = applySeekSnap(seconds, layoutMax, snapEnabled, shiftKey, snapToGrid)
     commitPlayhead(clampedSeconds)
     Tone.getTransport().seconds = clampedSeconds
-    playOriginSongRef.current = clampedSeconds
-    playOriginWallRef.current = Tone.now()
+    stampPlayOrigin(clampedSeconds)
     if (isPlayingRef.current) retargetPlayingClips(clampedSeconds)
   }
   seekToPositionRef.current = seekToPosition
@@ -4963,6 +5133,85 @@ function App() {
     }
   })
 
+  useEffect(() => {
+    const recordApi = {
+      getCompensation: () => currentRecordCompensation(),
+      lastMeta: () => lastRecordMetaRef.current,
+      clips: () =>
+        trackStatesRef.current.flatMap((track, trackIndex) =>
+          track.clips.map((clip) => ({
+            trackIndex,
+            id: clip.id,
+            fileName: clip.fileName,
+            offsetSeconds: clip.offsetSeconds,
+            duration: clip.duration,
+            peakTime: clip.buffer ? peakTimeSeconds(clip.buffer) : 0
+          }))
+        ),
+      setManualMs: updateManualLatencyMs,
+      setCalibratedMs: (ms: number, deviceId = 'default') => {
+        const next: RecordLatencySettings = {
+          ...loadRecordLatencySettings(),
+          devices: {
+            ...loadRecordLatencySettings().devices,
+            [deviceId]: { calibratedMs: Math.max(0, ms), updatedAt: Date.now() }
+          }
+        }
+        setRecordLatencySettings(next)
+        persistRecordLatencySettings(next)
+      },
+      record: () => handleRecord(),
+      stopKeep: () => stopRecordingRef.current({ then: 'keep', commit: true }),
+      loopbackClick: async (delaySec = 0.2) => {
+        await ensureAudio()
+        const ctx = nativeAudioContext(Tone.getContext().rawContext)
+        const dest = ctx.createMediaStreamDestination()
+        Tone.getTransport().seconds = 0
+        Tone.getTransport().start()
+        isPlayingRef.current = true
+        stampPlayOrigin(0)
+        const capture = await startPcmCapture(ctx, dest.stream)
+        const clickAt = ctx.currentTime + delaySec
+        const click = ctx.createBuffer(1, Math.max(8, Math.round(0.008 * ctx.sampleRate)), ctx.sampleRate)
+        const data = click.getChannelData(0)
+        for (let i = 0; i < data.length; i++) {
+          data[i] = Math.sin((2 * Math.PI * 1000 * i) / ctx.sampleRate)
+        }
+        const src = ctx.createBufferSource()
+        src.buffer = click
+        src.connect(dest)
+        src.start(clickAt)
+        await new Promise((resolve) => window.setTimeout(resolve, (delaySec + 0.3) * 1000))
+        const captured = capture.stop()
+        Tone.getTransport().stop()
+        isPlayingRef.current = false
+        const buffer = pcmChunksToAudioBuffer(ctx, captured.chunks, captured.sampleRate)
+        const peak = peakTimeSeconds(buffer)
+        const offset = placeRecordedClip({
+          firstContextTime: captured.firstContextTime,
+          fallbackSong: 0,
+          playOriginSong: 0,
+          playOriginContext: playOriginContextRef.current,
+          tempoRate: 1,
+          latencySeconds: 0
+        })
+        const expected = songTimeOfContextTime(clickAt, 0, playOriginContextRef.current, 1)
+        return {
+          offset,
+          peak,
+          got: offset + peak,
+          expected,
+          errorMs: (offset + peak - expected) * 1000,
+          firstContextTime: captured.firstContextTime
+        }
+      }
+    }
+    ;(window as unknown as { __musicaliaRecord?: typeof recordApi }).__musicaliaRecord = recordApi
+    return () => {
+      delete (window as unknown as { __musicaliaRecord?: typeof recordApi }).__musicaliaRecord
+    }
+  })
+
   return (
     <div
       className={`app${fileDragActive ? ' file-drag' : ''}`}
@@ -5097,6 +5346,32 @@ function App() {
           >
             <IconRecord size={14} />
           </button>
+          <div className="record-latency-wrap">
+            <button
+              type="button"
+              className={`transport-button icon-btn ${showLatencyPanel ? 'active' : ''}`}
+              data-testid="record-latency-button"
+              title="Calibrar latencia"
+              aria-label="Calibrar latencia"
+              aria-expanded={showLatencyPanel}
+              disabled={isRecording}
+              onClick={() => setShowLatencyPanel((open) => !open)}
+            >
+              <IconClock size={14} />
+            </button>
+            {showLatencyPanel && (
+              <RecordLatencyPanel
+                autoMs={currentRecordCompensation().autoMs}
+                calibratedMs={currentRecordCompensation().calibratedMs}
+                manualMs={recordLatencySettings.manualMs}
+                appliedMs={currentRecordCompensation().appliedMs}
+                calibrating={calibratingLatency}
+                onManualMs={updateManualLatencyMs}
+                onCalibrate={() => { void runLatencyCalibration() }}
+                onClose={() => setShowLatencyPanel(false)}
+              />
+            )}
+          </div>
           {audioInputs.length > 1 && (
             <select
               className="mic-select"
@@ -5920,6 +6195,7 @@ function App() {
                 />
                 <div className="context-menu-sep" />
                 <ContextMenuItem icon={<IconSplit />} label="Dividir aquí" shortcut="S" onClick={() => runContextMenuAction('split')} />
+                <ContextMenuItem icon={<IconClock />} label="Ajustar latencia..." onClick={() => runContextMenuAction('latency')} />
                 <ContextMenuItem
                   icon={<IconRepeat />}
                   label="Loop a este clip"
@@ -6008,6 +6284,15 @@ function App() {
         </div>
       )}
 
+      {clipLatencyEdit && (
+        <ClipLatencyDialog
+          valueMs={clipLatencyEdit.ms}
+          onChangeMs={(ms) => setClipLatencyEdit({ ...clipLatencyEdit, ms })}
+          onApply={applyClipLatencyNudge}
+          onCancel={() => setClipLatencyEdit(null)}
+        />
+      )}
+
       {showHelp && (
         <div className="drive-projects-modal">
           <div className="modal-content help-modal" style={{ maxWidth: '600px' }}>
@@ -6015,7 +6300,7 @@ function App() {
             <div>
               <h3>Edición de clips</h3>
               <ul>
-                <li>• <strong>Click derecho en un clip</strong> - Menú: Cortar, Copiar, Pegar, Dividir aquí, Duplicar, Eliminar</li>
+                <li>• <strong>Click derecho en un clip</strong> - Menú: Cortar, Copiar, Pegar, Dividir aquí, Ajustar latencia, Duplicar, Eliminar</li>
                 <li>• <strong>Click derecho en una pista vacía</strong> - Pegar aquí (en la posición del cursor, con snap si está activo)</li>
                 <li>• <strong>Click</strong> - Seleccionar clip y mover playhead</li>
                 <li>• <strong>Cmd/Ctrl+Click</strong> - Añadir o quitar un clip de la selección</li>
@@ -6074,6 +6359,8 @@ function App() {
                 <li>• <strong>Overdub</strong> - Mientras grabás se reproducen las demás pistas. La cuenta del metrónomo se respeta si está activa y el playhead está en esos compases</li>
                 <li>• <strong>Grabar de nuevo, Stop o Espacio</strong> - Termina la toma y deja un clip (un deshacer la saca)</li>
                 <li>• <strong>Entrada de audio</strong> - Si hay más de un micrófono, elige cuál usar (se recuerda)</li>
+                <li>• <strong>Calibrar latencia</strong> - Reloj junto a Grabar. Mide el viaje altavoz→micrófono y guarda el offset por dispositivo. El ajuste −/+ en ms se suma a todas las tomas nuevas</li>
+                <li>• <strong>Ajustar latencia...</strong> - Click derecho en un clip ya grabado para desplazarlo en milisegundos</li>
               </ul>
               
               <h3>Teclado</h3>

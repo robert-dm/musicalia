@@ -205,6 +205,15 @@ export function IconPlus(props: IconProps) {
   )
 }
 
+export function IconClock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="12 7 12 12 16 14" />
+    </Svg>
+  )
+}
+
 export function IconSliders(props: IconProps) {
   return (
     <Svg {...props}>

@@ -39,6 +39,22 @@ export function dragPreviewDx(
   return clientX - startX
 }
 
+export function proposedTimeDelta(input: {
+  clientX: number
+  startX: number
+  pxPerSec: number
+  startOffset: number
+  snapEnabled: boolean
+  shiftKey: boolean
+  snapToGrid: (t: number) => number
+}): number {
+  const raw = timeDeltaFromPx(input.clientX - input.startX, input.pxPerSec)
+  if (snapActiveDuringDrag(input.snapEnabled, input.shiftKey)) {
+    return input.snapToGrid(input.startOffset + raw) - input.startOffset
+  }
+  return raw
+}
+
 export function commitTimeDelta(input: {
   clientX: number
   startX: number
@@ -49,12 +65,7 @@ export function commitTimeDelta(input: {
   shiftKey: boolean
   snapToGrid: (t: number) => number
 }): number {
-  const raw = timeDeltaFromPx(input.clientX - input.startX, input.pxPerSec)
-  let next = input.startOffset + raw
-  if (snapActiveDuringDrag(input.snapEnabled, input.shiftKey)) {
-    next = input.snapToGrid(next)
-  }
-  return clampGroupTimeDelta(input.minOffset, next - input.startOffset)
+  return clampGroupTimeDelta(input.minOffset, proposedTimeDelta(input))
 }
 
 export function snappedDragTimeDelta(input: {

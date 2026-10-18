@@ -103,6 +103,28 @@ export function IconMagnet(props: IconProps) {
   )
 }
 
+export function IconGrid(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <path d="M3 9h18" />
+      <path d="M3 15h18" />
+      <path d="M9 3v18" />
+      <path d="M15 3v18" />
+    </Svg>
+  )
+}
+
+export function IconAlignStart(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 2v20" />
+      <rect width="12" height="5" x="8" y="5" rx="1" />
+      <rect width="8" height="5" x="8" y="14" rx="1" />
+    </Svg>
+  )
+}
+
 export function IconCircleHelp(props: IconProps) {
   return (
     <Svg {...props}>

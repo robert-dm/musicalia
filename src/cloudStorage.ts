@@ -682,6 +682,7 @@ export async function openProjectFromCloud(pathname: string): Promise<any> {
     playheadPosition: projectJson.playheadPosition,
     metronomeEnabled: projectJson.metronomeEnabled,
     isLoopEnabled: projectJson.isLoopEnabled,
+    magnetEnabled: projectJson.magnetEnabled,
     tracks
   }
 }

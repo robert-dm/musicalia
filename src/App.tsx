@@ -136,7 +136,8 @@ import {
   clickTimeFromX,
   isClickGesture,
   persistSnapEnabled,
-  readStoredSnapEnabled
+  readStoredSnapEnabled,
+  snapActiveDuringDrag
 } from './playheadSeek'
 import {
   dataTransferHasFiles,
@@ -219,6 +220,8 @@ import {
   IconList,
   IconLogIn,
   IconLogOut,
+  IconAlignStart,
+  IconGrid,
   IconMagnet,
   IconMetronome,
   IconMoveHorizontal,
@@ -258,12 +261,17 @@ import {
 } from './clipSelection'
 import {
   beginClipInteract,
-  commitTimeDelta,
   dragPreviewDx,
   endClipInteract,
   measurePxPerSec,
-  snappedDragTimeDelta
+  proposedTimeDelta
 } from './clipDrag'
+import {
+  collectMagnetTargets,
+  collectMovingEdges,
+  earliestStart,
+  resolveMagnetDrag
+} from './clipMagnet'
 import {
   ZOOM_SLIDER_MAX,
   anchoredScrollLeft,
@@ -526,6 +534,10 @@ function App() {
   const projectLoadGenRef = useRef<number>(0)
   const [selectedClipIds, setSelectedClipIds] = useState<Set<string>>(new Set())
   const [snapEnabled, setSnapEnabled] = useState(() => readStoredSnapEnabled())
+  const [magnetEnabled, setMagnetEnabled] = useState(false)
+  const magnetEnabledRef = useRef(false)
+  magnetEnabledRef.current = magnetEnabled
+  const magnetGuideElRef = useRef<HTMLDivElement>(null)
   const [undoStack, setUndoStack] = useState<any[]>([])
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
@@ -1082,7 +1094,8 @@ function App() {
         playheadPosition,
         tracks,
         metronomeEnabled,
-        isLoopEnabled
+        isLoopEnabled,
+        magnetEnabled
       }
       autosaveProject(state)
       lastClipBufferSigRef.current = sig
@@ -1090,7 +1103,7 @@ function App() {
     
     const timer = window.setTimeout(() => { void saveState() }, 1000)
     return () => window.clearTimeout(timer)
-  }, [bpm, pitchSemitones, tempoRate, harmony, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled, currentProjectName, currentProjectId])
+  }, [bpm, pitchSemitones, tempoRate, harmony, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled, magnetEnabled, currentProjectName, currentProjectId])
 
   useEffect(() => {
     const scroller = lanesScrollRef.current
@@ -1170,6 +1183,7 @@ function App() {
       if (state.name) setCurrentProjectName(state.name)
       commitPlayhead(state.playheadPosition)
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
+      if (state.magnetEnabled !== undefined) setMagnetEnabled(!!state.magnetEnabled)
       
       const newTrackStates = await Promise.all(state.tracks.map(async (t, i) => {
         // Handle old format with single clip
@@ -1410,6 +1424,7 @@ function App() {
         loopEnd,
         playheadPosition,
         metronomeEnabled,
+        magnetEnabled,
         countInBars,
         tracks: trackStates.map((t, trackIdx) => ({
           name: resolveTrackName(t.name, trackIdx),
@@ -1514,6 +1529,7 @@ function App() {
         loopEnd,
         playheadPosition,
         metronomeEnabled,
+        magnetEnabled,
         countInBars,
         tracks: trackStates.map((t, trackIdx) => ({
           name: resolveTrackName(t.name, trackIdx),
@@ -1708,6 +1724,7 @@ function App() {
       }
       setLoopStart(projectData.loopStart ?? null)
       setLoopEnd(projectData.loopEnd ?? null)
+      setMagnetEnabled(!!projectData.magnetEnabled)
       commitPlayhead(projectData.playheadPosition || 0)
       const withMetro = ensureMetronomeTrack(newTrackStates)
       reconnectAllClips(withMetro)
@@ -2098,6 +2115,20 @@ function App() {
     if (timeDisplayRef.current) {
       timeDisplayRef.current.textContent = `${formatTime(seconds)} / ${formatTime(timelineMaxRef.current)}`
     }
+  }
+
+  const syncMagnetGuide = (time: number | null) => {
+    const el = magnetGuideElRef.current
+    if (!el) return
+    if (time == null || !Number.isFinite(time)) {
+      el.hidden = true
+      delete el.dataset.snapTime
+      return
+    }
+    const layoutMax = timelineMaxRef.current || 100
+    el.style.left = `${(Math.max(0, time) / Math.max(layoutMax, 1e-6)) * 100}%`
+    el.hidden = false
+    el.dataset.snapTime = String(time)
   }
 
   const commitPlayhead = (seconds: number) => {
@@ -3085,12 +3116,23 @@ function App() {
     const startedWithAlt = e.altKey
     const zoom = verticalZoom
     const snapOn = snapEnabled
+    const magnetOn = magnetEnabledRef.current
     e.preventDefault()
     const layoutMax = timelineMaxRef.current || 100
     const inner = document.querySelector('.lanes-scroll-inner') as HTMLElement | null
     const laneEl = (document.querySelector('.track-content') as HTMLElement | null)
     const laneWidth = (inner || laneEl)?.getBoundingClientRect().width || 1
     const pxPerSec = measurePxPerSec(laneWidth, layoutMax)
+
+    const magnetClips = tracks.flatMap((track) => (
+      track.clips.map((c) => ({
+        id: c.id,
+        offsetSeconds: c.offsetSeconds,
+        duration: c.duration
+      }))
+    ))
+    const magnetTargets = collectMagnetTargets(magnetClips, selected)
+    const movingEdges = collectMovingEdges(magnetClips, selected)
 
     let minOffset = Infinity
     let minTrack = Infinity
@@ -3160,6 +3202,34 @@ function App() {
       })
     }
 
+    const resolveDrag = (ev: PointerEvent) => {
+      const proposed = proposedTimeDelta({
+        clientX: ev.clientX,
+        startX,
+        pxPerSec,
+        startOffset,
+        snapEnabled: snapOn,
+        shiftKey: ev.shiftKey,
+        snapToGrid
+      })
+      const magnet = resolveMagnetDrag({
+        rawDelta: proposed,
+        movingStarts: movingEdges.starts,
+        movingEnds: movingEdges.ends,
+        targets: magnetTargets,
+        pxPerSec,
+        magnetEnabled: magnetOn,
+        altHeld: ev.altKey,
+        minOffset: dragLiveRef.current.minOffset
+      })
+      const gridActive = snapActiveDuringDrag(snapOn, ev.shiftKey)
+      return {
+        timeDelta: magnet.delta,
+        snapTime: magnet.snapTime,
+        previewSnapped: magnet.snapTime != null || gridActive
+      }
+    }
+
     const onMove = (ev: PointerEvent) => {
       const deltaX = ev.clientX - startX
       const deltaY = ev.clientY - startY
@@ -3169,26 +3239,7 @@ function App() {
       if (isClickGesture(distance)) return
       if (live.threshold && distance < 5) return
 
-      const snapped = snappedDragTimeDelta({
-        clientX: ev.clientX,
-        startX,
-        pxPerSec,
-        startOffset,
-        minOffset: live.minOffset,
-        snapEnabled: snapOn,
-        shiftKey: ev.shiftKey,
-        snapToGrid
-      })
-      const timeDelta = snapped ?? commitTimeDelta({
-        clientX: ev.clientX,
-        startX,
-        pxPerSec,
-        startOffset,
-        minOffset: live.minOffset,
-        snapEnabled: snapOn,
-        shiftKey: ev.shiftKey,
-        snapToGrid
-      })
+      const { timeDelta, snapTime, previewSnapped } = resolveDrag(ev)
       const trackHeight = 88 * zoom
       const rawTrackDelta = selected.size > 1 ? 0 : Math.round(deltaY / trackHeight)
       const trackDelta = selected.size > 1
@@ -3198,7 +3249,8 @@ function App() {
       live.tempTrack = startTrack + trackDelta
       live.timeDelta = timeDelta
       live.trackDelta = trackDelta
-      previewDx = dragPreviewDx(ev.clientX, startX, pxPerSec, snapped)
+      previewDx = dragPreviewDx(ev.clientX, startX, pxPerSec, previewSnapped ? timeDelta : null)
+      syncMagnetGuide(snapTime)
 
       if (dragRafRef.current == null) {
         dragRafRef.current = requestAnimationFrame(() => {
@@ -3222,6 +3274,7 @@ function App() {
         dragRafRef.current = null
       }
       endClipInteract()
+      syncMagnetGuide(null)
       const live = dragLiveRef.current
       isDraggingClipRef.current = false
       if (isClickGesture(live.distance) || (live.threshold && live.distance < 5)) {
@@ -3236,16 +3289,7 @@ function App() {
         return
       }
 
-      const timeDelta = commitTimeDelta({
-        clientX: ev.clientX,
-        startX,
-        pxPerSec,
-        startOffset,
-        minOffset: live.minOffset,
-        snapEnabled: snapOn,
-        shiftKey: ev.shiftKey,
-        snapToGrid
-      })
+      const { timeDelta } = resolveDrag(ev)
       const trackDelta = live.trackDelta
       const currentTracks = trackStatesRef.current
       saveUndo()
@@ -3421,6 +3465,35 @@ function App() {
     const ids = clipIdsOnTracks(trackStatesRef.current, [trackIndex])
     setSelectedClipIds((prev) => mergeSelection(prev, ids, mode))
     setSelectedTrack(trackIndex)
+  }
+
+  const handleAlignSelectedStarts = () => {
+    const selected = selectedClipIdsRef.current
+    if (selected.size < 2) return
+    const offsets: number[] = []
+    trackStatesRef.current.forEach((track) => {
+      if (isMetronomeTrack(track)) return
+      track.clips.forEach((clip) => {
+        if (selected.has(clip.id)) offsets.push(clip.offsetSeconds)
+      })
+    })
+    const earliest = earliestStart(offsets)
+    if (earliest == null) return
+    if (offsets.every((offset) => Math.abs(offset - earliest) < 1e-12)) return
+    saveUndo()
+    const next = trackStatesRef.current.map((track) => (
+      isMetronomeTrack(track)
+        ? track
+        : {
+            ...track,
+            clips: track.clips.map((clip) => (
+              selected.has(clip.id) ? { ...clip, offsetSeconds: earliest } : clip
+            ))
+          }
+    ))
+    trackStatesRef.current = next
+    setTrackStates(next)
+    showClipToast('Inicios alineados')
   }
 
   const applySelectionTimeDelta = (requestedDelta: number, toast?: string) => {
@@ -5220,7 +5293,8 @@ function App() {
           playheadPosition: playheadPositionRef.current,
           tracks,
           metronomeEnabled,
-          isLoopEnabled: isLoopEnabledRef.current
+          isLoopEnabled: isLoopEnabledRef.current,
+          magnetEnabled: magnetEnabledRef.current
         })
       }
     }
@@ -5285,6 +5359,15 @@ function App() {
         setSelectedClipIds((prev) => mergeSelection(prev, ids, mode))
       },
       applyDelta: (seconds: number) => applySelectionTimeDelta(seconds),
+      getMagnet: () => magnetEnabledRef.current,
+      setMagnet: (on: boolean) => setMagnetEnabled(!!on),
+      alignStarts: () => handleAlignSelectedStarts(),
+      magnetGuide: () => {
+        const el = magnetGuideElRef.current
+        if (!el || el.hidden) return null
+        const raw = Number(el.dataset.snapTime)
+        return Number.isFinite(raw) ? raw : null
+      },
       seedPair: async () => {
         await ensureAudio()
         const raw = nativeAudioContext(Tone.getContext().rawContext)
@@ -5690,8 +5773,19 @@ function App() {
             }}
             title={`Snap ${snapEnabled ? 'ON' : 'OFF'}. Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras`}
           >
-            <IconMagnet />
+            <IconGrid />
             <span className="btn-label snap-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+          <button
+            className={`header-btn toggle-btn ${magnetEnabled ? 'active' : ''}`}
+            data-testid="magnet-toggle"
+            aria-pressed={magnetEnabled}
+            onClick={() => setMagnetEnabled((prev) => !prev)}
+            title={`Imán ${magnetEnabled ? 'ON' : 'OFF'}. Encaja el inicio o el final del clip con otros clips (cualquier pista) y con 0. Por defecto OFF. Alt lo apaga mientras arrastrás`}
+            aria-label="Imán"
+          >
+            <IconMagnet />
+            <span className="btn-label snap-label">Imán {magnetEnabled ? 'ON' : 'OFF'}</span>
           </button>
           <button
             className={`header-btn icon-only toggle-btn ${isLoopEnabled ? 'active' : ''}`}
@@ -6346,6 +6440,13 @@ function App() {
             <div className="playhead" ref={playheadElRef} aria-hidden="true">
               <span className="playhead-cap" />
             </div>
+            <div
+              className="magnet-guide"
+              ref={magnetGuideElRef}
+              data-testid="magnet-guide"
+              hidden
+              aria-hidden="true"
+            />
           </div>
           </div>
         </div>
@@ -6444,6 +6545,15 @@ function App() {
                   onClick={() => {
                     closeContextMenu()
                     setMoveSelectionDialog({ amount: '1', unit: 'beats' })
+                  }}
+                />
+                <ContextMenuItem
+                  icon={<IconAlignStart />}
+                  label="Alinear inicios"
+                  disabled={selectedClipIds.size < 2}
+                  onClick={() => {
+                    handleAlignSelectedStarts()
+                    closeContextMenu()
                   }}
                 />
                 <ContextMenuItem icon={<IconTrash />} label="Eliminar selección" shortcut="Del" danger onClick={() => runContextMenuAction('delete')} />
@@ -6607,15 +6717,17 @@ function App() {
                 <li>• <strong>Shift+Click o Cmd/Ctrl+Click</strong> - Añadir o quitar un clip de la selección (cualquier pista)</li>
                 <li>• <strong>Arrastrar en área vacía</strong> - Selección rectangular (varios tracks). Shift añade, Ctrl/Cmd alterna. El loop se dibuja solo en la regla</li>
                 <li>• <strong>Shift/Cmd+click en la cabecera</strong> - Selecciona todos los clips de esa pista. Click derecho → Seleccionar todos los clips de la pista</li>
-                <li>• <strong>Arrastrar clip</strong> - Mueve toda la selección el mismo Δt. Con varios clips solo horizontal (cada uno en su pista). El clip sigue el puntero al píxel (rAF). Snap solo si Snap está ON. Ninguno pasa de 0:00</li>
-                <li>• <strong>← →</strong> - Empuja la selección (un 16avo). Shift = 1 beat. Click derecho → Mover selección… / Eliminar selección</li>
+                <li>• <strong>Arrastrar clip</strong> - Mueve toda la selección el mismo Δt. Con varios clips solo horizontal (cada uno en su pista). El clip sigue el puntero al píxel (rAF). Snap de cuadrícula solo si Snap está ON. Imán (aparte) encaja bordes. Ninguno pasa de 0:00</li>
+                <li>• <strong>← →</strong> - Empuja la selección (un 16avo). Shift = 1 beat. Click derecho → Mover selección… / Alinear inicios / Eliminar selección</li>
                 <li>• <strong>Alt+Click en clip</strong> - Dividir en el punto clickeado</li>
-                <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
+                <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px). También apaga el Imán mientras mantenés Alt</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
                 <li>• <strong>Arrastrar archivos de audio</strong> - Soltalos en una pista para colocarlos ahí (con snap si está activo). Entre pistas se inserta una pista nueva. Fuera de una pista se crea una pista nueva al final. Varios archivos: una pista por archivo</li>
                 <li>• <strong>Botón Snap</strong> - Empieza en OFF. Activa/desactiva el ajuste a cuadrícula (se recuerda)</li>
-                <li>• <strong>Shift al arrastrar</strong> - Invierte el snap mientras arrastras (lo enciende si está OFF, lo apaga si está ON)</li>
+                <li>• <strong>Botón Imán</strong> - Empieza en OFF. Encaja inicio/final del clip (o de la selección) con otros clips de cualquier pista y con 0, a unos 8 px. Guía vertical al encajar. Se guarda en el .musicalia y en la sesión</li>
+                <li>• <strong>Alinear inicios</strong> - Con varios clips seleccionados, click derecho → deja todos los inicios en el más temprano</li>
+                <li>• <strong>Shift al arrastrar</strong> - Invierte el snap de cuadrícula mientras arrastras (lo enciende si está OFF, lo apaga si está ON)</li>
               </ul>
 
               <h3>Pistas</h3>

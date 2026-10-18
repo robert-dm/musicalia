@@ -10,6 +10,7 @@ interface ProjectState {
   playheadPosition: number
   metronomeEnabled?: boolean
   isLoopEnabled?: boolean
+  magnetEnabled?: boolean
   tracks: {
     name: string
     mute: boolean

@@ -71,12 +71,13 @@ export function commitEditedTrackName(draft: string, previous: string): string {
   return trimmed.length > 0 ? trimmed : previous
 }
 
-export function deleteTrackFromList<T extends { clips: { id: string }[] }>(
+export function deleteTrackFromList<T extends { clips: { id: string }[]; kind?: string }>(
   tracks: T[],
   index: number,
   selectedIds: Set<string>
 ): { tracks: T[]; selectedIds: Set<string> } | null {
   if (tracks.length <= 1 || index < 0 || index >= tracks.length) return null
+  if (tracks[index]?.kind === 'metronome') return null
   const removedIds = new Set(tracks[index].clips.map(c => c.id))
   const nextSelected = new Set(selectedIds)
   removedIds.forEach(id => nextSelected.delete(id))

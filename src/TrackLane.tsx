@@ -1,6 +1,8 @@
 import { memo, useRef } from 'react'
 import { ClipWaveform } from './ClipWaveform'
+import { MetronomeWaveform } from './MetronomeWaveform'
 import { displayLoop } from './loopRegion'
+import { DEFAULT_BEATS_PER_BAR } from './metronomeTrack'
 import { laneClipDataEqual, trackLaneDataEqual } from './trackRenderMemo'
 
 export interface LaneClip {
@@ -18,6 +20,8 @@ export interface LaneClip {
 interface TrackLaneProps {
   trackIndex: number
   trackKind?: string
+  bpm?: number
+  beatsPerBar?: number
   hasClips: boolean
   isAnyClipPlaying: boolean
   height: number
@@ -131,6 +135,8 @@ const LaneClipView = memo(function LaneClipView({
 export const TrackLane = memo(function TrackLane({
   trackIndex,
   trackKind,
+  bpm = 120,
+  beatsPerBar = DEFAULT_BEATS_PER_BAR,
   hasClips,
   isAnyClipPlaying,
   height,
@@ -160,7 +166,8 @@ export const TrackLane = memo(function TrackLane({
     <div
       className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
       data-track-index={trackIndex}
-      data-track-kind={trackKind === 'drum' ? 'drum' : 'audio'}
+      data-track-kind={trackKind === 'drum' ? 'drum' : trackKind === 'metronome' ? 'metronome' : 'audio'}
+      data-testid={trackKind === 'metronome' ? 'metronome-lane' : undefined}
       data-render-count={renderCountRef.current}
       style={{ height: `${height}px` }}
       onClick={onWaveformClick}
@@ -168,7 +175,9 @@ export const TrackLane = memo(function TrackLane({
       onMouseDown={onMouseDown}
       onContextMenu={(e) => onContextMenuTrack(e, trackIndex, null)}
     >
-      {hasClips ? (
+      {trackKind === 'metronome' ? (
+        <MetronomeWaveform bpm={bpm} beatsPerBar={beatsPerBar} duration={maxDur} />
+      ) : hasClips ? (
         <div className="clip-region">
           {clips.map((clip) => (
             <LaneClipView

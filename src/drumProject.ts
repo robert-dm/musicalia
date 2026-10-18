@@ -71,7 +71,8 @@ export function projectDrumPayload(kit: DrumKit | undefined, trackIdx: number) {
   )
 }
 
-export function trackKindOf(kind: unknown): 'audio' | 'drum' {
+export function trackKindOf(kind: unknown): 'audio' | 'drum' | 'metronome' {
+  if (kind === 'metronome') return 'metronome'
   return isDrumTrackKind(kind) ? 'drum' : 'audio'
 }
 

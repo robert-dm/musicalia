@@ -13,6 +13,7 @@ export interface EmptyTrack {
   fx: TrackFxState
   automation: AutomationLane[]
   clips: []
+  kind?: 'audio' | 'drum' | 'metronome'
 }
 
 const NAMED_PISTA_RE = /^(?:pista|track)\s+(\d+)$/i
@@ -52,21 +53,30 @@ export function nextPistaName(
   return `Pista ${nextPistaNumber(names, trackCount)}`
 }
 
-export function appendEmptyTrack<T extends { name?: string }>(
+function pistaNameSource<T extends { name?: string; kind?: string }>(tracks: T[]): T[] {
+  return tracks.filter((track) => track.kind !== 'metronome')
+}
+
+export function nextPistaNameFromTracks<T extends { name?: string; kind?: string }>(tracks: T[]): string {
+  const named = pistaNameSource(tracks)
+  return nextPistaName(named.map((t) => t.name), named.length)
+}
+
+export function appendEmptyTrack<T extends { name?: string; kind?: string }>(
   tracks: T[],
   factory: (name: string) => T
 ): T[] {
-  return [...tracks, factory(nextPistaName(tracks.map((t) => t.name), tracks.length))]
+  return [...tracks, factory(nextPistaNameFromTracks(tracks))]
 }
 
-export function insertEmptyTrack<T extends { name?: string }>(
+export function insertEmptyTrack<T extends { name?: string; kind?: string }>(
   tracks: T[],
   index: number,
   factory: (name: string) => T
 ): T[] {
   const at = Math.max(0, Math.min(tracks.length, index))
   const next = tracks.slice()
-  next.splice(at, 0, factory(nextPistaName(tracks.map((t) => t.name), tracks.length)))
+  next.splice(at, 0, factory(nextPistaNameFromTracks(tracks)))
   return next
 }
 

@@ -1,3 +1,4 @@
+import { createMetronomeTrack, ensureMetronomeTrack } from './metronomeTrack'
 import { newLaneJoinsSolo } from './practiceMode'
 import {
   appendEmptyTrack,
@@ -5,6 +6,7 @@ import {
   initialEmptyTracks,
   insertEmptyTrack,
   nextPistaName,
+  nextPistaNameFromTracks,
   nextPistaNumber
 } from './trackList'
 
@@ -40,6 +42,13 @@ assert(insertEmptyTrack(eight, 99, createEmptyTrack)[8].name === 'Pista 9', 'ins
 
 const created = createEmptyTrack('Pista 9')
 assert(created.volume === 0.8 && created.solo === false && created.clips.length === 0, 'factory volume/mute/empty lane')
+
+const withMetro = ensureMetronomeTrack(eight.map((t) => ({ ...t })))
+assert(withMetro[0].kind === 'metronome' && withMetro[0].name === 'Metrónomo', 'project list starts with Metrónomo')
+assert(withMetro[0].mute === true, 'metronome is muted by default')
+assert(nextPistaNameFromTracks(withMetro) === 'Pista 9', 'metronome does not steal Pista numbers')
+assert(appendEmptyTrack(withMetro, createEmptyTrack).at(-1)?.name === 'Pista 9', 'append after metro+8 is Pista 9')
+assert(createMetronomeTrack().mute === true, 'factory metronome is muted')
 
 const afterStems = [
   { solo: false },

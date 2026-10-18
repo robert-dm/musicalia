@@ -1,5 +1,6 @@
 import * as Tone from 'tone'
 import { effectiveTrackGain, rampTrackGain, VOLUME_RAMP_SECONDS } from './trackGain'
+import { effectiveMetronomeGain, isMetronomeTrack } from './metronomeTrack'
 import {
   dbToGain,
   defaultTrackFx,
@@ -32,6 +33,7 @@ export interface TrackAudioSnapshot {
   pan?: number
   fx?: TrackFxState
   automation?: AutomationLane[]
+  kind?: string
 }
 
 function setSignal(
@@ -109,7 +111,9 @@ export function applyTrackFxChain(
   const volume = resolvedParamValue(track, 'volume', time)
   rampTrackGain(
     chain.gain,
-    effectiveTrackGain(volume, track.mute, track.solo, anySolo),
+    isMetronomeTrack(track)
+      ? effectiveMetronomeGain(volume, track.mute)
+      : effectiveTrackGain(volume, track.mute, track.solo, anySolo),
     rampSeconds
   )
 

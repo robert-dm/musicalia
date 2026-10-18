@@ -115,8 +115,22 @@ import {
   createEmptyTrack,
   initialEmptyTracks,
   insertEmptyTrack,
-  nextPistaName
+  nextPistaNameFromTracks
 } from './trackList'
+import { lastScheduledMetronomeEvents, MetronomeEngine } from './metronomeEngine'
+import {
+  DEFAULT_BEATS_PER_BAR,
+  METRONOME_AISLAR_RULE,
+  canDeleteTrack,
+  canRenameTrack,
+  ensureMetronomeTrack,
+  findMetronomeIndex,
+  isMetronomeTrack,
+  metronomeIsOn,
+  renderCountInClicksOffline,
+  renderMetronomeClicksOffline,
+  shouldExportMetronome
+} from './metronomeTrack'
 import {
   applySeekSnap,
   clickTimeFromX,
@@ -281,7 +295,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0092b'
+const APP_VERSION = '0.0093b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -327,7 +341,7 @@ interface TrackState {
   automation: AutomationLane[]
   clips: Clip[]
   name?: string
-  kind?: 'audio' | 'drum'
+  kind?: 'audio' | 'drum' | 'metronome'
   drum?: DrumKit
 }
 
@@ -357,7 +371,6 @@ function App() {
   const playOriginSongRef = useRef(0)
   const playOriginWallRef = useRef(0)
   const playOriginContextRef = useRef(0)
-  const [metronomeEnabled, setMetronomeEnabled] = useState(true)
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
   const [countInBars, _setCountInBars] = useState(2)
   const [isDraggingLoop, setIsDraggingLoop] = useState(false)
@@ -368,6 +381,7 @@ function App() {
   const [drumEditorTrack, setDrumEditorTrack] = useState<number | null>(null)
   const [drumSelectedPad, setDrumSelectedPad] = useState(0)
   const drumEngineRef = useRef(new DrumEngine())
+  const metronomeEngineRef = useRef(new MetronomeEngine())
   const bpmRef = useRef(bpm)
   bpmRef.current = bpm
   const [fileDragActive, setFileDragActive] = useState(false)
@@ -474,10 +488,10 @@ function App() {
   const stopRecordingRef = useRef<(opts?: { then?: 'stop' | 'pause' | 'keep'; commit?: boolean }) => Promise<void>>(async () => {})
   const handlePlayRef = useRef<() => void | Promise<void>>(async () => {})
   const handlePauseRef = useRef<() => void>(() => {})
-  const metronomePlayerRef = useRef<Tone.Player | null>(null)
   const [trackStates, setTrackStates] = useState<TrackState[]>(() =>
-    initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] }))
+    ensureMetronomeTrack(initialEmptyTracks().map((track) => ({ ...track, clips: [] as Clip[] })))
   )
+  const metronomeEnabled = metronomeIsOn(trackStates)
   const meterRef = useRef<Tone.Meter | null>(null)
   const [showToast, setShowToast] = useState(false)
   const [currentUser, setCurrentUser] = useState<User | null>(null)
@@ -555,8 +569,7 @@ function App() {
   
   const getCountInSeconds = () => {
     const secondsPerBeat = 60 / bpm
-    const beatsPerBar = 4
-    return countInBars * beatsPerBar * secondsPerBeat
+    return countInBars * DEFAULT_BEATS_PER_BAR * secondsPerBeat
   }
 
   const snapToGrid = (timeSeconds: number): number => {
@@ -923,6 +936,25 @@ function App() {
     return false
   }
 
+  const scheduleMetronome = (songTime: number) => {
+    const tracks = trackStatesRef.current
+    const idx = findMetronomeIndex(tracks)
+    const track = idx >= 0 ? tracks[idx] : undefined
+    metronomeEngineRef.current.reschedule({
+      enabled: !!track && !track.mute,
+      destination: idx >= 0 ? trackGainsRef.current[idx] : undefined,
+      bpm: bpmRef.current,
+      beatsPerBar: DEFAULT_BEATS_PER_BAR,
+      songTime,
+      playOriginSong: playOriginSongRef.current,
+      tempoRate: tempoRateRef.current,
+      songEnd: Math.max(getMaxDuration(), timelineMaxRef.current || 0, 8 * (60 / Math.max(1, bpmRef.current))),
+      loopStart: loopStartRef.current,
+      loopEnd: loopEndRef.current,
+      loopEnabled: isLoopEnabledRef.current
+    })
+  }
+
   const scheduleDrums = (songTime: number) => {
     drumEngineRef.current.reschedule({
       tracks: trackStatesRef.current,
@@ -935,6 +967,7 @@ function App() {
       loopEnd: loopEndRef.current,
       loopEnabled: isLoopEnabledRef.current
     })
+    scheduleMetronome(songTime)
   }
 
   const retargetPlayingClips = (songTime: number) => {
@@ -1127,7 +1160,6 @@ function App() {
       }
       if (state.name) setCurrentProjectName(state.name)
       commitPlayhead(state.playheadPosition)
-      if (state.metronomeEnabled !== undefined) setMetronomeEnabled(state.metronomeEnabled)
       if (state.isLoopEnabled !== undefined) setIsLoopEnabled(state.isLoopEnabled)
       
       const newTrackStates = await Promise.all(state.tracks.map(async (t, i) => {
@@ -1199,8 +1231,10 @@ function App() {
         return
       }
       
-      setTrackStates(newTrackStates)
-      bpmManuallySetRef.current = sessionHasAudio(newTrackStates)
+      const withMetro = ensureMetronomeTrack(newTrackStates)
+      reconnectAllClips(withMetro)
+      setTrackStates(withMetro)
+      bpmManuallySetRef.current = sessionHasAudio(withMetro)
       console.log(`[Mount] Local project loaded successfully`)
     })
   }, [])
@@ -1666,8 +1700,10 @@ function App() {
       setLoopStart(projectData.loopStart ?? null)
       setLoopEnd(projectData.loopEnd ?? null)
       commitPlayhead(projectData.playheadPosition || 0)
-      setTrackStates(newTrackStates)
-      bpmManuallySetRef.current = sessionHasAudio(newTrackStates)
+      const withMetro = ensureMetronomeTrack(newTrackStates)
+      reconnectAllClips(withMetro)
+      setTrackStates(withMetro)
+      bpmManuallySetRef.current = sessionHasAudio(withMetro)
       setCurrentProjectName(projectData.name || 'Proyecto sin título')
       
       setUploadProgress(100)
@@ -1769,7 +1805,9 @@ function App() {
   }
 
   const handleOpenExportDialog = () => {
-    const tracksWithAudio = trackStates.map(t => t.clips.length > 0 && !t.mute)
+    const tracksWithAudio = trackStates.map(t =>
+      isMetronomeTrack(t) ? !t.mute : (t.clips.length > 0 && !t.mute)
+    )
     setExportTracks(tracksWithAudio)
     setShowExportDialog(true)
   }
@@ -1787,7 +1825,7 @@ function App() {
       
       const selectedIndices = exportTracks
         .map((selected, i) => selected ? i : -1)
-        .filter(i => i >= 0 && trackStates[i].clips.length > 0)
+        .filter(i => i >= 0 && (trackStates[i].clips.length > 0 || shouldExportMetronome(trackStates[i])))
       
       if (selectedIndices.length === 0) {
         setErrorMessage('Selecciona al menos una pista para exportar')
@@ -1797,7 +1835,7 @@ function App() {
       
       const anySolo = selectedIndices.some(i => trackStates[i].solo)
       const effectiveIndices = anySolo 
-        ? selectedIndices.filter(i => trackStates[i].solo)
+        ? selectedIndices.filter(i => trackStates[i].solo || shouldExportMetronome(trackStates[i]))
         : selectedIndices
       
       if (effectiveIndices.length === 0) {
@@ -1807,9 +1845,16 @@ function App() {
       }
       
       const countInSeconds = exportIncludeCountIn ? getCountInSeconds() : 0
-      const maxDuration = Math.max(...effectiveIndices.flatMap(i => 
-        trackStates[i].clips.map(clip => clip.offsetSeconds + clip.duration)
-      ))
+      const clipEnds = effectiveIndices.flatMap(i =>
+        isMetronomeTrack(trackStates[i])
+          ? []
+          : trackStates[i].clips.map(clip => clip.offsetSeconds + clip.duration)
+      )
+      const maxDuration = clipEnds.length > 0
+        ? Math.max(...clipEnds)
+        : (effectiveIndices.some(i => shouldExportMetronome(trackStates[i]))
+          ? countInBars * DEFAULT_BEATS_PER_BAR * (60 / Math.max(1, bpm)) * 4
+          : 0)
       const totalDuration = maxDuration + countInSeconds
       const sampleRate = effectiveIndices
         .flatMap((i) => trackStates[i].clips)
@@ -1822,21 +1867,13 @@ function App() {
         
         const offlineContext = new OfflineAudioContext(2, totalDuration * sampleRate, sampleRate)
         
-        // Add metronome count-in if requested
-        if (exportIncludeCountIn && metronomePlayerRef.current?.buffer) {
-          const beatsPerBar = 4
-          const totalBeats = countInBars * beatsPerBar
-          const secondsPerBeat = 60 / bpm
-          
-          for (let beat = 0; beat < totalBeats; beat++) {
-            const source = offlineContext.createBufferSource()
-            source.buffer = metronomePlayerRef.current.buffer.get() as AudioBuffer
-            const gain = offlineContext.createGain()
-            gain.gain.value = 0.5
-            source.connect(gain)
-            gain.connect(offlineContext.destination)
-            source.start(beat * secondsPerBeat)
-          }
+        if (exportIncludeCountIn) {
+          renderCountInClicksOffline(offlineContext, offlineContext.destination, {
+            bpm,
+            beatsPerBar: DEFAULT_BEATS_PER_BAR,
+            countInBars,
+            volume: 0.5
+          })
         }
         
         for (const i of effectiveIndices) {
@@ -1846,6 +1883,17 @@ function App() {
           const gainNode = offlineContext.createGain()
           gainNode.gain.value = track.volume
           gainNode.connect(offlineContext.destination)
+
+          if (shouldExportMetronome(track)) {
+            renderMetronomeClicksOffline(offlineContext, gainNode, {
+              bpm,
+              beatsPerBar: DEFAULT_BEATS_PER_BAR,
+              songEnd: maxDuration,
+              countInSeconds,
+              volume: track.volume
+            })
+            continue
+          }
           
           if (track.kind === 'drum' && track.drum) {
             renderDrumHitsOffline(offlineContext, gainNode, track.drum, track.clips, bpm, countInSeconds)
@@ -1888,28 +1936,28 @@ function App() {
           
           const offlineContext = new OfflineAudioContext(2, totalDuration * sampleRate, sampleRate)
           
-          // Add metronome count-in if requested
-          if (exportIncludeCountIn && metronomePlayerRef.current?.buffer) {
-            const beatsPerBar = 4
-            const totalBeats = countInBars * beatsPerBar
-            const secondsPerBeat = 60 / bpm
-            
-            for (let beat = 0; beat < totalBeats; beat++) {
-              const source = offlineContext.createBufferSource()
-              source.buffer = metronomePlayerRef.current.buffer.get() as AudioBuffer
-              const gain = offlineContext.createGain()
-              gain.gain.value = 0.5
-              source.connect(gain)
-              gain.connect(offlineContext.destination)
-              source.start(beat * secondsPerBeat)
-            }
+          if (exportIncludeCountIn) {
+            renderCountInClicksOffline(offlineContext, offlineContext.destination, {
+              bpm,
+              beatsPerBar: DEFAULT_BEATS_PER_BAR,
+              countInBars,
+              volume: 0.5
+            })
           }
           
           const gainNode = offlineContext.createGain()
           gainNode.gain.value = track.volume
           gainNode.connect(offlineContext.destination)
-          
-          if (track.kind === 'drum' && track.drum) {
+
+          if (shouldExportMetronome(track)) {
+            renderMetronomeClicksOffline(offlineContext, gainNode, {
+              bpm,
+              beatsPerBar: DEFAULT_BEATS_PER_BAR,
+              songEnd: maxDuration,
+              countInSeconds,
+              volume: track.volume
+            })
+          } else if (track.kind === 'drum' && track.drum) {
             renderDrumHitsOffline(offlineContext, gainNode, track.drum, track.clips, bpm, countInSeconds)
           } else {
             for (const clip of track.clips) {
@@ -1969,12 +2017,6 @@ function App() {
         ensureTrackGains(trackStatesRef.current.length)
       }
       
-      if (!metronomePlayerRef.current) {
-        const clickBuffer = createClickSound()
-        metronomePlayerRef.current = new Tone.Player(clickBuffer).toDestination()
-        metronomePlayerRef.current.volume.value = -6
-      }
-      
       if (!meterRef.current) {
         meterRef.current = new Tone.Meter()
         Tone.getDestination().connect(meterRef.current)
@@ -2001,25 +2043,6 @@ function App() {
     console.log('[DIAG] Destination mute:', Tone.getDestination().mute)
     console.log('[DIAG] Destination volume:', Tone.getDestination().volume.value)
     console.log('[DIAG] Gains:', trackGainsRef.current.map(g => g.gain.value))
-  }
-
-  const createClickSound = (): Tone.ToneAudioBuffer => {
-    const sampleRate = Tone.getContext().sampleRate
-    const duration = 0.05
-    const length = Math.floor(sampleRate * duration)
-    const audioBuffer = Tone.getContext().createBuffer(2, length, sampleRate)
-    
-    const freq = 1000
-    for (let ch = 0; ch < 2; ch++) {
-      const channel = audioBuffer.getChannelData(ch)
-      for (let i = 0; i < length; i++) {
-        const t = i / sampleRate
-        const envelope = Math.exp(-t * 20)
-        channel[i] = Math.sin(2 * Math.PI * freq * t) * envelope * 0.3
-      }
-    }
-    
-    return new Tone.ToneAudioBuffer(audioBuffer)
   }
 
   const playTestTone = async () => {
@@ -2137,7 +2160,6 @@ function App() {
     
     Tone.getTransport().bpm.value = effectiveBpm(bpm, tempoRateRef.current)
     
-    const countInSeconds = getCountInSeconds()
     // When loop is enabled and marked, always start from loop start
     // Otherwise, start from current playhead position (clicked or paused)
     const startTime = (isLoopEnabled && loopStart !== null) ? loopStart : playheadPositionRef.current
@@ -2147,20 +2169,6 @@ function App() {
     Tone.getTransport().start()
     stampPlayOrigin(startTime)
     applyAllClipPlayback()
-    
-    const startingInsideGap = startTime < countInSeconds
-    
-    if (metronomeEnabled && startingInsideGap && metronomePlayerRef.current) {
-      const beatsPerBar = 4
-      const totalBeats = countInBars * beatsPerBar
-      const secondsPerBeatWall = 60 / Math.max(1, bpm * tempoRateRef.current)
-      const clicksNeeded = Math.ceil((countInSeconds - startTime) / (60 / Math.max(1, bpm)))
-      
-      for (let beat = 0; beat < Math.min(clicksNeeded, totalBeats); beat++) {
-        const time = Tone.now() + beat * secondsPerBeatWall
-        metronomePlayerRef.current.start(time)
-      }
-    }
     
     const maxDuration = getMaxDuration()
     
@@ -2222,6 +2230,7 @@ function App() {
     }
     Tone.getTransport().pause()
     drumEngineRef.current.stopAll()
+    metronomeEngineRef.current.stopAll()
     
     if (playheadAnimationRef.current !== null) {
       cancelAnimationFrame(playheadAnimationRef.current)
@@ -2261,6 +2270,7 @@ function App() {
     
     Tone.getTransport().stop()
     drumEngineRef.current.stopAll()
+    metronomeEngineRef.current.stopAll()
     
     if (playheadAnimationRef.current !== null) {
       cancelAnimationFrame(playheadAnimationRef.current)
@@ -2381,6 +2391,7 @@ function App() {
   stopRecordingRef.current = stopRecording
 
   const handleRecordArm = (trackIndex: number) => {
+    if (isMetronomeTrack(trackStatesRef.current[trackIndex])) return
     setRecordArmedIndex((prev) => (prev === trackIndex ? null : trackIndex))
   }
 
@@ -2481,6 +2492,10 @@ function App() {
     await ensureAudio()
     const tracks = trackStatesRef.current
     const placement = resolveRecordTrack(recordArmedIndex, selectedTrack, tracks.length)
+    if (!placement.createNew && isMetronomeTrack(tracks[placement.trackIndex])) {
+      placement.createNew = true
+      placement.trackIndex = tracks.length
+    }
     let trackIndex = placement.trackIndex
     let stream: MediaStream
     try {
@@ -3599,10 +3614,12 @@ function App() {
     bpmManuallySetRef.current = true
     setBpm(newBpm)
     Tone.getTransport().bpm.value = effectiveBpm(newBpm, tempoRateRef.current)
+    if (isPlayingRef.current) scheduleMetronome(getSongTime())
   }
 
   const handleLaneClick = async (trackIndex: number) => {
     const track = trackStates[trackIndex]
+    if (isMetronomeTrack(track)) return
     if (track.kind === 'drum') {
       openDrumEditor(trackIndex)
       return
@@ -3655,7 +3672,7 @@ function App() {
     const next = [...trackStatesRef.current]
     for (let i = 0; i < count; i++) {
       next.push({
-        ...createEmptyTrack(nextPistaName(next.map(t => t.name), next.length)),
+        ...createEmptyTrack(nextPistaNameFromTracks(next)),
         solo: joinSolo,
         clips: [] as Clip[]
       })
@@ -3682,6 +3699,10 @@ function App() {
         appendTracksForImport(1)
         trackIndex = trackStatesRef.current.length - 1
       }
+    }
+    if (!next.createNew && isMetronomeTrack(trackStatesRef.current[trackIndex])) {
+      appendTracksForImport(1)
+      trackIndex = trackStatesRef.current.length - 1
     }
     setSelectedTrack(trackIndex)
     pendingOffsetRef.current = next.offsetSeconds
@@ -3710,7 +3731,10 @@ function App() {
     insertAt?: number | null
   ) => {
     if (files.length === 0) return
-    const placements = resolveDropPlacement(files.length, hoverTrackIndex, trackStatesRef.current.length, insertAt)
+    const hover = hoverTrackIndex != null && isMetronomeTrack(trackStatesRef.current[hoverTrackIndex])
+      ? null
+      : hoverTrackIndex
+    const placements = resolveDropPlacement(files.length, hover, trackStatesRef.current.length, insertAt)
     importQueueRef.current.push(...files.map((file, i) => ({
       file,
       trackIndex: placements[i].trackIndex,
@@ -4040,7 +4064,7 @@ function App() {
     const needed = startTrackIndex + lanes.length
     while (newTrackStates.length < needed) {
       newTrackStates.push({
-        ...createEmptyTrack(nextPistaName(newTrackStates.map(t => t.name), newTrackStates.length)),
+        ...createEmptyTrack(nextPistaNameFromTracks(newTrackStates)),
         clips: []
       })
     }
@@ -4084,14 +4108,25 @@ function App() {
 
   const handleMuteToggle = useCallback((trackIndex: number) => {
     setTrackStates(prev => {
+      if (!prev[trackIndex]) return prev
       const newStates = [...prev]
       newStates[trackIndex] = {
         ...newStates[trackIndex],
         mute: !newStates[trackIndex].mute
       }
+      trackStatesRef.current = newStates
+      if (isPlayingRef.current && isMetronomeTrack(newStates[trackIndex])) {
+        scheduleMetronome(getSongTime())
+      }
       return newStates
     })
   }, [])
+
+  const toggleMetronomeTrack = useCallback(() => {
+    const idx = findMetronomeIndex(trackStatesRef.current)
+    if (idx < 0) return
+    handleMuteToggle(idx)
+  }, [handleMuteToggle])
 
   const handleSoloToggle = useCallback((trackIndex: number) => {
     setTrackStates(prev => {
@@ -4105,6 +4140,7 @@ function App() {
   }, [])
 
   const handlePractice = (trackIndex: number) => {
+    if (isMetronomeTrack(trackStatesRef.current[trackIndex])) return
     const next = togglePractice(trackStatesRef.current, trackIndex, practiceIndexRef.current)
     practiceIndexRef.current = next.practiceIndex
     setPracticeIndex(next.practiceIndex)
@@ -4116,6 +4152,7 @@ function App() {
   }
 
   const handleAislar = (trackIndex: number) => {
+    if (isMetronomeTrack(trackStatesRef.current[trackIndex])) return
     const next = toggleAislar(trackStatesRef.current, trackIndex)
     practiceIndexRef.current = next.practiceIndex
     setPracticeIndex(next.practiceIndex)
@@ -4287,6 +4324,10 @@ function App() {
   const requestDeleteTrack = (trackIndex: number) => {
     closeContextMenu()
     if (trackIndex < 0 || trackIndex >= trackStates.length) return
+    if (isMetronomeTrack(trackStates[trackIndex])) {
+      showClipToast('El metrónomo no se puede eliminar')
+      return
+    }
     if (trackStates.length <= 1) {
       showClipToast('Debe quedar al menos una pista')
       return
@@ -4708,6 +4749,7 @@ function App() {
 
   const startRenameTrack = (trackIndex: number) => {
     closeContextMenu()
+    if (!canRenameTrack(trackStates[trackIndex])) return
     renamingTrackRef.current = trackIndex
     setRenamingTrack(trackIndex)
     setRenameDraft(resolveTrackName(trackStates[trackIndex]?.name, trackIndex))
@@ -4760,6 +4802,7 @@ function App() {
   }
 
   const handleLaneDoubleClick = (trackIndex: number) => {
+    if (isMetronomeTrack(trackStatesRef.current[trackIndex])) return
     if (trackStatesRef.current[trackIndex]?.kind === 'drum') {
       openDrumEditor(trackIndex)
       return
@@ -5135,6 +5178,43 @@ function App() {
   })
 
   useEffect(() => {
+    const api = {
+      getState: () => {
+        const idx = findMetronomeIndex(trackStatesRef.current)
+        const track = idx >= 0 ? trackStatesRef.current[idx] : null
+        return {
+          index: idx,
+          name: track?.name ?? null,
+          kind: track?.kind ?? null,
+          mute: track?.mute ?? true,
+          volume: track?.volume ?? 0,
+          toolbarOn: metronomeIsOn(trackStatesRef.current),
+          overlayPlayer: false,
+          clickSource: track && !track.mute ? 'track' : 'none',
+          destinationIsTrack: metronomeEngineRef.current.destinationIsTrack,
+          scheduled: lastScheduledMetronomeEvents.slice()
+        }
+      },
+      unmute: () => {
+        const idx = findMetronomeIndex(trackStatesRef.current)
+        if (idx < 0) return
+        if (trackStatesRef.current[idx].mute) handleMuteToggle(idx)
+      },
+      mute: () => {
+        const idx = findMetronomeIndex(trackStatesRef.current)
+        if (idx < 0) return
+        if (!trackStatesRef.current[idx].mute) handleMuteToggle(idx)
+      },
+      play: () => handlePlayRef.current(),
+      getSchedule: () => lastScheduledMetronomeEvents.slice()
+    }
+    ;(window as unknown as { __musicaliaMetronome?: typeof api }).__musicaliaMetronome = api
+    return () => {
+      delete (window as unknown as { __musicaliaMetronome?: typeof api }).__musicaliaMetronome
+    }
+  })
+
+  useEffect(() => {
     const recordApi = {
       getCompensation: () => currentRecordCompensation(),
       lastMeta: () => lastRecordMetaRef.current,
@@ -5467,8 +5547,9 @@ function App() {
           </div>
           <button
             className={`header-btn icon-only toggle-btn ${metronomeEnabled ? 'active' : ''}`}
-            onClick={() => setMetronomeEnabled(!metronomeEnabled)}
-            title="Metrónomo (cuenta 2 compases antes)"
+            data-testid="metronome-toolbar"
+            onClick={toggleMetronomeTrack}
+            title="Metrónomo: activa o silencia la pista Metrónomo (mismo Mute). Nunca hay dos clics a la vez."
             aria-label="Metrónomo"
             aria-pressed={metronomeEnabled}
           >
@@ -5713,7 +5794,7 @@ function App() {
             </p>
             <div className="export-tracks-list">
               {trackStates.map((track, i) => (
-                track.clips.length > 0 && (
+                (track.clips.length > 0 || isMetronomeTrack(track)) && (
                   <label key={i} className="export-track-item">
                     <input
                       type="checkbox"
@@ -5891,7 +5972,7 @@ function App() {
                   solo={trackState.solo}
                   volume={trackState.volume}
                   height={88 * verticalZoom}
-                  canDelete={trackStates.length > 1}
+                  canDelete={trackStates.length > 1 && canDeleteTrack(trackState)}
                   isRenaming={renamingTrack === trackIndex}
                   renameDraft={renamingTrack === trackIndex ? renameDraft : ''}
                   onContextMenu={openTrackHeaderMenu}
@@ -6065,6 +6146,8 @@ function App() {
             <TrackLane
               trackIndex={trackIndex}
               trackKind={trackState.kind}
+              bpm={bpm}
+              beatsPerBar={DEFAULT_BEATS_PER_BAR}
               hasClips={trackState.clips.length > 0}
               isAnyClipPlaying={trackState.clips.some(c => c.isPlaying)}
               height={88 * verticalZoom}
@@ -6160,7 +6243,12 @@ function App() {
           >
             {contextMenu.kind === 'header' ? (
               <>
-                <ContextMenuItem icon={<IconPencil />} label="Renombrar pista" onClick={() => startRenameTrack(contextMenu.trackIndex)} />
+                <ContextMenuItem
+                  icon={<IconPencil />}
+                  label="Renombrar pista"
+                  disabled={isMetronomeTrack(trackStates[contextMenu.trackIndex])}
+                  onClick={() => startRenameTrack(contextMenu.trackIndex)}
+                />
                 <ContextMenuItem
                   icon={<IconMoveVertical />}
                   label="Insertar pista arriba"
@@ -6182,7 +6270,7 @@ function App() {
                   icon={<IconTrash />}
                   label="Eliminar pista"
                   danger
-                  disabled={trackStates.length <= 1}
+                  disabled={trackStates.length <= 1 || isMetronomeTrack(trackStates[contextMenu.trackIndex])}
                   onClick={() => requestDeleteTrack(contextMenu.trackIndex)}
                 />
               </>
@@ -6344,7 +6432,8 @@ function App() {
                 <li>• <strong>Zoom vertical</strong> - La forma de onda queda centrada en el clip a cualquier altura (también al mínimo del slider)</li>
                 <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
                 <li>• <strong>P (Practicar encima)</strong> - Silencia ese stem y deja el resto sonando para tocar o cantar encima. El botón del transporte usa la pista seleccionada</li>
-                <li>• <strong>Aislar</strong> - Oís SOLO esa pista (para tocar encima). Mute (M) silencia una. Solo (S) puede dejar varias. Una pista nueva se oye también. Pulsá de nuevo para oír todas</li>
+                <li>• <strong>Aislar</strong> - Oís SOLO esa pista (para tocar encima). Mute (M) silencia una. Solo (S) puede dejar varias. Una pista nueva se oye también. Pulsá de nuevo para oír todas. {METRONOME_AISLAR_RULE}</li>
+                <li>• <strong>Metrónomo</strong> - Pista fija «Metrónomo» (arriba, no se borra ni se renombra). Sale muteada. El botón del toolbar es el mismo Mute. El clic sigue el BPM, el compás (acento en 1) y Vel. Se exporta solo si está destildado, más la opción de entrada de 2 compases</li>
                 <li>• <strong>Botón FX</strong> - Abre el rack de efectos de esa pista (EQ, compresor, filtro, delay, reverb y pan). Cada módulo tiene knobs y bypass On/Off</li>
                 <li>• <strong>Botón A (curva)</strong> - Muestra la pista de automatización. Elegí el parámetro (volumen, pan o un knob de efecto) y dibujá la curva</li>
               </ul>

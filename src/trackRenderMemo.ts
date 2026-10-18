@@ -19,6 +19,8 @@ export interface TrackHeaderDataProps {
 export interface TrackLaneDataProps {
   trackIndex: number
   trackKind?: string
+  bpm?: number
+  beatsPerBar?: number
   hasClips: boolean
   isAnyClipPlaying: boolean
   height: number
@@ -58,6 +60,8 @@ export function trackLaneDataEqual(prev: TrackLaneDataProps, next: TrackLaneData
   return (
     prev.trackIndex === next.trackIndex &&
     prev.trackKind === next.trackKind &&
+    prev.bpm === next.bpm &&
+    prev.beatsPerBar === next.beatsPerBar &&
     prev.hasClips === next.hasClips &&
     prev.isAnyClipPlaying === next.isAnyClipPlaying &&
     prev.height === next.height &&

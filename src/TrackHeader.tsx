@@ -75,12 +75,13 @@ export const TrackHeader = memo(function TrackHeader({
   const renderCountRef = useRef(0)
   renderCountRef.current += 1
   const displayName = resolveTrackName(name, trackIndex)
+  const isMetronome = kind === 'metronome'
 
   return (
     <div
       className="track-header"
       data-track-index={trackIndex}
-      data-track-kind={kind === 'drum' ? 'drum' : 'audio'}
+      data-track-kind={kind === 'drum' ? 'drum' : kind === 'metronome' ? 'metronome' : 'audio'}
       data-testid={`track-header-${trackIndex}`}
       data-render-count={renderCountRef.current}
       style={{ height: `${height}px` }}
@@ -123,6 +124,7 @@ export const TrackHeader = memo(function TrackHeader({
             onDoubleClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
+              if (isMetronome) return
               onStartRename(trackIndex)
             }}
           >
@@ -133,10 +135,11 @@ export const TrackHeader = memo(function TrackHeader({
           type="button"
           className={`control-button practice-button ${practiceActive ? 'active' : ''}`}
           data-testid={`practice-${trackIndex}`}
-          onClick={() => onPractice(trackIndex)}
-          title="Practicar encima: silencia ESTA pista y deja el resto sonando, para tocar o cantar"
+          onClick={() => { if (!isMetronome) onPractice(trackIndex) }}
+          title={isMetronome ? 'El metrónomo no se practica' : 'Practicar encima: silencia ESTA pista y deja el resto sonando, para tocar o cantar'}
           aria-label="Practicar encima"
           aria-pressed={practiceActive}
+          disabled={isMetronome}
         >
           P
         </button>
@@ -144,19 +147,20 @@ export const TrackHeader = memo(function TrackHeader({
           type="button"
           className={`control-button isolate-button ${isolated ? 'active' : ''}`}
           data-testid={`aislar-${trackIndex}`}
-          onClick={() => onAislar(trackIndex)}
-          title={AISLAR_BUTTON_TITLE}
+          onClick={() => { if (!isMetronome) onAislar(trackIndex) }}
+          title={isMetronome ? 'Aislar no se aplica al metrónomo; Mute (M) lo apaga. Aislar otra pista no lo silencia si está destildado.' : AISLAR_BUTTON_TITLE}
           aria-label="Aislar: oír solo esta pista"
           aria-pressed={isolated}
+          disabled={isMetronome}
         >
           Aislar
         </button>
         <button
           type="button"
           className="control-button track-delete-button"
-          title={canDelete ? 'Eliminar pista' : 'Debe quedar al menos una pista'}
+          title={isMetronome ? 'El metrónomo no se puede eliminar' : canDelete ? 'Eliminar pista' : 'Debe quedar al menos una pista'}
           aria-label="Eliminar pista"
-          disabled={!canDelete}
+          disabled={!canDelete || isMetronome}
           onClick={(e) => {
             e.stopPropagation()
             onDelete(trackIndex)
@@ -170,10 +174,11 @@ export const TrackHeader = memo(function TrackHeader({
           type="button"
           className={`control-button record-arm-button ${recordArmed ? 'active' : ''}`}
           data-testid={`record-arm-${trackIndex}`}
-          onClick={() => onRecordArm(trackIndex)}
-          title={recordArmed ? 'Quitar rec-arm' : 'Armar pista para grabar'}
+          onClick={() => { if (!isMetronome) onRecordArm(trackIndex) }}
+          title={isMetronome ? 'No se graba en el metrónomo' : recordArmed ? 'Quitar rec-arm' : 'Armar pista para grabar'}
           aria-label="Armar grabación"
           aria-pressed={recordArmed}
+          disabled={isMetronome}
         >
           <IconRecordArm size={12} />
         </button>

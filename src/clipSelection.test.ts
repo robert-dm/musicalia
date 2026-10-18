@@ -67,6 +67,14 @@ assert(!!del && del.tracks.length === 2, 'deleting a track leaves the others')
 assert(!!del && del.tracks[1].clips[0].id === 'd', 'later tracks shift down')
 assert(!!del && del.selectedIds.has('a') && del.selectedIds.has('d') && !del.selectedIds.has('b'), 'selection drops clips from the removed track')
 assert(deleteTrackFromList([{ clips: [] }], 0, new Set()) === null, 'cannot delete the last track')
+assert(
+  deleteTrackFromList(
+    [{ clips: [], kind: 'metronome' }, { clips: [] }],
+    0,
+    new Set()
+  ) === null,
+  'cannot delete the metronome track'
+)
 
 assert(resolveTrackName('  Voces  ', 2) === 'Voces', 'trims stored track names')
 assert(resolveTrackName('', 3) === 'Track 4', 'empty name falls back to Track N')

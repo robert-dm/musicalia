@@ -20,6 +20,28 @@ import {
   type User
 } from './cloudStorage'
 import { detectBPM } from './bpmDetector'
+import {
+  appendTap,
+  clampBpm,
+  doubleBpm,
+  formatBpm,
+  halfBpm,
+  parseBpmInput,
+  tapTempoFromTimestamps
+} from './tempoMath'
+import {
+  barDurationSeconds,
+  hydrateTrackMetronome,
+  meterOf,
+  normalizeMetronomeMeter,
+  phaseFromDownbeat,
+  pulseDurationSeconds,
+  pulsesPerBar,
+  serializeTrackMetronome,
+  wrapPhase,
+  type MetronomeMeter
+} from './metronomeMeter'
+import { MetronomeSettingsPanel } from './MetronomeSettingsPanel'
 import { encodeAudioBufferWAV } from './wav'
 import { TrackHeader } from './TrackHeader'
 import { TrackLane } from './TrackLane'
@@ -134,7 +156,6 @@ import {
 } from './trackList'
 import { lastScheduledMetronomeEvents, MetronomeEngine } from './metronomeEngine'
 import {
-  DEFAULT_BEATS_PER_BAR,
   METRONOME_AISLAR_RULE,
   canDeleteTrack,
   canRenameTrack,
@@ -251,6 +272,7 @@ import {
   IconSaveAs,
   IconScissors,
   IconSkipBack,
+  IconSettings,
   IconSliders,
   IconSpline,
   IconSplit,
@@ -382,6 +404,7 @@ interface TrackState {
   name?: string
   kind?: 'audio' | 'drum' | 'metronome'
   drum?: DrumKit
+  metronome?: MetronomeMeter
 }
 
 function App() {
@@ -398,6 +421,10 @@ function App() {
   const [calibratingLatency, setCalibratingLatency] = useState(false)
   const [clipLatencyEdit, setClipLatencyEdit] = useState<{ trackIndex: number; clipId: string; ms: number } | null>(null)
   const [bpm, setBpm] = useState(120)
+  const [metroSettingsOpen, setMetroSettingsOpen] = useState(false)
+  const [metroAlignArmed, setMetroAlignArmed] = useState(false)
+  const tapTimesRef = useRef<number[]>([])
+  const [tapFlash, setTapFlash] = useState(false)
   const [pitchSemitones, setPitchSemitones] = useState(0)
   const [tempoRate, setTempoRate] = useState(1)
   const [practiceIndex, setPracticeIndex] = useState<number | null>(null)
@@ -636,9 +663,14 @@ function App() {
   const fileInsertAtRef = useRef<number | null>(null)
   const syncingVerticalScroll = useRef(false)
   
+  const currentMetronomeMeter = (): MetronomeMeter => {
+    const idx = findMetronomeIndex(trackStatesRef.current)
+    const track = idx >= 0 ? trackStatesRef.current[idx] : undefined
+    return meterOf(track)
+  }
+
   const getCountInSeconds = () => {
-    const secondsPerBeat = 60 / bpm
-    return countInBars * DEFAULT_BEATS_PER_BAR * secondsPerBeat
+    return countInBars * barDurationSeconds(bpm, currentMetronomeMeter())
   }
 
   const snapToGrid = (timeSeconds: number): number => {
@@ -657,6 +689,7 @@ function App() {
         kind: t.kind,
         drum: t.drum,
         ...serializeTrackAudio(t),
+        ...serializeTrackMetronome(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -690,7 +723,9 @@ function App() {
         solo: t.solo,
         volume: t.volume,
         name: t.name,
+        kind: t.kind,
         ...serializeTrackAudio(t),
+        ...serializeTrackMetronome(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -722,7 +757,9 @@ function App() {
         solo: t.solo,
         volume: t.volume,
         name: t.name,
+        kind: t.kind,
         ...serializeTrackAudio(t),
+        ...serializeTrackMetronome(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -807,6 +844,7 @@ function App() {
         kind: trackKindOf(t.kind),
         drum: t.drum,
         ...hydrateTrackAudio(t),
+        ...hydrateTrackMetronome(t, trackKindOf(t.kind)),
         clips: clips.filter(c => c !== null)
       }
     }))
@@ -1009,11 +1047,14 @@ function App() {
     const tracks = trackStatesRef.current
     const idx = findMetronomeIndex(tracks)
     const track = idx >= 0 ? tracks[idx] : undefined
+    const meter = meterOf(track)
     metronomeEngineRef.current.reschedule({
       enabled: !!track && !track.mute,
       destination: idx >= 0 ? trackGainsRef.current[idx] : undefined,
       bpm: bpmRef.current,
-      beatsPerBar: DEFAULT_BEATS_PER_BAR,
+      beatsPerBar: pulsesPerBar(meter, bpmRef.current),
+      meter,
+      clickSound: meter.clickSound,
       songTime,
       playOriginSong: playOriginSongRef.current,
       tempoRate: tempoRateRef.current,
@@ -1126,6 +1167,7 @@ function App() {
           kind: trackKindOf(t.kind),
           drum: projectDrumPayload(t.drum, i),
           ...serializeTrackAudio(t),
+          ...serializeTrackMetronome(t),
           clips: savedClips
         }
       }))
@@ -1238,7 +1280,7 @@ function App() {
       await ensureAudio()
       ensureTrackGains(state.tracks.length)
       
-      setBpm(state.bpm)
+      setBpm(clampBpm(Number(state.bpm) || 120))
       const loadedPitch = clampPitchSemitones(Number((state as { pitchSemitones?: unknown }).pitchSemitones) || 0)
       const loadedRate = clampTempoRate(Number((state as { tempoRate?: unknown }).tempoRate) || 1)
       pitchRef.current = loadedPitch
@@ -1320,6 +1362,7 @@ function App() {
           kind: trackKindOf(t.kind),
           drum,
           ...hydrateTrackAudio(t),
+          ...hydrateTrackMetronome(t, trackKindOf(t.kind)),
           clips: loadedClips.filter(c => c !== null) as Clip[]
         }
       }))
@@ -1513,6 +1556,7 @@ function App() {
         kind: trackKindOf(t.kind),
         drum: projectDrumPayload(t.drum, trackIdx),
         ...serializeTrackAudio(t),
+        ...serializeTrackMetronome(t),
         clips: t.clips.map((clip, clipIdx) => projectClipPayload(clip, trackIdx, clipIdx))
       }))
     }
@@ -1773,6 +1817,7 @@ function App() {
           kind: trackKindOf(t.kind),
           drum,
           ...hydrateTrackAudio(t),
+          ...hydrateTrackMetronome(t, trackKindOf(t.kind)),
           clips: clips.filter(c => c !== null) as Clip[]
         }
       }))
@@ -1782,7 +1827,7 @@ function App() {
         return
       }
       
-      setBpm(projectData.bpm || 120)
+      setBpm(clampBpm(Number(projectData.bpm) || 120))
       const loadedPitch = clampPitchSemitones(Number(projectData.pitchSemitones) || 0)
       const loadedRate = clampTempoRate(Number(projectData.tempoRate) || 1)
       Tone.getTransport().bpm.value = effectiveBpm(projectData.bpm || 120, loadedRate)
@@ -1947,6 +1992,7 @@ function App() {
       }
       
       const countInSeconds = exportIncludeCountIn ? getCountInSeconds() : 0
+      const exportMeter = currentMetronomeMeter()
       const clipEnds = effectiveIndices.flatMap(i =>
         isMetronomeTrack(trackStates[i])
           ? []
@@ -1955,7 +2001,7 @@ function App() {
       const maxDuration = clipEnds.length > 0
         ? Math.max(...clipEnds)
         : (effectiveIndices.some(i => shouldExportMetronome(trackStates[i]))
-          ? countInBars * DEFAULT_BEATS_PER_BAR * (60 / Math.max(1, bpm)) * 4
+          ? countInBars * barDurationSeconds(bpm, exportMeter) * 4
           : 0)
       const totalDuration = maxDuration + countInSeconds
       const sampleRate = effectiveIndices
@@ -1972,7 +2018,8 @@ function App() {
         if (exportIncludeCountIn) {
           renderCountInClicksOffline(offlineContext, offlineContext.destination, {
             bpm,
-            beatsPerBar: DEFAULT_BEATS_PER_BAR,
+            beatsPerBar: pulsesPerBar(exportMeter, bpm),
+            meter: exportMeter,
             countInBars,
             volume: 0.5
           })
@@ -1989,7 +2036,8 @@ function App() {
           if (shouldExportMetronome(track)) {
             renderMetronomeClicksOffline(offlineContext, gainNode, {
               bpm,
-              beatsPerBar: DEFAULT_BEATS_PER_BAR,
+              beatsPerBar: pulsesPerBar(exportMeter, bpm),
+              meter: exportMeter,
               songEnd: maxDuration,
               countInSeconds,
               volume: track.volume
@@ -2041,7 +2089,8 @@ function App() {
           if (exportIncludeCountIn) {
             renderCountInClicksOffline(offlineContext, offlineContext.destination, {
               bpm,
-              beatsPerBar: DEFAULT_BEATS_PER_BAR,
+              beatsPerBar: pulsesPerBar(exportMeter, bpm),
+              meter: exportMeter,
               countInBars,
               volume: 0.5
             })
@@ -2054,7 +2103,8 @@ function App() {
           if (shouldExportMetronome(track)) {
             renderMetronomeClicksOffline(offlineContext, gainNode, {
               bpm,
-              beatsPerBar: DEFAULT_BEATS_PER_BAR,
+              beatsPerBar: pulsesPerBar(exportMeter, bpm),
+              meter: exportMeter,
               songEnd: maxDuration,
               countInSeconds,
               volume: track.volume
@@ -3709,7 +3759,11 @@ function App() {
       
       if (e.key === 'Escape') {
         e.preventDefault()
-        if (trackDeleteConfirm) {
+        if (metroAlignArmed) {
+          setMetroAlignArmed(false)
+        } else if (metroSettingsOpen) {
+          setMetroSettingsOpen(false)
+        } else if (trackDeleteConfirm) {
           setTrackDeleteConfirm(null)
         } else if (contextMenu) {
           closeContextMenu()
@@ -3812,7 +3866,7 @@ function App() {
     
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm, selectedAutoPoint, drumEditorTrack, selectedTrack])
+  }, [selectedClipIds, trackStates, clipboard, undoStack, redoStack, contextMenu, trackDeleteConfirm, selectedAutoPoint, drumEditorTrack, selectedTrack, metroSettingsOpen, metroAlignArmed])
 
   useEffect(() => {
     const mediaSession = typeof navigator !== 'undefined' ? navigator.mediaSession : null
@@ -3851,12 +3905,53 @@ function App() {
     }
   }, [])
 
-  const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newBpm = parseInt(e.target.value) || 120
+  const applySessionBpm = (next: number) => {
+    const newBpm = clampBpm(next)
     bpmManuallySetRef.current = true
+    bpmRef.current = newBpm
     setBpm(newBpm)
     Tone.getTransport().bpm.value = effectiveBpm(newBpm, tempoRateRef.current)
     if (isPlayingRef.current) scheduleMetronome(getSongTime())
+  }
+
+  const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    applySessionBpm(parseBpmInput(e.target.value))
+  }
+
+  const handleTapTempo = () => {
+    tapTimesRef.current = appendTap(tapTimesRef.current, performance.now())
+    const tapped = tapTempoFromTimestamps(tapTimesRef.current)
+    setTapFlash(true)
+    window.setTimeout(() => setTapFlash(false), 140)
+    if (tapped != null) applySessionBpm(tapped)
+  }
+
+  const patchMetronomeMeter = (patch: Partial<MetronomeMeter>) => {
+    const idx = findMetronomeIndex(trackStatesRef.current)
+    if (idx < 0) return
+    const tracks = [...trackStatesRef.current]
+    const current = meterOf(tracks[idx])
+    const nextMeter = normalizeMetronomeMeter({ ...current, ...patch })
+    tracks[idx] = { ...tracks[idx], metronome: nextMeter }
+    trackStatesRef.current = tracks
+    setTrackStates(tracks)
+    if (isPlayingRef.current) scheduleMetronome(getSongTime())
+  }
+
+  const setMetronomePhaseMs = (ms: number) => {
+    const meter = currentMetronomeMeter()
+    const bar = barDurationSeconds(bpmRef.current, meter)
+    patchMetronomeMeter({ phaseSeconds: wrapPhase(Number(ms) / 1000, bar) })
+  }
+
+  const alignMetronomeAt = (timeSeconds: number) => {
+    const meter = currentMetronomeMeter()
+    const phase = phaseFromDownbeat(timeSeconds, bpmRef.current, meter)
+    patchMetronomeMeter({ phaseSeconds: phase })
+    setMetroAlignArmed(false)
+    setToastMessage('Metrónomo alineado al 1')
+    setShowToast(true)
+    window.setTimeout(() => setShowToast(false), 2500)
   }
 
   const handleLaneClick = async (trackIndex: number) => {
@@ -4235,9 +4330,10 @@ function App() {
       return
     }
     console.log('[BPM] Detected:', bpmResult.bpm)
-    setBpm(bpmResult.bpm as number)
-    Tone.getTransport().bpm.value = effectiveBpm(bpmResult.bpm as number, tempoRateRef.current)
-    setToastMessage(`Tempo detectado: ${bpmResult.bpm} BPM`)
+    const detected = clampBpm(bpmResult.bpm as number)
+    setBpm(detected)
+    Tone.getTransport().bpm.value = effectiveBpm(detected, tempoRateRef.current)
+    setToastMessage(`Tempo detectado: ${formatBpm(detected)} BPM`)
     setShowToast(true)
     setTimeout(() => setShowToast(false), 4000)
   }
@@ -5038,7 +5134,14 @@ function App() {
     if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
     if (isDraggingLoop || isDraggingClipRef.current) return
     if (marqueeLiveRef.current.didDrag) return
-    seekToPosition(timeFromClientX(e.clientX, e.currentTarget), e.shiftKey)
+    const time = timeFromClientX(e.clientX, e.currentTarget)
+    if (metroAlignArmed) {
+      e.preventDefault()
+      e.stopPropagation()
+      alignMetronomeAt(time)
+      return
+    }
+    seekToPosition(time, e.shiftKey)
     if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
       setSelectedClipIds(new Set())
     }
@@ -5093,6 +5196,10 @@ function App() {
     const rect = ruler.getBoundingClientRect()
     const layoutMax = timelineMaxRef.current || 100
     const originTime = clickTimeFromX(e.clientX, rect.left, rect.width, layoutMax)
+    if (metroAlignArmed) {
+      alignMetronomeAt(originTime)
+      return
+    }
     const currentStart = tempLoopStart ?? loopStart
     const currentEnd = tempLoopEnd ?? loopEnd
     const hit = hitTestLoop(e.clientX, rect.left, rect.width, layoutMax, currentStart, currentEnd)
@@ -5446,6 +5553,7 @@ function App() {
             kind: trackKindOf(t.kind),
             drum: projectDrumPayload(t.drum, i),
             ...serializeTrackAudio(t),
+            ...serializeTrackMetronome(t),
             clips: savedClips
           }
         }))
@@ -5484,7 +5592,9 @@ function App() {
           overlayPlayer: false,
           clickSource: track && !track.mute ? 'track' : 'none',
           destinationIsTrack: metronomeEngineRef.current.destinationIsTrack,
-          scheduled: lastScheduledMetronomeEvents.slice()
+          scheduled: lastScheduledMetronomeEvents.slice(),
+          bpm: bpmRef.current,
+          meter: meterOf(track)
         }
       },
       unmute: () => {
@@ -5498,7 +5608,10 @@ function App() {
         if (!trackStatesRef.current[idx].mute) handleMuteToggle(idx)
       },
       play: () => handlePlayRef.current(),
-      getSchedule: () => lastScheduledMetronomeEvents.slice()
+      getSchedule: () => lastScheduledMetronomeEvents.slice(),
+      setBpm: (n: number) => applySessionBpm(n),
+      setMeter: (patch: Partial<MetronomeMeter>) => patchMetronomeMeter(patch),
+      alignAt: (time: number) => alignMetronomeAt(time)
     }
     ;(window as unknown as { __musicaliaMetronome?: typeof api }).__musicaliaMetronome = api
     return () => {
@@ -5792,7 +5905,7 @@ function App() {
 
   return (
     <div
-      className={`app${fileDragActive ? ' file-drag' : ''}`}
+      className={`app${fileDragActive ? ' file-drag' : ''}${metroAlignArmed ? ' metro-align' : ''}`}
       data-app-commits={appCommitCountRef.current}
       onDragEnter={handleAppDragEnter}
       onDragOver={handleAppDragOver}
@@ -6048,7 +6161,39 @@ function App() {
               onChange={handleBpmChange}
               min="20"
               max="300"
+              step="0.1"
+              inputMode="decimal"
+              data-testid="bpm-input"
             />
+            <button
+              type="button"
+              className="bpm-oct"
+              data-testid="bpm-half"
+              title="Dividir el tempo por 2"
+              aria-label="Dividir BPM por 2"
+              onClick={() => applySessionBpm(halfBpm(bpm))}
+            >
+              ÷2
+            </button>
+            <button
+              type="button"
+              className="bpm-oct"
+              data-testid="bpm-double"
+              title="Multiplicar el tempo por 2"
+              aria-label="Multiplicar BPM por 2"
+              onClick={() => applySessionBpm(doubleBpm(bpm))}
+            >
+              ×2
+            </button>
+            <button
+              type="button"
+              className={`bpm-tap ${tapFlash ? 'active' : ''}`}
+              data-testid="bpm-tap"
+              title="TAP tempo: tocá el pulso varias veces"
+              onClick={handleTapTempo}
+            >
+              TAP
+            </button>
             <span
               className="bpm-effective"
               data-testid="bpm-effective"
@@ -6609,6 +6754,11 @@ function App() {
                   onAislar={handleAislar}
                   onReorderMouseDown={handleTrackReorderMouseDown}
                   onSelectTrackClips={handleSelectTrackClips}
+                  metroSettingsOpen={isMetronomeTrack(trackState) && metroSettingsOpen}
+                  onOpenMetronomeSettings={() => {
+                    setMetroSettingsOpen(true)
+                    setMetroAlignArmed(false)
+                  }}
                 />
                 {fxOpenTracks.includes(trackIndex) && (
                   <div className="fx-side" style={{ height: `${FX_RACK_HEIGHT}px` }}>
@@ -6743,6 +6893,10 @@ function App() {
             scrollerRef={lanesScrollRef}
             zoom={horizontalZoom}
             bpm={bpm}
+            beatsPerBar={pulsesPerBar(currentMetronomeMeter(), bpm)}
+            pulseSeconds={pulseDurationSeconds(bpm, currentMetronomeMeter())}
+            barSeconds={barDurationSeconds(bpm, currentMetronomeMeter())}
+            phaseSeconds={currentMetronomeMeter().phaseSeconds}
             layoutMax={getLayoutMax()}
             loopStart={loopStart}
             loopEnd={loopEnd}
@@ -6767,7 +6921,8 @@ function App() {
               trackIndex={trackIndex}
               trackKind={trackState.kind}
               bpm={bpm}
-              beatsPerBar={DEFAULT_BEATS_PER_BAR}
+              beatsPerBar={pulsesPerBar(meterOf(trackState), bpm)}
+              meter={trackState.kind === 'metronome' ? meterOf(trackState) : undefined}
               hasClips={trackState.clips.length > 0}
               isAnyClipPlaying={trackState.clips.some(c => c.isPlaying)}
               height={88 * verticalZoom}
@@ -6875,6 +7030,30 @@ function App() {
           >
             {contextMenu.kind === 'header' ? (
               <>
+                {isMetronomeTrack(trackStates[contextMenu.trackIndex]) && (
+                  <>
+                    <ContextMenuItem
+                      icon={<IconMetronome />}
+                      label="Alinear metrónomo"
+                      testId="align-metronome-menu"
+                      onClick={() => {
+                        closeContextMenu()
+                        setMetroSettingsOpen(true)
+                        setMetroAlignArmed(true)
+                      }}
+                    />
+                    <ContextMenuItem
+                      icon={<IconSettings />}
+                      label="Ajustes del metrónomo"
+                      testId="metronome-settings-menu"
+                      onClick={() => {
+                        closeContextMenu()
+                        setMetroSettingsOpen(true)
+                      }}
+                    />
+                    <div className="context-menu-sep" />
+                  </>
+                )}
                 <ContextMenuItem
                   icon={<IconPencil />}
                   label="Renombrar pista"
@@ -6987,6 +7166,30 @@ function App() {
               </>
             ) : (
               <>
+                {isMetronomeTrack(trackStates[contextMenu.trackIndex]) && (
+                  <>
+                    <ContextMenuItem
+                      icon={<IconMetronome />}
+                      label="Alinear metrónomo"
+                      testId="align-metronome-menu-lane"
+                      onClick={() => {
+                        closeContextMenu()
+                        setMetroSettingsOpen(true)
+                        setMetroAlignArmed(true)
+                      }}
+                    />
+                    <ContextMenuItem
+                      icon={<IconSettings />}
+                      label="Ajustes del metrónomo"
+                      testId="metronome-settings-menu-lane"
+                      onClick={() => {
+                        closeContextMenu()
+                        setMetroSettingsOpen(true)
+                      }}
+                    />
+                    <div className="context-menu-sep" />
+                  </>
+                )}
                 <ContextMenuItem
                   icon={<IconClipboardPaste />}
                   label="Pegar aquí"
@@ -7122,6 +7325,37 @@ function App() {
         </div>
       )}
 
+      {metroSettingsOpen && (
+        <>
+          <div
+            className={`metro-settings-backdrop${metroAlignArmed ? ' pass-through' : ''}`}
+            data-testid="metronome-settings-backdrop"
+            onMouseDown={() => {
+              if (!metroAlignArmed) setMetroSettingsOpen(false)
+            }}
+          />
+          <MetronomeSettingsPanel
+            meter={currentMetronomeMeter()}
+            bpm={bpm}
+            alignArmed={metroAlignArmed}
+            phaseMs={Math.round(wrapPhase(currentMetronomeMeter().phaseSeconds, barDurationSeconds(bpm, currentMetronomeMeter())) * 1000)}
+            onPatch={patchMetronomeMeter}
+            onPhaseMs={setMetronomePhaseMs}
+            onArmAlign={() => setMetroAlignArmed((v) => !v)}
+            onClose={() => {
+              setMetroSettingsOpen(false)
+              setMetroAlignArmed(false)
+            }}
+          />
+        </>
+      )}
+
+      {metroAlignArmed && (
+        <div className="metro-align-banner" data-testid="metro-align-banner">
+          Hacé click donde está el 1 · Esc cancela
+        </div>
+      )}
+
       {clipLatencyEdit && (
         <ClipLatencyDialog
           valueMs={clipLatencyEdit.ms}
@@ -7163,7 +7397,8 @@ function App() {
                 <li>• <strong>Doble clic en el nombre</strong> - Renombrar pista (Enter o clic fuera guarda, Escape cancela)</li>
                 <li>• <strong>Arrastrar el nombre/cabecera</strong> - Reordena las pistas (línea de inserción y las demás se corren). Clips, FX, volumen y mute/solo/Aislar viajan con la pista</li>
                 <li>• <strong>Icono de papelera en la cabecera</strong> - Eliminar la pista entera (pide confirmación si tiene clips)</li>
-                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar, Insertar pista arriba/abajo, Agregar pista, Eliminar pista</li>
+                <li>• <strong>Click derecho en la cabecera de pista</strong> - Menú: Renombrar, Insertar pista arriba/abajo, Agregar pista, Eliminar pista. En Metrónomo: Alinear metrónomo y Ajustes (compás, subdivisión, sonido)</li>
+                <li>• <strong>BPM</strong> - Decimales (117.5), botones ×2 / ÷2 y TAP. El detector usa una ventana larga y elige el pulso más rápido entre octavas (152 no se pliega a 76)</li>
                 <li>• <strong>+ Agregar pista</strong> - Añade una pista vacía al final (Pista 9, 10, …). También en una pista vacía o zona vacía (clic derecho). Se puede deshacer</li>
                 <li>• <strong>Batería (pads)</strong> - Pista de sampler estilo Redrum: 8 pads (hasta 16), kit inicial sintetizado y secuenciador de 16/32 pasos. Click derecho → Insertar pista de pads. Doble clic abre el editor</li>
                 <li>• <strong>Soltar audio entre pistas</strong> - Inserta una pista nueva en ese lugar. Sobre una pista la coloca ahí</li>

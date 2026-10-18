@@ -31,14 +31,11 @@ function createClickTrack(bpm: number, durationSeconds: number, sampleRate: numb
   const length = Math.floor(sampleRate * durationSeconds)
   const left = new Float32Array(length)
   const right = new Float32Array(length)
-  
   const secondsPerBeat = 60 / bpm
-  const samplesPerBeat = Math.floor(sampleRate * secondsPerBeat)
-  
+
   for (let beat = 0; beat < Math.floor(durationSeconds / secondsPerBeat); beat++) {
-    const beatStart = beat * samplesPerBeat
-    const clickDuration = Math.floor(sampleRate * 0.01)
-    
+    const beatStart = Math.round(beat * sampleRate * secondsPerBeat)
+    const clickDuration = Math.floor(sampleRate * 0.012)
     for (let i = 0; i < clickDuration && beatStart + i < length; i++) {
       const t = i / sampleRate
       const envelope = Math.exp(-t * 100)
@@ -47,7 +44,7 @@ function createClickTrack(bpm: number, durationSeconds: number, sampleRate: numb
       right[beatStart + i] = sample
     }
   }
-  
+
   return [left, right]
 }
 
@@ -58,48 +55,46 @@ function createAudioBuffer(channels: Float32Array[], sampleRate: number): AudioB
     length,
     sampleRate
   }) as any
-  
   for (let i = 0; i < channels.length; i++) {
     buffer.copyToChannel(channels[i], i)
   }
-  
   return buffer
 }
 
-async function runTest() {
-  const bpm = 120
+async function expectBpm(expected: number, duration = 12) {
   const sampleRate = 44100
-  const duration = 10
-  
-  console.log(`Creating synthetic click track: ${bpm} BPM, ${duration}s, ${sampleRate}Hz`)
-  
-  const channels = createClickTrack(bpm, duration, sampleRate)
+  console.log(`\nCreating synthetic click track: ${expected} BPM, ${duration}s, ${sampleRate}Hz`)
+  const channels = createClickTrack(expected, duration, sampleRate)
   const audioBuffer = createAudioBuffer(channels, sampleRate)
-  
-  console.log(`Testing detectBPM...`)
   const result = await detectBPM(audioBuffer)
-  
-  console.log(`Expected: ${bpm} BPM`)
-  console.log(`Detected: ${result.bpm} BPM`)
-  
-  if (result.bpm) {
-    const error = Math.abs(result.bpm - bpm)
-    console.log(`Error: ${error} BPM`)
-    
-    if (error <= 5) {
-      console.log('✓ Test PASSED')
-      process.exit(0)
-    } else {
-      console.log('✗ Test FAILED (error > 5 BPM)')
-      process.exit(1)
-    }
-  } else {
-    console.log('✗ Test FAILED (no BPM detected)')
-    process.exit(1)
+  console.log(`Expected: ${expected} BPM`)
+  console.log(`Detected: ${result.bpm} BPM (confidence ${result.confidence.toFixed(3)})`)
+  if (result.candidates?.length) {
+    console.log('Candidates:', result.candidates.slice(0, 6).map((c) => `${c.bpm}@${c.strength.toFixed(3)}`).join(', '))
   }
+  if (result.bpm == null) {
+    throw new Error(`no BPM detected for ${expected}`)
+  }
+  const error = Math.abs(result.bpm - expected)
+  console.log(`Error: ${error} BPM`)
+  if (error > 0.2) {
+    throw new Error(`detector off by ${error} BPM for ${expected} (got ${result.bpm})`)
+  }
+  return result.bpm
 }
 
-runTest().catch(err => {
+async function runTest() {
+  const at120 = await expectBpm(120, 10)
+  const at152 = await expectBpm(152, 12)
+  const at76 = await expectBpm(76, 12)
+  console.log('\n--- synthetic report ---')
+  console.log(`152 BPM click → ${at152}`)
+  console.log(`76 BPM click → ${at76}`)
+  console.log(`120 BPM click → ${at120}`)
+  console.log('✓ BPM detector tests PASSED')
+}
+
+runTest().catch((err) => {
   console.error('Test error:', err)
   process.exit(1)
 })

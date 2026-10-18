@@ -87,10 +87,17 @@ const NICE_SECONDS = [
   0.01, 0.005, 0.002, 0.001, 0.0005, 0.0002, 0.0001
 ]
 
-export function tickIntervalSeconds(pxPerSec: number, minPx = 52, bpm = 120): number {
+export function tickIntervalSeconds(
+  pxPerSec: number,
+  minPx = 52,
+  bpm = 120,
+  beatsPerBar = 4
+): number {
   if (pxPerSec <= 0) return 1
   const beat = 60 / Math.max(1, bpm)
+  const bar = beat * Math.max(1, beatsPerBar)
   const candidates = [
+    bar * 8, bar * 4, bar * 2, bar,
     beat * 16, beat * 8, beat * 4, beat * 2, beat,
     beat / 2, beat / 4, beat / 8, beat / 16, beat / 32,
     ...NICE_SECONDS
@@ -114,26 +121,55 @@ export function timelineTicks(input: {
   viewStart: number
   viewEnd: number
   bpm: number
+  beatsPerBar?: number
+  pulseSeconds?: number
+  barSeconds?: number
+  phaseSeconds?: number
 }): TimelineTick[] {
   const layoutMax = Math.max(0, input.layoutMax)
   if (layoutMax <= 0 || input.pxPerSec <= 0) return []
   const start = Math.max(0, input.viewStart)
   const end = Math.min(layoutMax, input.viewEnd)
   if (end <= start) return []
-  const beat = 60 / Math.max(1, input.bpm)
-  const bar = beat * 4
-  const step = tickIntervalSeconds(input.pxPerSec, 52, input.bpm)
-  const first = Math.floor(start / step) * step
+  const beat = input.pulseSeconds && input.pulseSeconds > 0
+    ? input.pulseSeconds
+    : 60 / Math.max(1, input.bpm)
+  const bar = input.barSeconds && input.barSeconds > 0
+    ? input.barSeconds
+    : beat * Math.max(1, input.beatsPerBar ?? 4)
+  const phase = Number.isFinite(input.phaseSeconds) ? (input.phaseSeconds as number) : 0
+  const wrappedPhase = ((phase % bar) + bar) % bar
+  const pulsesPerBar = Math.max(1, Math.round(bar / beat))
+  const step = tickIntervalSeconds(input.pxPerSec, 52, input.bpm, pulsesPerBar)
   const ticks: TimelineTick[] = []
-  const maxTicks = 240
-  for (let t = first, i = 0; t <= end + 1e-9 && i < maxTicks; t += step, i++) {
+  const seen = new Set<string>()
+  const pushTick = (t: number, kind: TimelineTick['kind'], label?: string) => {
     const clamped = Math.max(0, Math.min(layoutMax, t))
-    if (clamped < start - 1e-9) continue
-    const nearBar = Math.abs(clamped / bar - Math.round(clamped / bar)) < 1e-6
-    const nearBeat = Math.abs(clamped / beat - Math.round(clamped / beat)) < 1e-6
-    const kind: TimelineTick['kind'] = nearBar ? 'bar' : nearBeat ? 'beat' : 'sub'
-    const barNumber = nearBar ? String(Math.round(clamped / bar) + 1) : undefined
-    ticks.push({ t: clamped, kind, label: barNumber })
+    if (clamped < start - 1e-9 || clamped > end + 1e-9) return
+    const key = `${clamped.toFixed(6)}:${kind}`
+    if (seen.has(key)) return
+    seen.add(key)
+    ticks.push({ t: clamped, kind, label })
   }
+
+  const firstBar = Math.floor((start - wrappedPhase) / bar)
+  for (let k = firstBar, i = 0; i < 80; k++, i++) {
+    const t = wrappedPhase + k * bar
+    if (t > end + 1e-9) break
+    pushTick(t, 'bar', String(k + 1))
+  }
+
+  const relStart = start - wrappedPhase
+  const firstRel = Math.floor(relStart / step) * step
+  const maxTicks = 240
+  for (let rel = firstRel, i = 0; rel + wrappedPhase <= end + 1e-9 && i < maxTicks; rel += step, i++) {
+    const t = rel + wrappedPhase
+    const since = ((t - wrappedPhase) % bar + bar) % bar
+    const nearBar = Math.abs(since) < 1e-6 || Math.abs(since - bar) < 1e-6
+    if (nearBar) continue
+    const nearBeat = Math.abs(since / beat - Math.round(since / beat)) < 1e-6
+    pushTick(t, nearBeat ? 'beat' : 'sub')
+  }
+  ticks.sort((a, b) => a.t - b.t)
   return ticks
 }

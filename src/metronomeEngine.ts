@@ -4,6 +4,7 @@ import {
   scheduledMetronomeClicks,
   type MetronomeClick
 } from './metronomeTrack'
+import type { ClickSound, MetronomeMeter } from './metronomeMeter'
 
 export interface ScheduledMetronomeEvent extends MetronomeClick {
   transportTime: number
@@ -27,8 +28,9 @@ export class MetronomeEngine {
   private dest: Tone.ToneAudioNode | null = null
   private eventIds: number[] = []
   private loaded = false
+  private loadedSound: ClickSound | null = null
 
-  ensure(dest: Tone.ToneAudioNode): void {
+  ensure(dest: Tone.ToneAudioNode, sound: ClickSound = 'beep'): void {
     if (!this.accent || !this.beat) {
       this.accent = new Tone.Player({ fadeIn: 0.0004, fadeOut: 0.008 })
       this.beat = new Tone.Player({ fadeIn: 0.0004, fadeOut: 0.008 })
@@ -40,12 +42,13 @@ export class MetronomeEngine {
       this.beat.connect(dest)
       this.dest = dest
     }
-    if (!this.loaded) {
+    if (!this.loaded || this.loadedSound !== sound) {
       const ctx = Tone.getContext()
       const raw = ctx.rawContext as unknown as AudioContext
-      this.accent.buffer.set(createClickAudioBuffer(raw, true))
-      this.beat.buffer.set(createClickAudioBuffer(raw, false))
+      this.accent.buffer.set(createClickAudioBuffer(raw, true, sound))
+      this.beat.buffer.set(createClickAudioBuffer(raw, false, sound))
       this.loaded = true
+      this.loadedSound = sound
     }
   }
 
@@ -62,6 +65,8 @@ export class MetronomeEngine {
     destination?: Tone.ToneAudioNode
     bpm: number
     beatsPerBar?: number
+    meter?: Partial<MetronomeMeter> | null
+    clickSound?: ClickSound
     songTime: number
     playOriginSong: number
     tempoRate: number
@@ -75,10 +80,11 @@ export class MetronomeEngine {
       rememberMetronomeSchedule([])
       return []
     }
-    this.ensure(args.destination)
+    this.ensure(args.destination, args.clickSound ?? args.meter?.clickSound ?? 'beep')
     const events = scheduledMetronomeClicks({
       bpm: args.bpm,
       beatsPerBar: args.beatsPerBar,
+      meter: args.meter,
       songTime: args.songTime,
       playOriginSong: args.playOriginSong,
       tempoRate: args.tempoRate,
@@ -125,6 +131,7 @@ export class MetronomeEngine {
     this.beat = null
     this.dest = null
     this.loaded = false
+    this.loadedSound = null
   }
 
   get destinationIsTrack(): boolean {

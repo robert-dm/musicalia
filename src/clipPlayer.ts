@@ -34,7 +34,9 @@ export function clampPitchSemitones(n: number): number {
 
 export function effectiveBpm(baseBpm: number, tempoRate: number): number {
   const bpm = Number.isFinite(baseBpm) ? baseBpm : 120
-  return Math.max(20, Math.min(300, Math.round(bpm * clampTempoRate(tempoRate))))
+  const scaled = bpm * clampTempoRate(tempoRate)
+  if (!Number.isFinite(scaled)) return 120
+  return Math.max(20, Math.min(300, Math.round(scaled * 10) / 10))
 }
 
 type ClipBufferSource = AudioBuffer | { get: () => AudioBuffer | undefined | null }

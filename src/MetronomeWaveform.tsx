@@ -1,5 +1,12 @@
 import { memo, useEffect, useRef } from 'react'
 import { clickTimesInRange, DEFAULT_BEATS_PER_BAR } from './metronomeTrack'
+import {
+  DEFAULT_METRONOME_METER,
+  formatTimeSignature,
+  normalizeMetronomeMeter,
+  serializeMetronomeMeter,
+  type MetronomeMeter
+} from './metronomeMeter'
 import { MAX_WAVEFORM_CANVAS_PX } from './timelineZoom'
 import {
   WAVEFORM_TILE_CSS_PX,
@@ -12,6 +19,7 @@ import {
 interface MetronomeWaveformProps {
   bpm: number
   beatsPerBar?: number
+  meter?: MetronomeMeter
   duration: number
 }
 
@@ -20,7 +28,8 @@ function drawMetronomeTicks(
   bpm: number,
   beatsPerBar: number,
   timeStart: number,
-  timeEnd: number
+  timeEnd: number,
+  meter?: MetronomeMeter
 ): void {
   const width = canvas.width
   const height = canvas.height
@@ -39,15 +48,19 @@ function drawMetronomeTicks(
 
   const span = timeEnd - timeStart
   if (!(span > 0)) return
-  const clicks = clickTimesInRange({ bpm, beatsPerBar, start: timeStart, end: timeEnd })
+  const clicks = clickTimesInRange({ bpm, beatsPerBar, meter, start: timeStart, end: timeEnd })
   let lastX = -8
   for (const click of clicks) {
     const x = ((click.songTime - timeStart) / span) * width
     if (x - lastX < 1) continue
     lastX = x
-    const h = click.accent ? height * 0.86 : height * 0.48
-    ctx.strokeStyle = click.accent ? 'rgba(245, 196, 92, 0.95)' : 'rgba(150, 176, 214, 0.72)'
-    ctx.lineWidth = click.accent ? 1.6 : 1
+    const h = click.accent ? height * 0.86 : click.sub ? height * 0.28 : height * 0.48
+    ctx.strokeStyle = click.accent
+      ? 'rgba(245, 196, 92, 0.95)'
+      : click.sub
+        ? 'rgba(150, 176, 214, 0.38)'
+        : 'rgba(150, 176, 214, 0.72)'
+    ctx.lineWidth = click.accent ? 1.6 : click.sub ? 0.8 : 1
     ctx.beginPath()
     ctx.moveTo(x, mid - h / 2)
     ctx.lineTo(x, mid + h / 2)
@@ -58,6 +71,7 @@ function drawMetronomeTicks(
 export const MetronomeWaveform = memo(function MetronomeWaveform({
   bpm,
   beatsPerBar = DEFAULT_BEATS_PER_BAR,
+  meter,
   duration
 }: MetronomeWaveformProps) {
   const hostRef = useRef<HTMLDivElement>(null)
@@ -80,7 +94,8 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
       }
       const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
       const tiles = tileRanges(range.cssLeft, range.cssWidth, WAVEFORM_TILE_CSS_PX)
-      const key = `${bpm}:${beatsPerBar}:${duration}:${dpr}:${cssH}:${tiles
+      const meterKey = meter ? JSON.stringify(serializeMetronomeMeter(meter)) : String(beatsPerBar)
+      const key = `${bpm}:${meterKey}:${duration}:${dpr}:${cssH}:${tiles
         .map((t) => `${t.cssLeft.toFixed(1)}:${t.cssWidth.toFixed(1)}`)
         .join('|')}`
       if (key === drawnKeyRef.current) return
@@ -109,7 +124,7 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
         if (canvas.height !== bitmap.height) canvas.height = bitmap.height
         const t0 = (tile.cssLeft / hostW) * duration
         const t1 = ((tile.cssLeft + tile.cssWidth) / hostW) * duration
-        drawMetronomeTicks(canvas, bpm, beatsPerBar, t0, t1)
+        drawMetronomeTicks(canvas, bpm, beatsPerBar, t0, t1, meter)
       })
       host.dataset.waveformDpr = String(dpr)
     }
@@ -139,7 +154,7 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
       for (const canvas of tilesRef.current) canvas.remove()
       tilesRef.current = []
     }
-  }, [bpm, beatsPerBar, duration])
+  }, [bpm, beatsPerBar, duration, meter])
 
   return (
     <div
@@ -148,6 +163,7 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
       data-testid="metronome-waveform"
       data-bpm={String(bpm)}
       data-beats-per-bar={String(beatsPerBar)}
+      data-time-signature={formatTimeSignature(normalizeMetronomeMeter(meter ?? DEFAULT_METRONOME_METER))}
       data-duration={String(duration)}
     />
   )

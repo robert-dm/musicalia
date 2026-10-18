@@ -94,6 +94,7 @@ assert(looped.length === 2, 'loop 1–2s at 120 BPM: clicks at 1.0 and 1.5')
 
 const metro = createMetronomeTrack()
 assert(metro.name === METRONOME_TRACK_NAME && metro.kind === 'metronome', 'factory name/kind')
+assert(metro.metronome?.numerator === 4 && metro.metronome?.clickSound === 'beep', 'factory meter is 4/4 beep')
 assert(metro.mute === true && metro.volume === 0.8, 'muted by default with normal volume')
 assert(!canDeleteTrack(metro) && !canRenameTrack(metro), 'cannot delete or rename')
 assert(!shouldExportMetronome(metro), 'muted metronome is omitted from export')

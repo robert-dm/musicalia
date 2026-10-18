@@ -14,6 +14,7 @@ export interface TrackHeaderDataProps {
   autoOpen?: boolean
   practiceActive?: boolean
   isolated?: boolean
+  metroSettingsOpen?: boolean
 }
 
 export interface TrackLaneDataProps {
@@ -21,6 +22,8 @@ export interface TrackLaneDataProps {
   trackKind?: string
   bpm?: number
   beatsPerBar?: number
+  meter?: unknown
+  meterKey?: string
   hasClips: boolean
   isAnyClipPlaying: boolean
   height: number
@@ -52,6 +55,7 @@ export function trackHeaderDataEqual(prev: TrackHeaderDataProps, next: TrackHead
     prev.autoOpen === next.autoOpen &&
     prev.practiceActive === next.practiceActive &&
     prev.isolated === next.isolated &&
+    prev.metroSettingsOpen === next.metroSettingsOpen &&
     (!next.isRenaming || prev.renameDraft === next.renameDraft)
   )
 }
@@ -62,6 +66,8 @@ export function trackLaneDataEqual(prev: TrackLaneDataProps, next: TrackLaneData
     prev.trackKind === next.trackKind &&
     prev.bpm === next.bpm &&
     prev.beatsPerBar === next.beatsPerBar &&
+    prev.meter === next.meter &&
+    prev.meterKey === next.meterKey &&
     prev.hasClips === next.hasClips &&
     prev.isAnyClipPlaying === next.isAnyClipPlaying &&
     prev.height === next.height &&

@@ -1,6 +1,16 @@
 import { DEFAULT_PAN, defaultTrackFx } from './trackFx'
 import { DEFAULT_TRACK_VOLUME, type EmptyTrack } from './trackList'
 import { transportTimeForHit } from './drumTiming'
+import {
+  DEFAULT_METRONOME_METER,
+  barDurationSeconds,
+  meterFromBeatsPerBar,
+  metronomeClicksInRange,
+  normalizeMetronomeMeter,
+  type ClickSound,
+  type MetronomeMeter
+} from './metronomeMeter'
+import { secondsPerBeatSafe } from './tempoMath'
 
 export const METRONOME_TRACK_NAME = 'Metrónomo'
 export const METRONOME_TRACK_KIND = 'metronome' as const
@@ -24,10 +34,12 @@ export interface MetronomeClick {
   beatIndex: number
   beatInBar: number
   accent: boolean
+  sub?: boolean
 }
 
 export interface MetronomeTrackSeed extends EmptyTrack {
   kind: typeof METRONOME_TRACK_KIND
+  metronome: MetronomeMeter
 }
 
 export function isMetronomeTrack(track: { kind?: string } | null | undefined): boolean {
@@ -44,7 +56,8 @@ export function createMetronomeTrack(): MetronomeTrackSeed {
     fx: defaultTrackFx(),
     automation: [],
     clips: [],
-    kind: METRONOME_TRACK_KIND
+    kind: METRONOME_TRACK_KIND,
+    metronome: { ...DEFAULT_METRONOME_METER }
   }
 }
 
@@ -76,8 +89,7 @@ export function metronomeIsOn(tracks: Array<{ kind?: string; mute?: boolean }>):
 }
 
 export function secondsPerBeat(bpm: number): number {
-  const safe = Number.isFinite(bpm) && bpm > 0 ? bpm : 120
-  return 60 / safe
+  return secondsPerBeatSafe(bpm)
 }
 
 export function normalizeBeatsPerBar(beatsPerBar?: number): number {
@@ -89,35 +101,25 @@ export function normalizeBeatsPerBar(beatsPerBar?: number): number {
 export function clickTimesInRange(args: {
   bpm: number
   beatsPerBar?: number
+  meter?: Partial<MetronomeMeter> | null
   start?: number
   end: number
 }): MetronomeClick[] {
-  const spb = secondsPerBeat(args.bpm)
-  const bpb = normalizeBeatsPerBar(args.beatsPerBar)
-  const start = Math.max(0, args.start ?? 0)
-  const end = args.end
-  if (!(end > start) || !(spb > 0)) return []
-
-  const firstBeat = Math.ceil(start / spb - 1e-9)
-  const clicks: MetronomeClick[] = []
-  for (let i = firstBeat; ; i++) {
-    const songTime = i * spb
-    if (songTime >= end - 1e-12) break
-    if (songTime < start) continue
-    const beatInBar = ((i % bpb) + bpb) % bpb
-    clicks.push({
-      songTime,
-      beatIndex: i,
-      beatInBar,
-      accent: beatInBar === 0
-    })
-  }
-  return clicks
+  const meter = args.meter
+    ? normalizeMetronomeMeter(args.meter)
+    : meterFromBeatsPerBar(args.beatsPerBar)
+  return metronomeClicksInRange({
+    bpm: args.bpm,
+    meter,
+    start: args.start,
+    end: args.end
+  })
 }
 
 export function scheduledMetronomeClicks(args: {
   bpm: number
   beatsPerBar?: number
+  meter?: Partial<MetronomeMeter> | null
   songTime: number
   playOriginSong: number
   tempoRate: number
@@ -135,6 +137,7 @@ export function scheduledMetronomeClicks(args: {
   return clickTimesInRange({
     bpm: args.bpm,
     beatsPerBar: args.beatsPerBar,
+    meter: args.meter,
     start: windowStart,
     end: windowEnd
   }).map((click) => ({
@@ -159,24 +162,59 @@ export function fillClickSamples(
   freq: number,
   amplitude: number
 ): void {
+  fillClickSound(out, sampleRate, 'beep', freq, amplitude)
+}
+
+export function fillClickSound(
+  out: Float32Array,
+  sampleRate: number,
+  sound: ClickSound,
+  freq: number,
+  amplitude: number
+): void {
   const sr = sampleRate > 0 ? sampleRate : 44100
   for (let i = 0; i < out.length; i++) {
     const t = i / sr
-    out[i] = Math.sin(2 * Math.PI * freq * t) * Math.exp(-t * 20) * amplitude
+    if (sound === 'wood') {
+      const noise = ((i * 1103515245 + 12345) % 2147483648) / 2147483648 - 0.5
+      out[i] =
+        (Math.sin(2 * Math.PI * (accentish(freq, 180)) * t) * Math.exp(-t * 38) * 0.72 +
+          noise * Math.exp(-t * 90) * 0.85) *
+        amplitude
+    } else if (sound === 'rim') {
+      const noise = ((i * 1664525 + 1013904223) % 2147483648) / 2147483648 - 0.5
+      out[i] =
+        (Math.sin(2 * Math.PI * (accentish(freq, 2100)) * t) * Math.exp(-t * 70) * 0.55 +
+          noise * Math.exp(-t * 140) * 1.05) *
+        amplitude
+    } else {
+      out[i] = Math.sin(2 * Math.PI * freq * t) * Math.exp(-t * 20) * amplitude
+    }
   }
+}
+
+function accentish(freq: number, woodOrRim: number): number {
+  return freq >= ACCENT_CLICK_HZ ? woodOrRim * 1.12 : woodOrRim
+}
+
+function clickDurationFor(sound: ClickSound): number {
+  if (sound === 'wood') return 0.032
+  if (sound === 'rim') return 0.024
+  return CLICK_DURATION_SECONDS
 }
 
 export function createClickAudioBuffer(
   ctx: { sampleRate: number; createBuffer: (ch: number, length: number, sampleRate: number) => AudioBuffer },
-  accent: boolean
+  accent: boolean,
+  sound: ClickSound = 'beep'
 ): AudioBuffer {
   const sampleRate = ctx.sampleRate > 0 ? ctx.sampleRate : 44100
-  const length = Math.max(8, Math.floor(sampleRate * CLICK_DURATION_SECONDS))
+  const length = Math.max(8, Math.floor(sampleRate * clickDurationFor(sound)))
   const buffer = ctx.createBuffer(2, length, sampleRate)
   const freq = accent ? ACCENT_CLICK_HZ : BEAT_CLICK_HZ
   const amp = accent ? ACCENT_CLICK_GAIN : BEAT_CLICK_GAIN
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-    fillClickSamples(buffer.getChannelData(ch), sampleRate, freq, amp)
+    fillClickSound(buffer.getChannelData(ch), sampleRate, sound, freq, amp)
   }
   return buffer
 }
@@ -187,6 +225,7 @@ export function renderMetronomeClicksOffline(
   args: {
     bpm: number
     beatsPerBar?: number
+    meter?: Partial<MetronomeMeter> | null
     songEnd: number
     countInSeconds?: number
     volume?: number
@@ -195,19 +234,21 @@ export function renderMetronomeClicksOffline(
   const volume = Math.max(0, Math.min(1, args.volume ?? DEFAULT_TRACK_VOLUME))
   if (volume <= 0) return 0
   const shift = Math.max(0, args.countInSeconds ?? 0)
+  const meter = args.meter ? normalizeMetronomeMeter(args.meter) : meterFromBeatsPerBar(args.beatsPerBar)
   const clicks = clickTimesInRange({
     bpm: args.bpm,
     beatsPerBar: args.beatsPerBar,
+    meter,
     start: 0,
     end: args.songEnd
   })
-  const accentBuf = createClickAudioBuffer(ctx, true)
-  const beatBuf = createClickAudioBuffer(ctx, false)
+  const accentBuf = createClickAudioBuffer(ctx, true, meter.clickSound)
+  const beatBuf = createClickAudioBuffer(ctx, false, meter.clickSound)
   for (const click of clicks) {
     const source = ctx.createBufferSource()
     source.buffer = click.accent ? accentBuf : beatBuf
     const gain = ctx.createGain()
-    gain.gain.value = volume
+    gain.gain.value = click.sub ? volume * 0.55 : volume
     source.connect(gain)
     gain.connect(dest)
     source.start(Math.max(0, click.songTime + shift))
@@ -221,16 +262,18 @@ export function renderCountInClicksOffline(
   args: {
     bpm: number
     beatsPerBar?: number
+    meter?: Partial<MetronomeMeter> | null
     countInBars: number
     volume?: number
   }
 ): number {
-  const bpb = normalizeBeatsPerBar(args.beatsPerBar)
+  const meter = args.meter ? normalizeMetronomeMeter(args.meter) : meterFromBeatsPerBar(args.beatsPerBar)
   const bars = Math.max(0, args.countInBars)
-  const songEnd = bars * bpb * secondsPerBeat(args.bpm)
+  const songEnd = bars * barDurationSeconds(args.bpm, meter)
   return renderMetronomeClicksOffline(ctx, dest, {
     bpm: args.bpm,
-    beatsPerBar: bpb,
+    beatsPerBar: args.beatsPerBar,
+    meter,
     songEnd,
     countInSeconds: 0,
     volume: args.volume ?? 0.5

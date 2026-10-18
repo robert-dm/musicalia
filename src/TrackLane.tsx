@@ -3,6 +3,7 @@ import { ClipWaveform } from './ClipWaveform'
 import { MetronomeWaveform } from './MetronomeWaveform'
 import { displayLoop } from './loopRegion'
 import { DEFAULT_BEATS_PER_BAR } from './metronomeTrack'
+import type { MetronomeMeter } from './metronomeMeter'
 import { laneClipDataEqual, trackLaneDataEqual } from './trackRenderMemo'
 
 export interface LaneClip {
@@ -22,6 +23,7 @@ interface TrackLaneProps {
   trackKind?: string
   bpm?: number
   beatsPerBar?: number
+  meter?: MetronomeMeter
   hasClips: boolean
   isAnyClipPlaying: boolean
   height: number
@@ -139,6 +141,7 @@ export const TrackLane = memo(function TrackLane({
   trackKind,
   bpm = 120,
   beatsPerBar = DEFAULT_BEATS_PER_BAR,
+  meter,
   hasClips,
   isAnyClipPlaying,
   height,
@@ -178,7 +181,7 @@ export const TrackLane = memo(function TrackLane({
       onContextMenu={(e) => onContextMenuTrack(e, trackIndex, null)}
     >
       {trackKind === 'metronome' ? (
-        <MetronomeWaveform bpm={bpm} beatsPerBar={beatsPerBar} duration={maxDur} />
+        <MetronomeWaveform bpm={bpm} beatsPerBar={beatsPerBar} meter={meter} duration={maxDur} />
       ) : hasClips ? (
         <div className="clip-region">
           {clips.map((clip) => (

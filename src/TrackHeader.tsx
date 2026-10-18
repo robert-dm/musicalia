@@ -3,7 +3,7 @@ import { LiveParamSlider } from './LiveParamSlider'
 import { resolveTrackName } from './clipSelection'
 import { AISLAR_BUTTON_TITLE } from './practiceMode'
 import { trackHeaderDataEqual } from './trackRenderMemo'
-import { IconRecordArm, IconSliders, IconSpline, IconTrash } from './uiIcons'
+import { IconRecordArm, IconSettings, IconSliders, IconSpline, IconTrash } from './uiIcons'
 
 interface TrackHeaderProps {
   trackIndex: number
@@ -38,6 +38,8 @@ interface TrackHeaderProps {
   onToggleAuto: (trackIndex: number) => void
   onReorderMouseDown?: (e: React.MouseEvent, trackIndex: number) => void
   onSelectTrackClips?: (trackIndex: number, mode: 'add' | 'toggle' | 'replace') => void
+  metroSettingsOpen?: boolean
+  onOpenMetronomeSettings?: (trackIndex: number) => void
 }
 
 export const TrackHeader = memo(function TrackHeader({
@@ -72,7 +74,9 @@ export const TrackHeader = memo(function TrackHeader({
   onToggleFx,
   onToggleAuto,
   onReorderMouseDown,
-  onSelectTrackClips
+  onSelectTrackClips,
+  metroSettingsOpen = false,
+  onOpenMetronomeSettings
 }: TrackHeaderProps) {
   const renderCountRef = useRef(0)
   renderCountRef.current += 1
@@ -139,6 +143,22 @@ export const TrackHeader = memo(function TrackHeader({
           >
             {displayName}
           </div>
+        )}
+        {isMetronome && (
+          <button
+            type="button"
+            className={`control-button metro-gear-button ${metroSettingsOpen ? 'active' : ''}`}
+            data-testid="metronome-settings-gear"
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpenMetronomeSettings?.(trackIndex)
+            }}
+            title="Ajustes del metrónomo"
+            aria-label="Ajustes del metrónomo"
+            aria-pressed={metroSettingsOpen}
+          >
+            <IconSettings size={13} />
+          </button>
         )}
         <button
           type="button"

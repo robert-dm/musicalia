@@ -25,8 +25,8 @@ export interface TempoMap {
 
 const TIGHTNESS = 80
 const MIN_BEATS = 2
-/** Treat a beat this close to t=0 (as a fraction of the period) as already at the origin. */
-export const ORIGIN_ALIGN_FRACTION = 0.3
+/** Snap a near-origin first beat to t=0 so there is no empty pre-roll hole. */
+export const ORIGIN_SNAP_SECONDS = 0.02
 
 export interface RulerMapBeat {
   t: number
@@ -62,18 +62,21 @@ export function openingBeatPeriod(times: number[], bpm: number): number {
 }
 
 /**
- * Walk the opening period backwards from the first stored beat so the grid
- * covers [0, firstBeat]. Detected times are kept; only missing origin beats
- * are inserted. Not a pre-roll: the extra clicks sit on the real grid.
+ * Walk the opening period backwards so the grid always includes t=0.
+ * Detected times stay put; only missing origin beats are inserted.
+ * A first beat within a few milliseconds of 0 is snapped to 0 so the
+ * first click is exactly at the clip start — no empty pre-roll gap.
  */
 export function prependBeatTimesToOrigin(times: number[], period: number): number[] {
   if (!(period > 1e-6) || times.length === 0) return times
   const first = times[0]
-  if (first <= period * ORIGIN_ALIGN_FRACTION) return times
+  const snap = Math.min(ORIGIN_SNAP_SECONDS, period * 0.15)
+  if (first <= 1e-6) return times
+  if (first <= snap) return [0, ...times.slice(1)]
   const extra: number[] = []
   let t = first - period
   const guard = Math.ceil(first / period) + 3
-  for (let i = 0; i < guard && t > period * ORIGIN_ALIGN_FRACTION; i++) {
+  for (let i = 0; i < guard && t > snap; i++) {
     extra.push(t)
     t -= period
   }
@@ -83,19 +86,23 @@ export function prependBeatTimesToOrigin(times: number[], period: number): numbe
 }
 
 /**
- * Default: bar 1 / beat 1 at t=0. If the user moved the 1 (downbeatIndex > 0),
- * keep that downbeat and still fill ticks back to the origin.
+ * Guarantee a beat at t=0. Tracker-default maps (downbeatIndex 0) re-home
+ * bar/beat 1 there. A user-moved 1 (downbeatIndex > 0) is preserved for
+ * accents; clicks and ruler bars still fill back to the origin.
  */
 export function alignTempoMapToOrigin(map: TempoMap): TempoMap {
   if (!hasTempoMap(map)) return map
   const times = map.beats.map((b) => b.time)
   const period = openingBeatPeriod(times, map.globalBpm)
   const expanded = prependBeatTimesToOrigin(times, period)
-  if (expanded.length === times.length) return map
-  const prepended = expanded.length - times.length
+  const alreadyOrigin = expanded.length === times.length && expanded[0] === times[0] && times[0] <= 1e-6
+  if (alreadyOrigin) return map
+  const prepended = Math.max(0, expanded.length - times.length)
   const beats = expanded.map((time, index) => {
     const existing = map.beats.find((b) => Math.abs(b.time - time) < 1e-9)
-    if (existing) return { ...existing }
+    if (existing) return { ...existing, time }
+    const snapped = map.beats.find((b) => Math.abs(b.time - times[0]) < 1e-9 && time === 0 && times[0] > 0)
+    if (snapped && index === 0) return { ...snapped, time: 0 }
     return { id: newBeatId(time, index), time, pinned: false }
   })
   const downbeatIndex = map.downbeatIndex > 0
@@ -114,12 +121,11 @@ export function rulerMapBeats(
   const aligned = alignTempoMapToOrigin(map)
   const pulses = pulsesPerBar(normalizeMetronomeMeter(meter), bpm)
   return aligned.beats.map((beat, index) => {
-    const rel = index - aligned.downbeatIndex
-    const downbeat = ((rel % pulses) + pulses) % pulses === 0
+    const downbeat = index % pulses === 0
     return {
       t: beat.time,
       downbeat,
-      bar: downbeat ? Math.floor(rel / pulses) + 1 : undefined
+      bar: downbeat ? Math.floor(index / pulses) + 1 : undefined
     }
   })
 }
@@ -384,7 +390,10 @@ export function followClicksInRange(args: {
   if (!(end > start)) return []
   const clicks: MeterClick[] = []
   const map = alignTempoMapToOrigin(args.map)
-  const beats = map.beats
+  const beats = map.beats.slice()
+  if (beats.length > 0 && beats[0].time > 1e-9) {
+    beats.unshift({ id: newBeatId(0, 0), time: 0, pinned: false })
+  }
   for (let i = 0; i < beats.length; i++) {
     const time = beats[i].time
     if (time >= end - 1e-12) break

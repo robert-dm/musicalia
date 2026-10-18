@@ -121,7 +121,7 @@ export interface TimelineTick {
   label?: string
 }
 
-const ORIGIN_ALIGN_FRACTION = 0.3
+const ORIGIN_SNAP_SECONDS = 0.02
 
 function mapBeatPeriodHint(
   beats: MapBeatTick[],
@@ -141,8 +141,8 @@ function mapBeatPeriodHint(
 }
 
 /**
- * Fill empty unnumbered space before the first stored beat. Default: bar 1 at t=0.
- * If a late beat already carries bar:1 (Poner el 1 acá), keep that 1 and number backwards.
+ * Fill the grid back to t=0. The first bar line is always at the origin
+ * and labeled 1 — no empty pre-roll before the first click.
  */
 export function expandMapBeatsToOrigin(
   beats: MapBeatTick[],
@@ -153,36 +153,35 @@ export function expandMapBeatsToOrigin(
   const sorted = [...beats].sort((a, b) => a.t - b.t)
   const period = mapBeatPeriodHint(sorted, 60 / Math.max(1e-6, periodHint), periodHint)
   if (!(period > 1e-6)) return sorted
-  const userBar1 = sorted.find((b) => b.bar === 1)
-  const pickup = userBar1 != null && userBar1.t > period * ORIGIN_ALIGN_FRACTION
-  const extra: MapBeatTick[] = []
-  if (sorted[0].t > period * ORIGIN_ALIGN_FRACTION) {
-    let t = sorted[0].t - period
-    const guard = Math.ceil(sorted[0].t / period) + 3
-    for (let i = 0; i < guard && t > period * ORIGIN_ALIGN_FRACTION; i++) {
-      extra.push({ t })
-      t -= period
-    }
-    extra.push({ t: 0 })
-    extra.reverse()
-  }
-  const all = extra.length > 0 ? [...extra, ...sorted] : sorted
-  if (extra.length === 0 && all[0].t <= period * ORIGIN_ALIGN_FRACTION) return sorted
+  const snap = Math.min(ORIGIN_SNAP_SECONDS, period * 0.15)
   const pulses = Math.max(1, pulsesPerBar)
-  if (pickup && userBar1) {
-    return all.map((b) => {
-      if (b.bar != null) return b
-      const relBeats = Math.round((b.t - userBar1.t) / period)
-      const downbeat = ((relBeats % pulses) + pulses) % pulses === 0
-      return {
-        t: b.t,
-        downbeat,
-        bar: downbeat ? Math.floor(relBeats / pulses) + 1 : undefined
-      }
+  if (sorted[0].t <= 1e-6) {
+    const shift = sorted[0].bar != null && sorted[0].bar !== 1 ? 1 - sorted[0].bar : 0
+    let nextBar = 2
+    return sorted.map((b, i) => {
+      if (i === 0) return { t: 0, downbeat: true, bar: 1 }
+      if (shift && b.bar != null) return { ...b, bar: b.bar + shift }
+      if (b.downbeat && b.bar == null) return { ...b, bar: nextBar++ }
+      return b
     })
   }
-  return all.map((b, i) => ({
-    t: b.t,
+  const times: number[] = []
+  if (sorted[0].t <= snap) {
+    times.push(0, ...sorted.slice(1).map((b) => b.t))
+  } else {
+    let t = sorted[0].t - period
+    const extra: number[] = []
+    const guard = Math.ceil(sorted[0].t / period) + 3
+    for (let i = 0; i < guard && t > snap; i++) {
+      extra.push(t)
+      t -= period
+    }
+    extra.push(0)
+    extra.reverse()
+    times.push(...extra, ...sorted.map((b) => b.t))
+  }
+  return times.map((t, i) => ({
+    t,
     downbeat: i % pulses === 0,
     bar: i % pulses === 0 ? Math.floor(i / pulses) + 1 : undefined
   }))

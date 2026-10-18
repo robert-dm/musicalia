@@ -101,9 +101,11 @@ try {
   const measured = await page.evaluate(() => {
     const clip = document.querySelector('[data-testid="clip-wrapper"]')
     const bar1 = document.querySelector('[data-testid="ruler-bar-1"]')
+    const barNum = bar1?.querySelector('.bar-number')
     const marker = document.querySelector('[data-testid="tempo-marker-0"]')
     const clipRect = clip?.getBoundingClientRect()
     const barRect = bar1?.getBoundingClientRect()
+    const numRect = barNum?.getBoundingClientRect()
     const markerRect = marker?.getBoundingClientRect()
     const state = window.__musicaliaMetronome.getState()
     const scheduled = window.__musicaliaMetronome.getSchedule()
@@ -112,6 +114,7 @@ try {
       clipOffset: clips[0]?.offsetSeconds,
       clipLeft: clipRect?.left ?? null,
       bar1Left: barRect?.left ?? null,
+      bar1LabelLeft: numRect?.left ?? null,
       bar1Time: bar1 ? Number(bar1.getAttribute('data-t')) : null,
       markerCenter: markerRect ? markerRect.left + markerRect.width / 2 : null,
       markerTime: marker ? Number(marker.getAttribute('data-beat-time')) : null,
@@ -138,10 +141,12 @@ try {
   const markerCenter = measured.markerCenter
   assert(clipLeft != null && bar1Left != null && markerCenter != null, 'all three x positions resolved')
   const barVsClip = Math.abs(bar1Left - clipLeft)
+  const labelVsClip = Math.abs((measured.bar1LabelLeft ?? clipLeft) - clipLeft)
   const markerVsClip = Math.abs(markerCenter - clipLeft)
   const markerVsBar = Math.abs(markerCenter - bar1Left)
-  console.log('x delta px', { barVsClip, markerVsClip, markerVsBar })
-  assert(barVsClip <= 4, `ruler 1 x == clip start x (Δ ${barVsClip.toFixed(2)}px)`)
+  console.log('x delta px', { barVsClip, labelVsClip, markerVsClip, markerVsBar })
+  assert(barVsClip <= 2, `ruler 1 line x == clip start x (Δ ${barVsClip.toFixed(2)}px)`)
+  assert(labelVsClip <= 3, `ruler 1 label sits at the clip left edge (Δ ${labelVsClip.toFixed(2)}px)`)
   assert(markerVsClip <= 6, `first metronome marker x == clip start x (Δ ${markerVsClip.toFixed(2)}px)`)
   assert(markerVsBar <= 6, `first metronome marker x == ruler 1 x (Δ ${markerVsBar.toFixed(2)}px)`)
 

@@ -94,7 +94,7 @@ export function TimelineRuler({
     tick.kind === 'bar' ? (
       <div
         key={`b-${tick.t}-${i}`}
-        className="bar-marker"
+        className={`bar-marker${tick.t <= 1e-6 ? ' origin' : ''}`}
         data-testid={tick.label === '1' ? 'ruler-bar-1' : undefined}
         data-bar={tick.label}
         data-t={String(tick.t)}

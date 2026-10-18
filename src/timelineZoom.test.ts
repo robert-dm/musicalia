@@ -158,12 +158,32 @@ const pickupMapped = timelineTicks({
   ]
 })
 assert(
-  pickupMapped.some((t) => t.kind === 'bar' && t.label === '1' && Math.abs(t.t - sidePeriod * 4) < 1e-6),
-  'Poner el 1 acá keeps bar 1 on the user downbeat'
+  pickupMapped.some((t) => t.kind === 'bar' && t.label === '1' && t.t === 0),
+  'first ruler bar line is at t=0 labeled 1 even after Poner el 1 acá'
 )
 assert(
-  pickupMapped.some((t) => t.kind === 'bar' && t.label === '0' && t.t === 0),
-  'pickup still numbers the origin so the ruler is not empty'
+  pickupMapped.some((t) => t.kind === 'bar' && t.label === '2' && Math.abs(t.t - sidePeriod * 4) < 1e-6),
+  'later downbeats keep numbering after the origin 1'
+)
+
+const nearOrigin = timelineTicks({
+  layoutMax: 4,
+  pxPerSec: 80,
+  viewStart: 0,
+  viewEnd: 4,
+  bpm: 160.2,
+  beatsPerBar: 4,
+  pulseSeconds: sidePeriod,
+  mapBeats: [
+    { t: 0.012, downbeat: true },
+    { t: sidePeriod, downbeat: false },
+    { t: sidePeriod * 2 },
+    { t: sidePeriod * 3 }
+  ]
+})
+assert(
+  nearOrigin.some((t) => t.kind === 'bar' && t.label === '1' && Math.abs(t.t) < 1e-9),
+  'a first beat a few ms late still snaps bar 1 to t=0'
 )
 
 if (failed > 0) {

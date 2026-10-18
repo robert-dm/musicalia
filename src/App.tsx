@@ -3973,7 +3973,7 @@ function App() {
     if (!current) return
     if (opts?.undo !== false) saveUndo()
     const tracks = [...trackStatesRef.current]
-    tracks[idx] = { ...tracks[idx], tempoMap: updater(current) }
+    tracks[idx] = { ...tracks[idx], tempoMap: alignTempoMapToOrigin(updater(current)) }
     trackStatesRef.current = tracks
     setTrackStates(tracks)
     if (isPlayingRef.current) scheduleMetronome(getSongTime())

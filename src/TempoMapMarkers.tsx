@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import {
+  alignTempoMapToOrigin,
   isDownbeat,
   localBpmAt,
   type TempoMap
@@ -34,20 +35,21 @@ export function TempoMapMarkers({
   onSetDownbeat
 }: TempoMapMarkersProps) {
   const end = viewEnd ?? duration
+  const aligned = useMemo(() => alignTempoMapToOrigin(map), [map])
   const [hoverId, setHoverId] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ id: string; x: number; y: number; time: number } | null>(null)
   const visible = useMemo(
-    () => map.beats.filter((b) => b.time >= viewStart - 0.05 && b.time <= end + 0.05),
-    [map.beats, viewStart, end]
+    () => aligned.beats.filter((b) => b.time >= viewStart - 0.05 && b.time <= end + 0.05),
+    [aligned.beats, viewStart, end]
   )
   if (!follow || duration <= 0) return null
 
   return (
     <div className="tempo-map-overlay" data-testid="tempo-map-overlay">
       {visible.map((beat, i) => {
-        const index = map.beats.findIndex((b) => b.id === beat.id)
-        const down = isDownbeat(map, index, pulsesPerBar)
-        const local = localBpmAt(map, beat.time + 1e-4)
+        const index = aligned.beats.findIndex((b) => b.id === beat.id)
+        const down = isDownbeat(aligned, index, pulsesPerBar)
+        const local = localBpmAt(aligned, beat.time + 1e-4)
         return (
           <button
             key={beat.id}

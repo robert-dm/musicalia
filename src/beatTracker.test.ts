@@ -174,6 +174,15 @@ assert(lateClicks[0].songTime === 0, 'click, ruler, and clip origin share t=0')
 const builtLate = buildTempoMap(lateTimes, sidewinderBpm, 10)
 assert(builtLate.beats[0].time === 0 && builtLate.downbeatIndex === 0, 'buildTempoMap persists origin beats')
 
+const near = buildTempoMap([0.012, 0.012 + sidePeriod, 0.012 + sidePeriod * 2, 0.012 + sidePeriod * 3], sidewinderBpm, 4)
+assert(near.beats[0].time === 0, 'a first beat a few ms late snaps to t=0 — no pre-roll hole')
+const nearClicks = followClicksInRange({
+  map: near,
+  meter: { followMode: 'follow' },
+  end: sidePeriod
+})
+assert(nearClicks[0]?.songTime === 0, 'first click is exactly t=0 after the snap')
+
 const hydratedLate = hydrateTempoMap({
   beats: lateTimes.map((time, index) => ({ id: `old-${index}`, time, pinned: false })),
   downbeatIndex: 0,
@@ -192,12 +201,8 @@ const pickupClicks = followClicksInRange({
 const pickupAccent = pickupClicks.find((c) => Math.abs(c.songTime - alignedLate.beats[2].time) < 1e-9)
 assert(pickupAccent?.accent === true, 'accents follow the user 1 (true pickup)')
 const pickupRuler = rulerMapBeats(userOne, { followMode: 'follow', numerator: 4, denominator: 4 }, sidewinderBpm)
-assert(!!pickupRuler?.some((b) => b.t === 0), 'pickup still has grid ticks at t=0')
-assert(
-  pickupRuler?.find((b) => b.bar === 1)?.t === pickupAccent?.songTime,
-  'ruler 1 stays on the user downbeat, consistent with clicks'
-)
-assert((pickupRuler?.find((b) => b.t === 0)?.bar ?? 0) !== 1, 'audio before the user 1 is a pickup, not bar 1')
+assert(pickupRuler?.[0].t === 0 && pickupRuler?.[0].bar === 1, 'ruler first bar line stays at t=0 labeled 1')
+assert(pickupClicks[0]?.songTime === 0, 'first click is still at t=0 with a pickup downbeat')
 
 const lateUser = hydrateTempoMap({
   beats: lateTimes.map((time, index) => ({ id: `u-${index}`, time, pinned: false })),

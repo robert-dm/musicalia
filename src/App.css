@@ -761,6 +761,10 @@
   pointer-events: none;
 }
 
+.bar-marker.origin .bar-number {
+  left: 0;
+}
+
 .beat-marker {
   position: absolute;
   top: 28px;

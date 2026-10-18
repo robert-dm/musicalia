@@ -47,7 +47,8 @@ const withMetro = ensureMetronomeTrack(eight.map((t) => ({ ...t })))
 assert(withMetro[0].kind === 'metronome' && withMetro[0].name === 'Metrónomo', 'project list starts with Metrónomo')
 assert(withMetro[0].mute === true, 'metronome is muted by default')
 assert(nextPistaNameFromTracks(withMetro) === 'Pista 9', 'metronome does not steal Pista numbers')
-assert(appendEmptyTrack(withMetro, createEmptyTrack).at(-1)?.name === 'Pista 9', 'append after metro+8 is Pista 9')
+const appended = appendEmptyTrack(withMetro, createEmptyTrack)
+assert(appended[appended.length - 1]?.name === 'Pista 9', 'append after metro+8 is Pista 9')
 assert(createMetronomeTrack().mute === true, 'factory metronome is muted')
 
 const afterStems = [

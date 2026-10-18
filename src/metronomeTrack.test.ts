@@ -99,9 +99,9 @@ assert(!canDeleteTrack(metro) && !canRenameTrack(metro), 'cannot delete or renam
 assert(!shouldExportMetronome(metro), 'muted metronome is omitted from export')
 assert(shouldExportMetronome({ ...metro, mute: false }), 'unmuted metronome is exported')
 
-const oldSave = [
-  { name: 'Pista 1', kind: 'audio' as const, mute: false },
-  { name: 'Pista 2', kind: 'audio' as const, mute: false }
+const oldSave: Array<{ name: string; kind?: string; mute: boolean }> = [
+  { name: 'Pista 1', kind: 'audio', mute: false },
+  { name: 'Pista 2', kind: 'audio', mute: false }
 ]
 const upgraded = ensureMetronomeTrack(oldSave)
 assert(upgraded.length === 3 && upgraded[0].kind === 'metronome', 'old save gets a metronome at the top')

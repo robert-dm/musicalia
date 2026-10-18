@@ -4107,19 +4107,16 @@ function App() {
   }
 
   const handleMuteToggle = useCallback((trackIndex: number) => {
-    setTrackStates(prev => {
-      if (!prev[trackIndex]) return prev
-      const newStates = [...prev]
-      newStates[trackIndex] = {
-        ...newStates[trackIndex],
-        mute: !newStates[trackIndex].mute
-      }
-      trackStatesRef.current = newStates
-      if (isPlayingRef.current && isMetronomeTrack(newStates[trackIndex])) {
-        scheduleMetronome(getSongTime())
-      }
-      return newStates
-    })
+    const prev = trackStatesRef.current
+    if (!prev[trackIndex]) return
+    const next = prev.map((track, i) => (
+      i === trackIndex ? { ...track, mute: !track.mute } : track
+    ))
+    trackStatesRef.current = next
+    setTrackStates(next)
+    if (isPlayingRef.current && isMetronomeTrack(next[trackIndex])) {
+      scheduleMetronome(getSongTime())
+    }
   }, [])
 
   const toggleMetronomeTrack = useCallback(() => {

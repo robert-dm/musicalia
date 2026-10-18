@@ -103,6 +103,7 @@ try {
 
   await page.evaluate(async () => {
     window.__musicaliaMetronome.unmute()
+    await new Promise((r) => setTimeout(r, 80))
     await window.__musicaliaMetronome.play()
     await new Promise((r) => setTimeout(r, 250))
   })

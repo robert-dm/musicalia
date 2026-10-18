@@ -22,7 +22,7 @@ function sanitizeEntry(raw: unknown): RegistryEntry | null {
   if (typeof rec.id !== 'string' || rec.id.trim() === '') return null
   return {
     id: rec.id.trim(),
-    name: typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : 'Proyecto sin título',
+    name: typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : 'Sin título',
     fileName: typeof rec.fileName === 'string' && rec.fileName.trim() ? rec.fileName.trim() : 'proyecto.musicalia',
     locationNote: typeof rec.locationNote === 'string' ? rec.locationNote.trim() : '',
     savedAt: typeof rec.savedAt === 'string' ? rec.savedAt : new Date().toISOString(),

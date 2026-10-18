@@ -48,6 +48,14 @@ import {
   saveHandleAfterGesture,
   type SaveFilePickerFn
 } from './fileSave'
+import {
+  UNTITLED_PROJECT_NAME,
+  baseNameFromMusicalia,
+  commitProjectName,
+  displayProjectName,
+  projectTabTitle,
+  suggestedMusicaliaFileName
+} from './projectTitle'
 import { TimelineRuler } from './TimelineRuler'
 import {
   applyLoopSnap,
@@ -537,7 +545,13 @@ function App() {
   const [showAuth, setShowAuth] = useState(false)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [authLoading, setAuthLoading] = useState(false)
-  const [currentProjectName, setCurrentProjectName] = useState('Proyecto sin título')
+  const [currentProjectName, setCurrentProjectName] = useState(UNTITLED_PROJECT_NAME)
+  const [projectFileName, setProjectFileName] = useState<string | null>(null)
+  const [projectDirty, setProjectDirty] = useState(false)
+  const [renamingProject, setRenamingProject] = useState(false)
+  const [projectNameDraft, setProjectNameDraft] = useState('')
+  const dirtyArmedRef = useRef(false)
+  const projectNameInputRef = useRef<HTMLInputElement>(null)
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null)
   const currentProjectIdRef = useRef<string | null>(null)
   const [showMyProjects, setShowMyProjects] = useState(false)
@@ -1133,6 +1147,9 @@ function App() {
       }
       autosaveProject(state)
       lastClipBufferSigRef.current = sig
+      if (dirtyArmedRef.current) {
+        setProjectDirty(true)
+      }
       // Session/IDB only. A timer is not a user gesture — never requestPermission here.
       if (currentFileHandleRef.current) {
         void queryWritePermission(currentFileHandleRef.current).then((status) => {
@@ -1145,6 +1162,24 @@ function App() {
     const timer = window.setTimeout(() => { void saveState() }, 1000)
     return () => window.clearTimeout(timer)
   }, [bpm, pitchSemitones, tempoRate, harmony, loopStart, loopEnd, trackStates, metronomeEnabled, isLoopEnabled, magnetEnabled, currentProjectName, currentProjectId])
+
+  useEffect(() => {
+    const shown = displayProjectName(currentProjectName, projectFileName)
+    document.title = projectTabTitle(shown, projectDirty)
+  }, [currentProjectName, projectFileName, projectDirty])
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      dirtyArmedRef.current = true
+    }, 800)
+    return () => window.clearTimeout(t)
+  }, [])
+
+  useEffect(() => {
+    if (!renamingProject) return
+    projectNameInputRef.current?.focus()
+    projectNameInputRef.current?.select()
+  }, [renamingProject])
 
   useEffect(() => {
     const scroller = lanesScrollRef.current
@@ -1309,12 +1344,14 @@ function App() {
     projectLoadGenRef.current++
     console.log(`[New Project] Starting new project, gen=${projectLoadGenRef.current}`)
     await clearProject()
-    setCurrentProjectName('Proyecto sin título')
+    setCurrentProjectName(UNTITLED_PROJECT_NAME)
+    setProjectFileName(null)
     currentProjectIdRef.current = null
     setCurrentProjectId(null)
     setCurrentFileHandle(null)
     currentFileHandleRef.current = null
     setFileHandleUnsaved(false)
+    quietDirty()
     setFileSavePrompt(null)
     window.location.reload()
   }
@@ -1371,6 +1408,62 @@ function App() {
     currentProjectIdRef.current = id
     setCurrentProjectId(id)
     return id
+  }
+
+  const shownProjectName = displayProjectName(currentProjectName, projectFileName)
+
+  const quietDirty = () => {
+    dirtyArmedRef.current = false
+    setProjectDirty(false)
+  }
+
+  const armDirtySoon = (ms = 500) => {
+    window.setTimeout(() => {
+      dirtyArmedRef.current = true
+    }, ms)
+  }
+
+  const applyProjectName = async (nextName: string) => {
+    const next = commitProjectName(nextName, shownProjectName)
+    setCurrentProjectName(next)
+    const id = currentProjectIdRef.current
+    const diskName = currentFileHandleRef.current?.name || projectFileName || suggestedMusicaliaFileName(next)
+    if (id) {
+      setMyProjects((prev) => prev.map((entry) => (
+        entry.id === id ? { ...entry, name: next } : entry
+      )))
+    }
+    if (id && (currentUser || hasAuth())) {
+      try {
+        const entries = await upsertProjectRegistry(buildRegistryEntry({
+          id,
+          name: next,
+          fileName: diskName,
+          bpm,
+          trackCount: trackStatesRef.current.length
+        }))
+        setMyProjects(entries)
+      } catch (error) {
+        console.warn('[Registry] No se pudo renombrar en Mis proyectos:', error)
+      }
+    }
+    return next
+  }
+
+  const beginProjectRename = () => {
+    setProjectNameDraft(shownProjectName)
+    setRenamingProject(true)
+  }
+
+  const cancelProjectRename = () => {
+    setRenamingProject(false)
+    setProjectNameDraft(shownProjectName)
+  }
+
+  const commitProjectRename = () => {
+    if (!renamingProject) return
+    setRenamingProject(false)
+    void applyProjectName(projectNameDraft)
   }
 
   const registerSavedProject = async (projectName: string, fileName: string, handle?: FileSystemFileHandle | null) => {
@@ -1477,6 +1570,9 @@ function App() {
       setUploadProgress(100)
       setFileHandleUnsaved(false)
       setFileSavePrompt(null)
+      setProjectDirty(false)
+      setProjectFileName(fileHandle.name || `${projectName}.musicalia`)
+      armDirtySoon()
       setToastMessage(`✅ Proyecto guardado: ${projectName}`)
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
@@ -1507,7 +1603,7 @@ function App() {
         return
       }
 
-      const fileName = `${sanitizeFilename(currentProjectName) || 'proyecto'}.musicalia`
+      const fileName = suggestedMusicaliaFileName(displayProjectName(currentProjectName, projectFileName))
 
       if (hasFileSystemAccess()) {
         try {
@@ -1577,6 +1673,9 @@ function App() {
       setToastMessage(`✅ Proyecto descargado: ${currentProjectName}`)
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
+      setProjectDirty(false)
+      setProjectFileName(fileName)
+      armDirtySoon()
       await registerSavedProject(currentProjectName, fileName)
       console.log(`[Save] Project downloaded: ${currentProjectName}`)
     } catch (err: any) {
@@ -1704,7 +1803,10 @@ function App() {
       reconnectAllClips(withMetro)
       setTrackStates(withMetro)
       bpmManuallySetRef.current = sessionHasAudio(withMetro)
-      setCurrentProjectName(projectData.name || 'Proyecto sin título')
+      setCurrentProjectName(projectData.name || baseNameFromMusicalia(file.name) || UNTITLED_PROJECT_NAME)
+      setProjectFileName(opts?.fileHandle?.name || file.name)
+      quietDirty()
+      armDirtySoon(800)
       
       setUploadProgress(100)
       setToastMessage('Proyecto cargado desde tu computadora')
@@ -5418,6 +5520,15 @@ function App() {
           }))
         ),
       getSelection: () => Array.from(selectedClipIdsRef.current),
+      getProjectTitle: () => displayProjectName(currentProjectName, projectFileName),
+      isProjectDirty: () => projectDirty,
+      getTabTitle: () => document.title,
+      getProjectFileName: () => projectFileName,
+      renameProject: (name: string) => applyProjectName(name),
+      markProjectDirty: () => setProjectDirty(true),
+      markProjectClean: () => {
+        setProjectDirty(false)
+      },
       select: (ids: string[], mode: 'replace' | 'add' | 'toggle' = 'replace') => {
         setSelectedClipIds((prev) => mergeSelection(prev, ids, mode))
       },
@@ -5711,6 +5822,55 @@ function App() {
           }
         }}
       />
+
+      <div className="app-titlebar">
+        <span className="app-wordmark">Musicalia</span>
+        <div
+          className={`project-title${projectDirty ? ' dirty' : ''}${renamingProject ? ' editing' : ''}`}
+          data-testid="project-title"
+          data-dirty={projectDirty ? 'true' : 'false'}
+          title={projectFileName || suggestedMusicaliaFileName(shownProjectName)}
+        >
+          {renamingProject ? (
+            <input
+              ref={projectNameInputRef}
+              className="project-title-input"
+              data-testid="project-title-input"
+              value={projectNameDraft}
+              aria-label="Nombre del proyecto"
+              onChange={(e) => setProjectNameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation()
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  commitProjectRename()
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  cancelProjectRename()
+                }
+              }}
+              onBlur={() => commitProjectRename()}
+            />
+          ) : (
+            <button
+              type="button"
+              className="project-title-name"
+              data-testid="project-title-name"
+              onDoubleClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                beginProjectRename()
+              }}
+            >
+              {shownProjectName}
+            </button>
+          )}
+          {projectDirty && (
+            <span className="project-title-dot" data-testid="project-title-dirty" aria-label="Cambios sin guardar">•</span>
+          )}
+        </div>
+        <span className="app-titlebar-spacer" aria-hidden="true" />
+      </div>
       
       <div className="transport-bar">
         <div className="tb-group tb-project" role="group" aria-label="Proyecto">
@@ -7067,6 +7227,7 @@ function App() {
               
               <h3>Guardar y Abrir</h3>
               <ul>
+                <li>• <strong>Nombre del proyecto</strong> - Arriba, al centro. • si hay cambios sin guardar. Doble clic para renombrar (Enter guarda, Esc cancela). El nombre va a Mis proyectos y al archivo .musicalia sugerido</li>
                 <li>• <strong>Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe). El audio nunca sube a la nube</li>
                 <li>• <strong>Guardar como…</strong> - Elige otro archivo .musicalia. Si Chrome pide permiso de nuevo, usá Permitir y guardar; el proyecto no se pierde (sigue en la sesión)</li>
                 <li>• <strong>Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>

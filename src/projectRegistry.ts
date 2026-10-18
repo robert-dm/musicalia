@@ -1,4 +1,5 @@
 import { createStore, del, get, set } from 'idb-keyval'
+import { UNTITLED_PROJECT_NAME } from './projectTitle'
 
 export const PROJECT_REGISTRY_API = '/api/project-registry'
 export const HANDLE_DB = 'musicalia-file-handles'
@@ -71,7 +72,7 @@ export function buildRegistryEntry(input: {
     : `${input.fileName.replace(/\.+$/, '')}.musicalia`
   return {
     id: input.id,
-    name: input.name.trim() || 'Proyecto sin título',
+    name: input.name.trim() || UNTITLED_PROJECT_NAME,
     fileName,
     locationNote: (input.locationNote ?? '').trim(),
     savedAt: input.savedAt ?? new Date().toISOString(),

@@ -78,6 +78,7 @@ const LaneClipView = memo(function LaneClipView({
       data-render-count={renderCountRef.current}
       className={`clip-wrapper ${selected ? 'selected' : ''}`}
       data-testid="clip-wrapper"
+      data-selected={selected ? 'true' : 'false'}
       style={{
         position: 'absolute',
         left: `${(clip.offsetSeconds / maxDur) * 100}%`,

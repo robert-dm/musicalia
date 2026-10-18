@@ -87,6 +87,64 @@ export function deleteTrackFromList<T extends { clips: { id: string }[]; kind?: 
   }
 }
 
+export function selectableClipIds(
+  tracks: Array<{ kind?: string; clips: Array<{ id: string }> }>
+): string[] {
+  return tracks.flatMap((track) => (
+    track.kind === 'metronome' ? [] : track.clips.map((clip) => clip.id)
+  ))
+}
+
+export function clipIdsOnTracks(
+  tracks: Array<{ kind?: string; clips: Array<{ id: string }> }>,
+  indices: number[]
+): string[] {
+  const ids: string[] = []
+  for (const index of indices) {
+    const track = tracks[index]
+    if (!track || track.kind === 'metronome') continue
+    for (const clip of track.clips) ids.push(clip.id)
+  }
+  return ids
+}
+
+export function applyGroupTimeDelta(offsets: number[], requestedDelta: number): {
+  delta: number
+  offsets: number[]
+} {
+  const safe = offsets.filter((n) => Number.isFinite(n))
+  if (safe.length === 0) return { delta: 0, offsets: [] }
+  const minOffset = Math.min(...safe)
+  const delta = clampGroupTimeDelta(minOffset, requestedDelta)
+  return {
+    delta,
+    offsets: safe.map((offset) => Math.max(0, offset + delta))
+  }
+}
+
+export function nudgeDeltaSeconds(args: {
+  direction: -1 | 1
+  shiftKey: boolean
+  bpm: number
+}): number {
+  const bpm = Number.isFinite(args.bpm) && args.bpm > 0 ? args.bpm : 120
+  const beat = 60 / bpm
+  const step = args.shiftKey ? beat : beat / 4
+  return args.direction * step
+}
+
+export function parseMoveAmountSeconds(
+  raw: string,
+  unit: 'beats' | 'seconds',
+  bpm: number
+): number | null {
+  const n = Number(String(raw).replace(',', '.').trim())
+  if (!Number.isFinite(n) || n === 0) return null
+  if (unit === 'seconds') return n
+  const safeBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : 120
+  return n * (60 / safeBpm)
+}
+
 export function mergeSelection(
   current: Set<string>,
   incoming: string[],

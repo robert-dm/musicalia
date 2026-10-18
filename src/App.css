@@ -771,10 +771,12 @@
 }
 
 .clip-wrapper.selected {
-  border-color: #6ee7b7;
-  box-shadow: 0 0 0 1px #6ee7b7;
+  border-color: #5eead4;
+  box-shadow:
+    0 0 0 2px rgba(94, 234, 212, 0.95),
+    0 10px 22px rgba(6, 18, 16, 0.45);
   z-index: 2;
-  background: #163024;
+  background: linear-gradient(180deg, #1c4036 0%, #122820 100%);
 }
 
 .marquee-rect {
@@ -1414,6 +1416,27 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+.move-selection-row {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 16px 0;
+}
+
+.move-selection-row input,
+.move-selection-row select {
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-app);
+  color: var(--text);
+  padding: 0 8px;
+}
+
+.move-selection-row input {
+  flex: 1;
+  min-width: 0;
 }
 
 .modal-stack {

@@ -1,14 +1,19 @@
 import {
+  applyGroupTimeDelta,
   clampGroupTimeDelta,
   clampGroupTrackDelta,
+  clipIdsOnTracks,
   clientRectsIntersect,
   commitEditedTrackName,
   deleteTrackFromList,
   marqueeClientRect,
   mergeSelection,
+  nudgeDeltaSeconds,
   packClipboard,
+  parseMoveAmountSeconds,
   pastePlacement,
-  resolveTrackName
+  resolveTrackName,
+  selectableClipIds
 } from './clipSelection'
 
 let failed = 0
@@ -31,6 +36,29 @@ assert(band.left === 40 && band.top === 20 && band.right === 100 && band.bottom 
 assert(clampGroupTimeDelta(2, -5) === -2, 'group cannot move left of 0')
 assert(clampGroupTimeDelta(2, 3) === 3, 'positive group delta unchanged')
 assert(clampGroupTimeDelta(0, -1) === 0, 'leftmost at 0 cannot move left')
+
+const grouped = applyGroupTimeDelta([1, 3.5], -4)
+assert(grouped.delta === -1, 'group delta clamps to the leftmost clip')
+assert(grouped.offsets[0] === 0 && grouped.offsets[1] === 2.5, 'every clip keeps the same clamped delta')
+const right = applyGroupTimeDelta([0.25, 1], 0.5)
+assert(right.delta === 0.5 && right.offsets.join(',') === '0.75,1.5', 'positive group move is uniform')
+assert(applyGroupTimeDelta([], -1).delta === 0, 'empty group is a no-op')
+
+assert(nudgeDeltaSeconds({ direction: 1, shiftKey: false, bpm: 120 }) === 0.125, 'fine nudge is a 16th at 120 BPM')
+assert(nudgeDeltaSeconds({ direction: -1, shiftKey: true, bpm: 120 }) === -0.5, 'Shift nudge is one beat')
+assert(nudgeDeltaSeconds({ direction: 1, shiftKey: true, bpm: 60 }) === 1, 'Shift nudge follows BPM')
+assert(parseMoveAmountSeconds('2', 'beats', 120) === 1, '2 beats at 120 BPM is 1s')
+assert(parseMoveAmountSeconds('-0,25', 'seconds', 120) === -0.25, 'parses comma decimals and negatives')
+assert(parseMoveAmountSeconds('0', 'seconds', 120) === null, 'zero amount is ignored')
+
+const project = [
+  { kind: 'metronome', clips: [] },
+  { kind: 'audio', clips: [{ id: 'a' }, { id: 'b' }] },
+  { kind: 'drum', clips: [{ id: 'c' }] }
+]
+assert(selectableClipIds(project).join(',') === 'a,b,c', 'select-all skips the metronome')
+assert(clipIdsOnTracks(project, [0, 1]).join(',') === 'a,b', 'header select ignores metronome')
+assert(clipIdsOnTracks(project, [2]).join(',') === 'c', 'header select takes that track')
 
 assert(clampGroupTrackDelta(1, 3, -2, 8) === -1, 'group cannot leave top')
 assert(clampGroupTrackDelta(1, 3, 10, 8) === 4, 'group cannot leave bottom')

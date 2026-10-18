@@ -37,6 +37,7 @@ interface TrackHeaderProps {
   onToggleFx: (trackIndex: number) => void
   onToggleAuto: (trackIndex: number) => void
   onReorderMouseDown?: (e: React.MouseEvent, trackIndex: number) => void
+  onSelectTrackClips?: (trackIndex: number, mode: 'add' | 'toggle' | 'replace') => void
 }
 
 export const TrackHeader = memo(function TrackHeader({
@@ -70,7 +71,8 @@ export const TrackHeader = memo(function TrackHeader({
   autoOpen = false,
   onToggleFx,
   onToggleAuto,
-  onReorderMouseDown
+  onReorderMouseDown,
+  onSelectTrackClips
 }: TrackHeaderProps) {
   const renderCountRef = useRef(0)
   renderCountRef.current += 1
@@ -90,6 +92,13 @@ export const TrackHeader = memo(function TrackHeader({
         if (e.button !== 0) return
         const target = e.target as HTMLElement
         if (target.closest('button, input, .volume-slider, .track-name-input')) return
+        if (e.shiftKey || e.ctrlKey || e.metaKey) {
+          e.preventDefault()
+          e.stopPropagation()
+          if (isMetronome) return
+          onSelectTrackClips?.(trackIndex, e.ctrlKey || e.metaKey ? 'toggle' : 'add')
+          return
+        }
         onReorderMouseDown?.(e, trackIndex)
       }}
     >

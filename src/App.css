@@ -724,10 +724,19 @@
   background: #141820;
 }
 
-.metronome-waveform {
+.metronome-waveform-host {
+  position: relative;
   display: block;
   width: 100%;
   height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.metronome-waveform {
+  position: absolute;
+  top: 0;
+  display: block;
   pointer-events: none;
 }
 
@@ -871,15 +880,14 @@
   pointer-events: none;
 }
 
-.waveform-full {
+.waveform-full,
+.waveform-tile {
   position: absolute;
   top: 0;
   left: 0;
   height: 100%;
   display: block;
   pointer-events: none;
-  transform-origin: left center;
-  will-change: transform, width;
 }
 
 .track-controls {
@@ -1044,9 +1052,11 @@
 }
 
 .recording-clip canvas {
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
   display: block;
+  pointer-events: none;
 }
 
 .volume-slider {

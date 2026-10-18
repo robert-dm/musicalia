@@ -1,3 +1,5 @@
+import { drawPeakEnvelope } from './waveform'
+
 export const MIC_DEVICE_STORAGE_KEY = 'musicalia-audio-input'
 export const GRABACION_NAME_RE = /^(?:grabaci[oó]n)\s+(\d+)$/i
 
@@ -324,21 +326,5 @@ export function drawRecordingPeaks(
   peaks: number[],
   color = '#ff6b6b'
 ): void {
-  const width = canvas.width
-  const height = canvas.height
-  const ctx = canvas.getContext('2d')
-  if (!ctx || width < 2 || height < 2 || peaks.length === 0) return
-  ctx.clearRect(0, 0, width, height)
-  ctx.fillStyle = color
-  const mid = height / 2
-  const step = Math.max(1, Math.floor(peaks.length / width))
-  for (let x = 0; x < width; x++) {
-    let peak = 0
-    const start = x * step
-    for (let i = start; i < start + step && i < peaks.length; i++) {
-      peak = Math.max(peak, peaks[i] || 0)
-    }
-    const h = Math.max(1, peak * mid)
-    ctx.fillRect(x, mid - h, 1, h * 2)
-  }
+  drawPeakEnvelope(canvas, peaks, color)
 }

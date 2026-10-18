@@ -286,6 +286,7 @@ import {
 import {
   ZOOM_SLIDER_MAX,
   anchoredScrollLeft,
+  clampHorizontalZoom,
   sliderToZoom,
   wheelZoom,
   zoomToSlider
@@ -2137,9 +2138,28 @@ function App() {
       live.el.style.width = `${(Math.max(0.05, elapsed) / layoutMax) * 100}%`
     }
     if (live.canvas && live.capture.peaks.length) {
-      const width = Math.max(40, Math.floor(live.el?.getBoundingClientRect().width || 40))
+      const dpr = Math.max(1, typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1)
+      const host = live.el
+      const hostRect = host?.getBoundingClientRect()
+      const port = host?.closest('.lanes-scroll-content') as HTMLElement | null
+      const portRect = port?.getBoundingClientRect()
+      const visibleLeft = hostRect && portRect
+        ? Math.max(0, portRect.left - hostRect.left - 64)
+        : 0
+      const visibleRight = hostRect && portRect
+        ? Math.min(hostRect.width, portRect.right - hostRect.left + 64)
+        : (hostRect?.width || 40)
+      const cssW = Math.max(40, Math.floor(visibleRight - visibleLeft))
+      const cssH = Math.max(24, Math.floor(hostRect?.height || 64))
+      const width = Math.min(8192, Math.round(cssW * dpr))
+      const height = Math.min(8192, Math.round(cssH * dpr))
+      live.canvas.style.left = `${Math.max(0, visibleLeft)}px`
+      live.canvas.style.width = `${cssW}px`
+      live.canvas.style.height = `${cssH}px`
+      live.canvas.style.position = 'absolute'
+      live.canvas.style.top = '0'
       if (live.canvas.width !== width) live.canvas.width = width
-      if (live.canvas.height !== 64) live.canvas.height = 64
+      if (live.canvas.height !== height) live.canvas.height = height
       drawRecordingPeaks(live.canvas, live.capture.peaks)
     }
   }
@@ -5419,7 +5439,57 @@ function App() {
         trackStatesRef.current = next
         setTrackStates(next)
         return { ids, offsets: places.map((p) => p.offset), tracks: places.map((p) => p.trackIndex) }
-      }
+      },
+      seedWaveform: async () => {
+        await ensureAudio()
+        const raw = nativeAudioContext(Tone.getContext().rawContext)
+        const sr = raw.sampleRate
+        const seconds = 2.4
+        const length = Math.max(16, Math.floor(sr * seconds))
+        const buffer = raw.createBuffer(1, length, sr)
+        const channel = buffer.getChannelData(0)
+        for (let i = 0; i < length; i++) {
+          const t = i / sr
+          const env = Math.min(1, t * 8) * Math.min(1, (seconds - t) * 3)
+          const tone = Math.sin(2 * Math.PI * 220 * t)
+            + 0.45 * Math.sin(2 * Math.PI * 440 * t)
+            + 0.2 * Math.sin(2 * Math.PI * 880 * t)
+          const wobble = 0.35 * Math.sin(2 * Math.PI * 3.5 * t)
+          channel[i] = Math.max(-1, Math.min(1, (tone * (0.55 + wobble) * env) * 0.7))
+        }
+        const target = trackStatesRef.current
+          .map((track, index) => ({ track, index }))
+          .find(({ track }) => !isMetronomeTrack(track) && track.kind !== 'drum')
+        if (!target) throw new Error('need an audio track')
+        const next = trackStatesRef.current.map((track) => ({ ...track, clips: [...track.clips] }))
+        const player = makeClipPlayer()
+        player.buffer = new Tone.ToneAudioBuffer(buffer)
+        player.loop = false
+        const dest = trackGainsRef.current[target.index]
+        if (dest) player.connect(dest)
+        const id = `clip-wave-demo-${target.index}`
+        next[target.index].clips = [{
+          player,
+          fileName: 'Wave demo',
+          isPlaying: false,
+          buffer,
+          startPosition: 0,
+          offsetSeconds: 0.15,
+          id,
+          sourceStart: 0,
+          duration: buffer.duration
+        }]
+        trackStatesRef.current = next
+        setTrackStates(next)
+        return { id, trackIndex: target.index, duration: buffer.duration }
+      },
+      setZoom: (zoom: number) => {
+        const next = clampHorizontalZoom(zoom)
+        horizontalZoomRef.current = next
+        setHorizontalZoom(next)
+        return next
+      },
+      getZoom: () => horizontalZoomRef.current
     }
     ;(window as unknown as { __musicaliaClips?: typeof api }).__musicaliaClips = api
     return () => {

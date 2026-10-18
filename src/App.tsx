@@ -371,7 +371,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0095b'
+const APP_VERSION = '0.0096b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -3549,7 +3549,7 @@ function App() {
     beginClipInteract()
 
     const wrapper = target.closest('.clip-wrapper') as HTMLElement | null
-    const waveform = wrapper?.querySelector('[data-waveform-full]') as HTMLElement | null
+    const waveform = (wrapper?.querySelector('[data-waveform-host], [data-waveform-full]') || null) as HTMLElement | null
     const orig: ClipTrimState & { bufferDuration: number } = {
       sourceStart: clip.sourceStart,
       duration: clip.duration,
@@ -3619,7 +3619,7 @@ function App() {
       if (!live) return
       const deltaTime = (ev.clientX - live.startX) / live.pxPerSec
       const next = applyClipTrim(live.edge, deltaTime, live.orig)
-      if (live.wrapper) clearTrimPreviewPx(live.wrapper)
+      if (live.wrapper) clearTrimPreviewPx(live.wrapper, live.waveform)
       if (trimStatesEqual(live.orig, next)) return
       saveUndo()
       const { trackIndex: ti, clipId: id } = live
@@ -5890,6 +5890,47 @@ function App() {
         setTrackStates(next)
         return { id, trackIndex: target.index, duration: buffer.duration }
       },
+      seedTrimWave: async () => {
+        await ensureAudio()
+        const raw = nativeAudioContext(Tone.getContext().rawContext)
+        const sr = raw.sampleRate
+        const seconds = 3
+        const length = Math.max(16, Math.floor(sr * seconds))
+        const buffer = raw.createBuffer(1, length, sr)
+        const channel = buffer.getChannelData(0)
+        const mark = 1.2
+        for (let i = 0; i < length; i++) {
+          const t = i / sr
+          const tone = Math.sin(2 * Math.PI * 180 * t) * 0.12
+          const burst = t >= mark && t < mark + 0.04 ? Math.sin(2 * Math.PI * 1400 * t) * 0.95 : 0
+          channel[i] = Math.max(-1, Math.min(1, tone + burst))
+        }
+        const target = trackStatesRef.current
+          .map((track, index) => ({ track, index }))
+          .find(({ track }) => !isMetronomeTrack(track) && track.kind !== 'drum')
+        if (!target) throw new Error('need an audio track')
+        const next = trackStatesRef.current.map((track) => ({ ...track, clips: [...track.clips] }))
+        const player = makeClipPlayer()
+        player.buffer = new Tone.ToneAudioBuffer(buffer)
+        player.loop = false
+        const dest = trackGainsRef.current[target.index]
+        if (dest) player.connect(dest)
+        const id = `clip-trim-demo-${target.index}`
+        next[target.index].clips = [{
+          player,
+          fileName: 'Trim demo',
+          isPlaying: false,
+          buffer,
+          startPosition: 0,
+          offsetSeconds: 0.4,
+          id,
+          sourceStart: 0,
+          duration: buffer.duration
+        }]
+        trackStatesRef.current = next
+        setTrackStates(next)
+        return { id, trackIndex: target.index, duration: buffer.duration, markTime: 0.4 + mark }
+      },
       setZoom: (zoom: number) => {
         const next = clampHorizontalZoom(zoom)
         horizontalZoomRef.current = next
@@ -6339,53 +6380,57 @@ function App() {
           >
             <IconMetronome size={15} />
           </button>
-          <button
-            className={`header-btn toggle-btn ${snapEnabled ? 'active' : ''}`}
-            data-testid="snap-toggle"
-            aria-pressed={snapEnabled}
-            onClick={() => {
-              setSnapEnabled(prev => {
-                const next = !prev
-                persistSnapEnabled(next)
-                return next
-              })
-            }}
-            title={`Snap ${snapEnabled ? 'ON' : 'OFF'}. Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras`}
-          >
-            <IconGrid />
-            <span className="btn-label snap-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
-          </button>
-          <button
-            className={`header-btn toggle-btn ${magnetEnabled ? 'active' : ''}`}
-            data-testid="magnet-toggle"
-            aria-pressed={magnetEnabled}
-            onClick={() => setMagnetEnabled((prev) => !prev)}
-            title={`Imán ${magnetEnabled ? 'ON' : 'OFF'}. Encaja el inicio o el final del clip con otros clips (cualquier pista) y con 0. Por defecto OFF. Alt lo apaga mientras arrastrás`}
-            aria-label="Imán"
-          >
-            <IconMagnet />
-            <span className="btn-label snap-label">Imán {magnetEnabled ? 'ON' : 'OFF'}</span>
-          </button>
-          <button
-            className={`header-btn icon-only toggle-btn ${isLoopEnabled ? 'active' : ''}`}
-            onClick={handleLoopToggle}
-            title="Activar loop — arrastrá en la regla para marcar la zona"
-            aria-label="Loop"
-            aria-pressed={isLoopEnabled}
-          >
-            <IconRepeat size={15} />
-          </button>
-          {(loopStart !== null && loopEnd !== null) && (
-            <div className="loop-indicator">
-              <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
-              <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
-            </div>
-          )}
         </div>
 
         <div className="tb-sep" aria-hidden="true" />
 
         <div className="tb-group tb-tools" role="group" aria-label="Herramientas">
+          <div className="tb-edit-toggles" data-testid="toolbar-edit-toggles" role="group" aria-label="Edición">
+            <button
+              className={`header-btn toggle-btn ${snapEnabled ? 'active' : ''}`}
+              data-testid="snap-toggle"
+              aria-pressed={snapEnabled}
+              onClick={() => {
+                setSnapEnabled(prev => {
+                  const next = !prev
+                  persistSnapEnabled(next)
+                  return next
+                })
+              }}
+              title={`Snap ${snapEnabled ? 'ON' : 'OFF'}. Ajuste a cuadrícula (por defecto OFF). Shift invierte el snap mientras arrastras`}
+              aria-label="Snap"
+            >
+              <IconGrid />
+              <span className="btn-label snap-label">Snap {snapEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+            <button
+              className={`header-btn toggle-btn ${magnetEnabled ? 'active' : ''}`}
+              data-testid="magnet-toggle"
+              aria-pressed={magnetEnabled}
+              onClick={() => setMagnetEnabled((prev) => !prev)}
+              title={`Imán ${magnetEnabled ? 'ON' : 'OFF'}. Encaja el inicio o el final del clip con otros clips (cualquier pista) y con 0. Por defecto OFF. Alt lo apaga mientras arrastrás`}
+              aria-label="Imán"
+            >
+              <IconMagnet />
+              <span className="btn-label snap-label">Imán {magnetEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+            <button
+              className={`header-btn icon-only toggle-btn ${isLoopEnabled ? 'active' : ''}`}
+              data-testid="loop-toggle"
+              onClick={handleLoopToggle}
+              title="Activar loop — arrastrá en la regla para marcar la zona"
+              aria-label="Loop"
+              aria-pressed={isLoopEnabled}
+            >
+              <IconRepeat size={15} />
+            </button>
+            {(loopStart !== null && loopEnd !== null) && (
+              <div className="loop-indicator">
+                <span className="loop-label">Loop: {loopStart !== null ? formatTime(loopStart) : '--'} → {loopEnd !== null ? formatTime(loopEnd) : '--'}</span>
+                <button className="transport-button clear-loop" onClick={clearLoop} title="Limpiar loop">Limpiar</button>
+              </div>
+            )}
+          </div>
           <div className="time-display">
             <span className="time-label">Time</span>
             <span className="time-value" ref={timeDisplayRef}>

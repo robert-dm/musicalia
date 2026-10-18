@@ -53,9 +53,16 @@ assert(wave.style.width === `${(10 / 3) * 100}%`, 'preview waveform width follow
 assert(wave.style.transform.includes('translateX'), 'preview shifts waveform with translateX')
 
 const pxWrap = { style: { transform: '', width: '', zIndex: '', willChange: '' } }
-applyTrimPreviewPx(pxWrap, wave, left, orig, 80, 20, 10)
+const pxWave = { style: { width: '', transform: '', flex: '', maxWidth: '' } }
+applyTrimPreviewPx(pxWrap, pxWave, left, orig, 80, 20, 10)
 assert(pxWrap.style.transform === 'translateX(20px)', 'trim preview dx = Δoffset * pxPerSec')
 assert(pxWrap.style.width === '60px', 'trim preview width = origWidth + Δduration * pxPerSec')
+assert(pxWave.style.width === '80px', 'waveform keeps its original pixel width')
+assert(pxWave.style.transform === 'translateX(-20px)', 'waveform counter-translates so samples stay on the timeline')
+const rightPreview = applyClipTrim('right', -1, orig)
+applyTrimPreviewPx(pxWrap, pxWave, rightPreview, orig, 80, 20, 10)
+assert(pxWrap.style.transform === 'translateX(0px)', 'right trim does not move the clip origin')
+assert(pxWave.style.transform === 'translateX(0px)', 'right trim leaves waveform origin in place')
 
 assert(trimStatesEqual(left, { ...left }), 'equal trim states')
 assert(!trimStatesEqual(left, right), 'different trim states')

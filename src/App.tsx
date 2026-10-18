@@ -22,6 +22,7 @@ import {
 import {
   addBeatAt,
   hasTempoMap,
+  hydrateTempoMap,
   hydrateTrackTempoMap,
   isFollowEnabled,
   localBpmAt,
@@ -5696,7 +5697,13 @@ function App() {
       getSchedule: () => lastScheduledMetronomeEvents.slice(),
       setBpm: (n: number) => applySessionBpm(n),
       setMeter: (patch: Partial<MetronomeMeter>) => patchMetronomeMeter(patch),
-      alignAt: (time: number) => alignMetronomeAt(time)
+      alignAt: (time: number) => alignMetronomeAt(time),
+      setTempoMap: (raw: unknown) => {
+        const map = hydrateTempoMap(raw)
+        if (!map) return false
+        applyDetectedTempoMap(map)
+        return true
+      }
     }
     ;(window as unknown as { __musicaliaMetronome?: typeof api }).__musicaliaMetronome = api
     return () => {

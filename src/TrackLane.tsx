@@ -101,7 +101,7 @@ const LaneClipView = memo(function LaneClipView({
       <div
         className="clip-body"
         onPointerDown={(e) => onClipDragStart(e, trackIndex, clip.id)}
-        title="Arrastra para mover (clic derecho para editar, Alt+arrastrar para duplicar)"
+        title="Arrastra para mover (clic derecho para editar, Alt+arrastrar para seleccionar, Cmd/Ctrl+Alt+arrastrar para duplicar)"
         style={{ cursor: 'move', touchAction: 'none' }}
       >
         <div className="clip-info">

@@ -255,10 +255,16 @@ import {
   applyGroupTimeDelta,
   clampGroupTrackDelta,
   clipIdsOnTracks,
+  clipsFromHereToEnd,
+  clipsOverlappingTime,
   clientRectsIntersect,
   commitEditedTrackName,
+  contentPointFromClient,
   deleteTrackFromList,
+  isDuplicateDragModifier,
+  isMarqueeModifier,
   marqueeClientRect,
+  marqueeEdgeScrollDelta,
   applyClipClickSelect,
   applyClipPointerSelect,
   mergeSelection,
@@ -456,9 +462,17 @@ function App() {
     y0: 0,
     x1: 0,
     y1: 0,
+    pointerX: 0,
+    pointerY: 0,
     additive: false,
-    toggle: false
+    toggle: false,
+    fromClip: false
   })
+  const marqueeScrollRafRef = useRef<number | null>(null)
+  const startMarqueeRef = useRef<(
+    e: { clientX: number; clientY: number; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean; button?: number; preventDefault?: () => void },
+    opts?: { fromClip?: boolean }
+  ) => void>(() => {})
   const [marqueeBox, setMarqueeBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const dragRafRef = useRef<number | null>(null)
   const resizeRafRef = useRef<number | null>(null)
@@ -3035,6 +3049,7 @@ function App() {
     e.stopPropagation()
     const pointer = clipPointerSelectRef.current
     clipPointerSelectRef.current = null
+    if (marqueeLiveRef.current.didDrag) return
     if (!isClickGesture(dragLiveRef.current.distance)) return
     
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
@@ -3078,6 +3093,11 @@ function App() {
     const clip = tracks[trackIndex]?.clips.find(c => c.id === clipId)
     if (!clip) return
 
+    if (isMarqueeModifier(e)) {
+      startMarqueeRef.current(e, { fromClip: true })
+      return
+    }
+
     const applied = applyClipPointerSelect(selectedClipIdsRef.current, clipId, e)
     clipPointerSelectRef.current = { clipId, action: applied.action }
     const selected = applied.next
@@ -3092,7 +3112,7 @@ function App() {
     const startY = e.clientY
     const startOffset = clip.offsetSeconds
     const startTrack = trackIndex
-    const startedWithAlt = e.altKey
+    const startedWithDuplicate = isDuplicateDragModifier(e)
     const zoom = verticalZoom
     const snapOn = snapEnabled
     const magnetOn = magnetEnabledRef.current
@@ -3133,7 +3153,7 @@ function App() {
     dragLiveRef.current = {
       tempOffset: startOffset,
       tempTrack: startTrack,
-      threshold: startedWithAlt,
+      threshold: startedWithDuplicate,
       distance: 0,
       timeDelta: 0,
       trackDelta: 0,
@@ -3275,7 +3295,7 @@ function App() {
 
       let working = currentTracks
       let workingSelected = selected
-      if (startedWithAlt && live.distance >= 5) {
+      if (startedWithDuplicate && live.distance >= 5) {
         working = currentTracks.map(track => ({ ...track, clips: [...track.clips] }))
         workingSelected = new Set(selected)
         selected.forEach(id => {
@@ -3444,6 +3464,18 @@ function App() {
     const ids = clipIdsOnTracks(trackStatesRef.current, [trackIndex])
     setSelectedClipIds((prev) => mergeSelection(prev, ids, mode))
     setSelectedTrack(trackIndex)
+  }
+
+  const handleSelectFromHereToEnd = (trackIndex: number, clipId: string) => {
+    const clip = trackStatesRef.current[trackIndex]?.clips.find((c) => c.id === clipId)
+    if (!clip) return
+    const ids = clipsFromHereToEnd(trackStatesRef.current, clip.offsetSeconds)
+    setSelectedClipIds(new Set(ids))
+  }
+
+  const handleSelectAtTimeAllTracks = (time: number) => {
+    const ids = clipsOverlappingTime(trackStatesRef.current, time)
+    setSelectedClipIds(new Set(ids))
   }
 
   const handleAlignSelectedStarts = () => {
@@ -4791,6 +4823,10 @@ function App() {
   const handleTrackReorderMouseDown = (e: React.MouseEvent, trackIndex: number) => {
     if (e.button !== 0) return
     if (renamingTrackRef.current === trackIndex) return
+    if (isMarqueeModifier(e)) {
+      startMarqueeRef.current(e)
+      return
+    }
     e.preventDefault()
     const from = trackIndex
     const originY = e.clientY
@@ -5035,50 +5071,79 @@ function App() {
     setLoopHoverHit(hitTestLoop(e.clientX, rect.left, rect.width, layoutMax, start, end))
   }
 
-  const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return
-    const target = e.target as HTMLElement
-    if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
-
+  const startMarquee = (
+    e: { clientX: number; clientY: number; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean; button?: number; preventDefault?: () => void },
+    opts?: { fromClip?: boolean }
+  ) => {
+    if (e.button != null && e.button !== 0) return
     const scroller = lanesColumnRef.current?.querySelector('.lanes-scroll-content') as HTMLElement | null
-    const startX = e.clientX
-    const startY = e.clientY
+    if (!scroller) return
+    if (!opts?.fromClip) e.preventDefault?.()
+
+    const origin = contentPointFromClient(scroller, e.clientX, e.clientY)
     marqueeLiveRef.current = {
       active: true,
       didDrag: false,
-      x0: startX,
-      y0: startY,
-      x1: startX,
-      y1: startY,
+      x0: origin.x,
+      y0: origin.y,
+      x1: origin.x,
+      y1: origin.y,
+      pointerX: e.clientX,
+      pointerY: e.clientY,
       additive: e.shiftKey,
-      toggle: e.ctrlKey || e.metaKey
+      toggle: e.ctrlKey || e.metaKey,
+      fromClip: !!opts?.fromClip
+    }
+
+    const stopScrollTick = () => {
+      if (marqueeScrollRafRef.current != null) {
+        cancelAnimationFrame(marqueeScrollRafRef.current)
+        marqueeScrollRafRef.current = null
+      }
     }
 
     const updateBox = () => {
       const live = marqueeLiveRef.current
-      if (!scroller || !live.active || isClickGesture(Math.hypot(live.x1 - live.x0, live.y1 - live.y0))) {
+      if (!live.active || isClickGesture(Math.hypot(live.x1 - live.x0, live.y1 - live.y0))) {
         setMarqueeBox(null)
         return
       }
-      const sr = scroller.getBoundingClientRect()
-      const left = Math.min(live.x0, live.x1) - sr.left
-      const top = Math.min(live.y0, live.y1) - sr.top
       setMarqueeBox({
-        left,
-        top,
+        left: Math.min(live.x0, live.x1) - scroller.scrollLeft,
+        top: Math.min(live.y0, live.y1) - scroller.scrollTop,
         width: Math.abs(live.x1 - live.x0),
         height: Math.abs(live.y1 - live.y0)
       })
     }
 
+    const applyPointer = (clientX: number, clientY: number) => {
+      const live = marqueeLiveRef.current
+      live.pointerX = clientX
+      live.pointerY = clientY
+      const next = contentPointFromClient(scroller, clientX, clientY)
+      live.x1 = next.x
+      live.y1 = next.y
+    }
+
+    const tickScroll = () => {
+      marqueeScrollRafRef.current = null
+      const live = marqueeLiveRef.current
+      if (!live.active) return
+      const delta = marqueeEdgeScrollDelta(scroller.getBoundingClientRect(), live.pointerX, live.pointerY)
+      if (delta.dx || delta.dy) {
+        scroller.scrollLeft += delta.dx
+        scroller.scrollTop += delta.dy
+        if (delta.dy) syncVerticalScroll('lanes')
+      }
+      applyPointer(live.pointerX, live.pointerY)
+      updateBox()
+      marqueeScrollRafRef.current = requestAnimationFrame(tickScroll)
+    }
+
     const onMove = (ev: MouseEvent) => {
-      marqueeLiveRef.current.x1 = ev.clientX
-      marqueeLiveRef.current.y1 = ev.clientY
-      if (dragRafRef.current == null) {
-        dragRafRef.current = requestAnimationFrame(() => {
-          dragRafRef.current = null
-          updateBox()
-        })
+      applyPointer(ev.clientX, ev.clientY)
+      if (marqueeScrollRafRef.current == null) {
+        marqueeScrollRafRef.current = requestAnimationFrame(tickScroll)
       }
     }
 
@@ -5086,21 +5151,21 @@ function App() {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
       document.body.style.userSelect = ''
+      stopScrollTick()
       if (dragRafRef.current != null) {
         cancelAnimationFrame(dragRafRef.current)
         dragRafRef.current = null
       }
+      applyPointer(ev.clientX, ev.clientY)
       const live = marqueeLiveRef.current
-      live.x1 = ev.clientX
-      live.y1 = ev.clientY
       live.active = false
       setMarqueeBox(null)
       const distance = Math.hypot(live.x1 - live.x0, live.y1 - live.y0)
       const lane = (ev.target as HTMLElement | null)?.closest?.('.track-content') as HTMLElement | null
-        ?? (e.currentTarget as HTMLElement)
 
       if (isClickGesture(distance)) {
         live.didDrag = false
+        if (live.fromClip) return
         const upOnClip = Boolean((ev.target as HTMLElement | null)?.closest?.('.clip-wrapper'))
         if (upOnClip) return
         if (lane) {
@@ -5115,7 +5180,13 @@ function App() {
       }
 
       live.didDrag = true
-      const band = marqueeClientRect(live.x0, live.y0, live.x1, live.y1)
+      const sr = scroller.getBoundingClientRect()
+      const band = marqueeClientRect(
+        sr.left + live.x0 - scroller.scrollLeft,
+        sr.top + live.y0 - scroller.scrollTop,
+        sr.left + live.x1 - scroller.scrollLeft,
+        sr.top + live.y1 - scroller.scrollTop
+      )
       const hit: string[] = []
       document.querySelectorAll('.clip-wrapper[data-clip-id]').forEach(node => {
         const el = node as HTMLElement
@@ -5131,6 +5202,17 @@ function App() {
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
     document.body.style.userSelect = 'none'
+    if (marqueeScrollRafRef.current == null) {
+      marqueeScrollRafRef.current = requestAnimationFrame(tickScroll)
+    }
+  }
+  startMarqueeRef.current = startMarquee
+
+  const handleTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    const target = e.target as HTMLElement
+    if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker')) return
+    startMarquee(e)
   }
 
   const clearLoop = () => {
@@ -5339,6 +5421,15 @@ function App() {
       select: (ids: string[], mode: 'replace' | 'add' | 'toggle' = 'replace') => {
         setSelectedClipIds((prev) => mergeSelection(prev, ids, mode))
       },
+      selectFromHereToEnd: (clipId: string) => {
+        for (let ti = 0; ti < trackStatesRef.current.length; ti++) {
+          if (trackStatesRef.current[ti].clips.some((c) => c.id === clipId)) {
+            handleSelectFromHereToEnd(ti, clipId)
+            return
+          }
+        }
+      },
+      selectAtTime: (time: number) => handleSelectAtTimeAllTracks(time),
       applyDelta: (seconds: number) => applySelectionTimeDelta(seconds),
       getMagnet: () => magnetEnabledRef.current,
       setMagnet: (on: boolean) => setMagnetEnabled(!!on),
@@ -6449,10 +6540,17 @@ function App() {
             className="lanes-scroll-content"
             ref={lanesScrollRef}
             onScroll={() => syncVerticalScroll('lanes')}
+            onMouseDown={(e) => {
+              const target = e.target as HTMLElement
+              if (target.closest('.clip-wrapper, .clip-trim-handle, .loop-marker, .bar-ruler, .chord-ruler, .track-content, .lanes-bottom-pad, .marquee-rect')) return
+              if (e.button !== 0) return
+              startMarquee(e)
+            }}
           >
           {marqueeBox && (
             <div
               className="marquee-rect"
+              data-testid="marquee-rect"
               style={{
                 left: marqueeBox.left,
                 top: marqueeBox.top,
@@ -6582,6 +6680,11 @@ function App() {
             )
             })
           })()}
+            <div
+              className="lanes-bottom-pad"
+              data-testid="lanes-bottom-pad"
+              onMouseDown={handleTrackMouseDown}
+            />
             <div className="playhead" ref={playheadElRef} aria-hidden="true">
               <span className="playhead-cap" />
             </div>
@@ -6637,6 +6740,7 @@ function App() {
                 <ContextMenuItem
                   icon={<IconList />}
                   label="Seleccionar todos los clips de la pista"
+                  testId="select-track-clips"
                   disabled={isMetronomeTrack(trackStates[contextMenu.trackIndex]) || (trackStates[contextMenu.trackIndex]?.clips.length ?? 0) === 0}
                   onClick={() => {
                     handleSelectTrackClips(contextMenu.trackIndex, 'replace')
@@ -6680,6 +6784,24 @@ function App() {
                   label="Loop a este clip"
                   onClick={() => {
                     if (contextMenu.clipId) loopThisClip(contextMenu.trackIndex, contextMenu.clipId)
+                  }}
+                />
+                <ContextMenuItem
+                  icon={<IconAlignStart />}
+                  label="Seleccionar desde aquí hasta el final"
+                  testId="select-from-here"
+                  onClick={() => {
+                    if (contextMenu.clipId) handleSelectFromHereToEnd(contextMenu.trackIndex, contextMenu.clipId)
+                    closeContextMenu()
+                  }}
+                />
+                <ContextMenuItem
+                  icon={<IconGrid />}
+                  label="Seleccionar este punto en todas las pistas"
+                  testId="select-at-time-all-tracks"
+                  onClick={() => {
+                    handleSelectAtTimeAllTracks(contextMenu.time)
+                    closeContextMenu()
                   }}
                 />
                 <ContextMenuItem icon={<IconCopyPlus />} label="Duplicar" shortcut="Ctrl+D" onClick={() => runContextMenuAction('duplicate')} />
@@ -6856,16 +6978,17 @@ function App() {
             <div>
               <h3>Edición de clips</h3>
               <ul>
-                <li>• <strong>Click derecho en un clip</strong> - Menú: Cortar, Copiar, Pegar, Dividir aquí, Ajustar latencia, Duplicar, Eliminar</li>
+                <li>• <strong>Click derecho en un clip</strong> - Menú: Cortar, Copiar, Pegar, Dividir aquí, Seleccionar desde aquí hasta el final, Seleccionar este punto en todas las pistas, Duplicar, Eliminar</li>
                 <li>• <strong>Click derecho en una pista vacía</strong> - Pegar aquí (en la posición del cursor, con snap si está activo)</li>
                 <li>• <strong>Click</strong> - Seleccionar clip y mover playhead</li>
                 <li>• <strong>Shift+Click o Cmd/Ctrl+Click</strong> - Añadir o quitar un clip de la selección (cualquier pista)</li>
-                <li>• <strong>Arrastrar en área vacía</strong> - Selección rectangular (varios tracks). Shift añade, Ctrl/Cmd alterna. El loop se dibuja solo en la regla</li>
+                <li>• <strong>Arrastrar en área vacía</strong> - Selección rectangular (varios tracks). También desde la cabecera de pista, el vacío debajo de la última pista, o Alt+arrastrar encima de un clip. Shift añade, Ctrl/Cmd alterna. El loop se dibuja solo en la regla</li>
                 <li>• <strong>Shift/Cmd+click en la cabecera</strong> - Selecciona todos los clips de esa pista. Click derecho → Seleccionar todos los clips de la pista</li>
                 <li>• <strong>Arrastrar clip</strong> - Mueve toda la selección el mismo Δt. Con varios clips solo horizontal (cada uno en su pista). El clip sigue el puntero al píxel (rAF). Snap de cuadrícula solo si Snap está ON. Imán (aparte) encaja bordes. Ninguno pasa de 0:00</li>
                 <li>• <strong>← →</strong> - Empuja la selección (un 16avo). Shift = 1 beat. Click derecho → Mover selección… / Alinear inicios / Eliminar selección</li>
                 <li>• <strong>Alt+Click en clip</strong> - Dividir en el punto clickeado</li>
-                <li>• <strong>Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px). También apaga el Imán mientras mantenés Alt</li>
+                <li>• <strong>Alt+Arrastrar</strong> - Selección rectangular (incluso encima de clips o desde la cabecera). Alt+Click sigue dividiendo. Mantener Alt durante un arrastre normal apaga el Imán</li>
+                <li>• <strong>Cmd/Ctrl+Alt+Arrastrar</strong> - Duplicar clip (después de mover 5px)</li>
                 <li>• <strong>Arrastrar borde izquierdo</strong> - Recortar desde el inicio</li>
                 <li>• <strong>Arrastrar borde derecho</strong> - Recortar desde el final</li>
                 <li>• <strong>Arrastrar archivos de audio</strong> - Soltalos en una pista para colocarlos ahí (con snap si está activo). Entre pistas se inserta una pista nueva. Fuera de una pista se crea una pista nueva al final. Varios archivos: una pista por archivo</li>

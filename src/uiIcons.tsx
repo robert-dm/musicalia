@@ -387,6 +387,7 @@ export function ContextMenuItem({
   shortcut,
   danger,
   disabled,
+  testId,
   onClick
 }: {
   icon: ReactNode
@@ -394,6 +395,7 @@ export function ContextMenuItem({
   shortcut?: string
   danger?: boolean
   disabled?: boolean
+  testId?: string
   onClick: () => void
 }) {
   return (
@@ -401,6 +403,7 @@ export function ContextMenuItem({
       type="button"
       className={`context-menu-item${danger ? ' danger' : ''}${disabled ? ' disabled' : ''}`}
       disabled={disabled}
+      data-testid={testId}
       onClick={onClick}
     >
       <span className="context-menu-icon">{icon}</span>

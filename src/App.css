@@ -635,6 +635,13 @@
   flex-direction: column;
 }
 
+.lanes-bottom-pad {
+  min-height: 88px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+}
+
 .bar-ruler {
   position: relative;
   height: 44px;

@@ -167,6 +167,85 @@ export function selectionModifier(keys: { shiftKey?: boolean; metaKey?: boolean;
   return Boolean(keys.shiftKey || keys.metaKey || keys.ctrlKey)
 }
 
+/** Alt+drag starts a marquee, including on top of clips. Cmd/Ctrl+Alt is reserved for duplicate. */
+export function isMarqueeModifier(keys: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }): boolean {
+  return Boolean(keys.altKey) && !keys.metaKey && !keys.ctrlKey
+}
+
+/** Cmd/Ctrl+Alt+drag duplicates (old Alt+drag). */
+export function isDuplicateDragModifier(keys: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }): boolean {
+  return Boolean(keys.altKey && (keys.metaKey || keys.ctrlKey))
+}
+
+export function clipsFromHereToEnd(
+  tracks: Array<{ kind?: string; clips: Array<{ id: string; offsetSeconds: number }> }>,
+  originOffset: number
+): string[] {
+  const origin = Number.isFinite(originOffset) ? originOffset : 0
+  const ids: string[] = []
+  for (const track of tracks) {
+    if (track.kind === 'metronome') continue
+    for (const clip of track.clips) {
+      if (clip.offsetSeconds + 1e-9 >= origin) ids.push(clip.id)
+    }
+  }
+  return ids
+}
+
+export function clipsOverlappingTime(
+  tracks: Array<{ kind?: string; clips: Array<{ id: string; offsetSeconds: number; duration: number }> }>,
+  time: number
+): string[] {
+  const t = Number.isFinite(time) ? time : 0
+  const ids: string[] = []
+  for (const track of tracks) {
+    if (track.kind === 'metronome') continue
+    for (const clip of track.clips) {
+      const start = clip.offsetSeconds
+      const end = start + clip.duration
+      if (start <= t + 1e-9 && t < end - 1e-12) ids.push(clip.id)
+    }
+  }
+  return ids
+}
+
+export const MARQUEE_EDGE_PX = 32
+export const MARQUEE_SCROLL_MAX = 24
+
+export function marqueeEdgeScrollDelta(
+  port: { left: number; right: number; top: number; bottom: number },
+  clientX: number,
+  clientY: number,
+  edgePx = MARQUEE_EDGE_PX,
+  maxSpeed = MARQUEE_SCROLL_MAX
+): { dx: number; dy: number } {
+  const edge = Math.max(1, edgePx)
+  const speed = (dist: number) => {
+    if (dist >= edge) return 0
+    const t = 1 - Math.max(0, dist) / edge
+    return Math.round(maxSpeed * t * t)
+  }
+  let dx = 0
+  let dy = 0
+  if (clientX >= port.right - edge) dx = speed(port.right - clientX)
+  else if (clientX <= port.left + edge) dx = -speed(clientX - port.left)
+  if (clientY >= port.bottom - edge) dy = speed(port.bottom - clientY)
+  else if (clientY <= port.top + edge) dy = -speed(clientY - port.top)
+  return { dx, dy }
+}
+
+export function contentPointFromClient(
+  scroller: { scrollLeft: number; scrollTop: number; getBoundingClientRect: () => { left: number; top: number } },
+  clientX: number,
+  clientY: number
+): { x: number; y: number } {
+  const sr = scroller.getBoundingClientRect()
+  return {
+    x: scroller.scrollLeft + (clientX - sr.left),
+    y: scroller.scrollTop + (clientY - sr.top)
+  }
+}
+
 export type ClipPointerSelectAction = 'added' | 'replaced' | 'kept'
 
 /** Pointerdown applies selection once so a following drag uses the new set. */

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useState, type MutableRefObject, type ReactNode } from 'react'
 import { RULER_HEIGHT_PX, displayLoop, rulerCursor, type LoopHit } from './loopRegion'
-import { pxPerSecond, timelineTicks, viewTimeWindow, type TimelineTick } from './timelineZoom'
+import { pxPerSecond, timelineTicks, viewTimeWindow, type MapBeatTick, type TimelineTick } from './timelineZoom'
 
 interface TimelineRulerProps {
   bars?: ReactNode
@@ -11,7 +11,7 @@ interface TimelineRulerProps {
   pulseSeconds?: number
   barSeconds?: number
   phaseSeconds?: number
-  mapBeats?: Array<{ t: number; downbeat?: boolean }>
+  mapBeats?: MapBeatTick[]
   layoutMax: number
   loopStart: number | null
   loopEnd: number | null
@@ -92,7 +92,14 @@ export function TimelineRuler({
 
   const generated = ticks.map((tick, i) => (
     tick.kind === 'bar' ? (
-      <div key={`b-${tick.t}-${i}`} className="bar-marker" style={{ left: `${(tick.t / max) * 100}%` }}>
+      <div
+        key={`b-${tick.t}-${i}`}
+        className="bar-marker"
+        data-testid={tick.label === '1' ? 'ruler-bar-1' : undefined}
+        data-bar={tick.label}
+        data-t={String(tick.t)}
+        style={{ left: `${(tick.t / max) * 100}%` }}
+      >
         {tick.label && <span className="bar-number">{tick.label}</span>}
       </div>
     ) : (

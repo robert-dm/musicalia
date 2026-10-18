@@ -37,6 +37,7 @@ assert(
 assert(firstImportOffset(false, 70) === 0, 'first song always at 0')
 assert(firstImportOffset(false, 81) === 0, 'playhead ~1:21 does not place the first song')
 assert(firstImportOffset(false, undefined) === 0, 'first song ignores missing offset')
+assert(firstImportOffset(false, 0) === 0, '0.0091b: first-song stems keep leading offset 0 / bar 1')
 assert(firstImportOffset(true, 12.5) === 12.5, 'later import keeps drop time')
 assert(firstImportOffset(true, undefined) === 0, 'later import without offset is 0')
 

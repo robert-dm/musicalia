@@ -109,10 +109,83 @@ export function tickIntervalSeconds(
   return candidates[candidates.length - 1]
 }
 
+export interface MapBeatTick {
+  t: number
+  downbeat?: boolean
+  bar?: number
+}
+
 export interface TimelineTick {
   t: number
   kind: 'bar' | 'beat' | 'sub'
   label?: string
+}
+
+const ORIGIN_ALIGN_FRACTION = 0.3
+
+function mapBeatPeriodHint(
+  beats: MapBeatTick[],
+  bpm: number,
+  pulseSeconds?: number
+): number {
+  const fromBpm = pulseSeconds && pulseSeconds > 0 ? pulseSeconds : 60 / Math.max(1, bpm)
+  if (beats.length >= 2) {
+    const dt = beats[1].t - beats[0].t
+    if (dt > 1e-6) {
+      const n = Math.max(1, Math.round(dt / fromBpm))
+      const period = dt / n
+      if (period > fromBpm * 0.45 && period < fromBpm * 1.8) return period
+    }
+  }
+  return fromBpm
+}
+
+/**
+ * Fill empty unnumbered space before the first stored beat. Default: bar 1 at t=0.
+ * If a late beat already carries bar:1 (Poner el 1 acá), keep that 1 and number backwards.
+ */
+export function expandMapBeatsToOrigin(
+  beats: MapBeatTick[],
+  periodHint: number,
+  pulsesPerBar = 4
+): MapBeatTick[] {
+  if (beats.length < 2) return beats
+  const sorted = [...beats].sort((a, b) => a.t - b.t)
+  const period = mapBeatPeriodHint(sorted, 60 / Math.max(1e-6, periodHint), periodHint)
+  if (!(period > 1e-6)) return sorted
+  const userBar1 = sorted.find((b) => b.bar === 1)
+  const pickup = userBar1 != null && userBar1.t > period * ORIGIN_ALIGN_FRACTION
+  const extra: MapBeatTick[] = []
+  if (sorted[0].t > period * ORIGIN_ALIGN_FRACTION) {
+    let t = sorted[0].t - period
+    const guard = Math.ceil(sorted[0].t / period) + 3
+    for (let i = 0; i < guard && t > period * ORIGIN_ALIGN_FRACTION; i++) {
+      extra.push({ t })
+      t -= period
+    }
+    extra.push({ t: 0 })
+    extra.reverse()
+  }
+  const all = extra.length > 0 ? [...extra, ...sorted] : sorted
+  if (extra.length === 0 && all[0].t <= period * ORIGIN_ALIGN_FRACTION) return sorted
+  const pulses = Math.max(1, pulsesPerBar)
+  if (pickup && userBar1) {
+    return all.map((b) => {
+      if (b.bar != null) return b
+      const relBeats = Math.round((b.t - userBar1.t) / period)
+      const downbeat = ((relBeats % pulses) + pulses) % pulses === 0
+      return {
+        t: b.t,
+        downbeat,
+        bar: downbeat ? Math.floor(relBeats / pulses) + 1 : undefined
+      }
+    })
+  }
+  return all.map((b, i) => ({
+    t: b.t,
+    downbeat: i % pulses === 0,
+    bar: i % pulses === 0 ? Math.floor(i / pulses) + 1 : undefined
+  }))
 }
 
 export function timelineTicks(input: {
@@ -125,7 +198,7 @@ export function timelineTicks(input: {
   pulseSeconds?: number
   barSeconds?: number
   phaseSeconds?: number
-  mapBeats?: Array<{ t: number; downbeat?: boolean }>
+  mapBeats?: MapBeatTick[]
 }): TimelineTick[] {
   const layoutMax = Math.max(0, input.layoutMax)
   if (layoutMax <= 0 || input.pxPerSec <= 0) return []
@@ -133,16 +206,19 @@ export function timelineTicks(input: {
   const end = Math.min(layoutMax, input.viewEnd)
   if (end <= start) return []
   if (input.mapBeats && input.mapBeats.length >= 2) {
+    const pulses = Math.max(1, input.beatsPerBar ?? 4)
+    const period = mapBeatPeriodHint(input.mapBeats, input.bpm, input.pulseSeconds)
+    const mapped = expandMapBeatsToOrigin(input.mapBeats, period, pulses)
     const ticks: TimelineTick[] = []
-    let barNumber = 0
-    for (const beat of input.mapBeats) {
+    let fallbackBar = 0
+    for (const beat of mapped) {
       if (beat.t < start - 1e-9 || beat.t > end + 1e-9) {
-        if (beat.downbeat && beat.t < start) barNumber++
+        if (beat.downbeat && beat.t < start && beat.bar == null) fallbackBar++
         continue
       }
       if (beat.downbeat) {
-        barNumber++
-        ticks.push({ t: beat.t, kind: 'bar', label: String(barNumber) })
+        const label = beat.bar != null ? String(beat.bar) : String(++fallbackBar)
+        ticks.push({ t: beat.t, kind: 'bar', label })
       } else {
         ticks.push({ t: beat.t, kind: 'beat' })
       }

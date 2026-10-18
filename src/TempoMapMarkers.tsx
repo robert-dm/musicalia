@@ -55,6 +55,8 @@ export function TempoMapMarkers({
             className={`tempo-marker ${down ? 'downbeat' : ''} ${beat.pinned ? 'pinned' : ''}`}
             data-testid={`tempo-marker-${i}`}
             data-beat-id={beat.id}
+            data-beat-time={String(beat.time)}
+            data-downbeat={down ? '1' : '0'}
             style={{ left: `${(beat.time / duration) * 100}%` }}
             title={`${formatBpm(local)} BPM`}
             onPointerDown={(e) => {

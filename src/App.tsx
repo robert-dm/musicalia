@@ -21,6 +21,7 @@ import {
 } from './cloudStorage'
 import {
   addBeatAt,
+  alignTempoMapToOrigin,
   hasTempoMap,
   hydrateTempoMap,
   hydrateTrackTempoMap,
@@ -371,7 +372,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0096b'
+const APP_VERSION = '0.0097b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -4381,8 +4382,9 @@ function App() {
   const applyDetectedTempoMap = (map: TempoMap) => {
     const idx = findMetronomeIndex(trackStatesRef.current)
     if (idx < 0 || !hasTempoMap(map)) return
+    const aligned = alignTempoMapToOrigin(map)
     const tracks = [...trackStatesRef.current]
-    tracks[idx] = { ...tracks[idx], tempoMap: map }
+    tracks[idx] = { ...tracks[idx], tempoMap: aligned }
     trackStatesRef.current = tracks
     setTrackStates(tracks)
     if (isPlayingRef.current) scheduleMetronome(getSongTime())
@@ -5846,6 +5848,45 @@ function App() {
         trackStatesRef.current = next
         setTrackStates(next)
         return { ids, offsets: places.map((p) => p.offset), tracks: places.map((p) => p.trackIndex) }
+      },
+      seedAtOrigin: async () => {
+        await ensureAudio()
+        const raw = nativeAudioContext(Tone.getContext().rawContext)
+        const sr = raw.sampleRate
+        const seconds = 4
+        const length = Math.max(16, Math.floor(sr * seconds))
+        const buffer = raw.createBuffer(1, length, sr)
+        const channel = buffer.getChannelData(0)
+        for (let i = 0; i < length; i++) {
+          const t = i / sr
+          const env = Math.min(1, t * 12) * Math.min(1, (seconds - t) * 4)
+          channel[i] = Math.sin(2 * Math.PI * 220 * t) * 0.45 * env
+        }
+        const target = trackStatesRef.current
+          .map((track, index) => ({ track, index }))
+          .find(({ track }) => !isMetronomeTrack(track) && track.kind !== 'drum')
+        if (!target) throw new Error('need an audio track')
+        const next = trackStatesRef.current.map((track) => ({ ...track, clips: [...track.clips] }))
+        const player = makeClipPlayer()
+        player.buffer = new Tone.ToneAudioBuffer(buffer)
+        player.loop = false
+        const dest = trackGainsRef.current[target.index]
+        if (dest) player.connect(dest)
+        const id = `clip-origin-${target.index}`
+        next[target.index].clips = [{
+          player,
+          fileName: 'On the beat',
+          isPlaying: false,
+          buffer,
+          startPosition: 0,
+          offsetSeconds: 0,
+          id,
+          sourceStart: 0,
+          duration: buffer.duration
+        }]
+        trackStatesRef.current = next
+        setTrackStates(next)
+        return { id, trackIndex: target.index, offsetSeconds: 0, duration: buffer.duration }
       },
       seedWaveform: async () => {
         await ensureAudio()

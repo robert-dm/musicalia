@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef } from 'react'
 import { clickTimesInRange, DEFAULT_BEATS_PER_BAR } from './metronomeTrack'
+import type { TempoMap } from './beatTracker'
 import {
   DEFAULT_METRONOME_METER,
   formatTimeSignature,
@@ -16,10 +17,19 @@ import {
   visibleHostRange
 } from './waveform'
 
+function tempoMapChecksum(map: TempoMap): number {
+  let hash = map.downbeatIndex * 1000 + map.beats.length
+  for (const beat of map.beats) {
+    hash = (hash * 33 + Math.round(beat.time * 10000)) % 2147483647
+  }
+  return hash
+}
+
 interface MetronomeWaveformProps {
   bpm: number
   beatsPerBar?: number
   meter?: MetronomeMeter
+  tempoMap?: TempoMap | null
   duration: number
 }
 
@@ -29,7 +39,8 @@ function drawMetronomeTicks(
   beatsPerBar: number,
   timeStart: number,
   timeEnd: number,
-  meter?: MetronomeMeter
+  meter?: MetronomeMeter,
+  tempoMap?: TempoMap | null
 ): void {
   const width = canvas.width
   const height = canvas.height
@@ -48,7 +59,7 @@ function drawMetronomeTicks(
 
   const span = timeEnd - timeStart
   if (!(span > 0)) return
-  const clicks = clickTimesInRange({ bpm, beatsPerBar, meter, start: timeStart, end: timeEnd })
+  const clicks = clickTimesInRange({ bpm, beatsPerBar, meter, tempoMap, start: timeStart, end: timeEnd })
   let lastX = -8
   for (const click of clicks) {
     const x = ((click.songTime - timeStart) / span) * width
@@ -72,6 +83,7 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
   bpm,
   beatsPerBar = DEFAULT_BEATS_PER_BAR,
   meter,
+  tempoMap,
   duration
 }: MetronomeWaveformProps) {
   const hostRef = useRef<HTMLDivElement>(null)
@@ -95,7 +107,10 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
       const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
       const tiles = tileRanges(range.cssLeft, range.cssWidth, WAVEFORM_TILE_CSS_PX)
       const meterKey = meter ? JSON.stringify(serializeMetronomeMeter(meter)) : String(beatsPerBar)
-      const key = `${bpm}:${meterKey}:${duration}:${dpr}:${cssH}:${tiles
+      const mapKey = tempoMap
+        ? `${tempoMap.downbeatIndex}:${tempoMap.beats.length}:${tempoMapChecksum(tempoMap)}`
+        : 'none'
+      const key = `${bpm}:${meterKey}:${mapKey}:${duration}:${dpr}:${cssH}:${tiles
         .map((t) => `${t.cssLeft.toFixed(1)}:${t.cssWidth.toFixed(1)}`)
         .join('|')}`
       if (key === drawnKeyRef.current) return
@@ -124,7 +139,7 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
         if (canvas.height !== bitmap.height) canvas.height = bitmap.height
         const t0 = (tile.cssLeft / hostW) * duration
         const t1 = ((tile.cssLeft + tile.cssWidth) / hostW) * duration
-        drawMetronomeTicks(canvas, bpm, beatsPerBar, t0, t1, meter)
+        drawMetronomeTicks(canvas, bpm, beatsPerBar, t0, t1, meter, tempoMap)
       })
       host.dataset.waveformDpr = String(dpr)
     }
@@ -154,7 +169,7 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
       for (const canvas of tilesRef.current) canvas.remove()
       tilesRef.current = []
     }
-  }, [bpm, beatsPerBar, duration, meter])
+  }, [bpm, beatsPerBar, duration, meter, tempoMap])
 
   return (
     <div
@@ -164,6 +179,7 @@ export const MetronomeWaveform = memo(function MetronomeWaveform({
       data-bpm={String(bpm)}
       data-beats-per-bar={String(beatsPerBar)}
       data-time-signature={formatTimeSignature(normalizeMetronomeMeter(meter ?? DEFAULT_METRONOME_METER))}
+      data-follow={meter?.followMode === 'fixed' ? 'fixed' : 'follow'}
       data-duration={String(duration)}
     />
   )

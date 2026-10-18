@@ -24,6 +24,7 @@ export interface TrackLaneDataProps {
   beatsPerBar?: number
   meter?: unknown
   meterKey?: string
+  tempoMap?: unknown
   hasClips: boolean
   isAnyClipPlaying: boolean
   height: number
@@ -68,6 +69,7 @@ export function trackLaneDataEqual(prev: TrackLaneDataProps, next: TrackLaneData
     prev.beatsPerBar === next.beatsPerBar &&
     prev.meter === next.meter &&
     prev.meterKey === next.meterKey &&
+    prev.tempoMap === next.tempoMap &&
     prev.hasClips === next.hasClips &&
     prev.isAnyClipPlaying === next.isAnyClipPlaying &&
     prev.height === next.height &&

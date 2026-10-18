@@ -23,6 +23,8 @@ const SOUND_LABELS: Record<ClickSound, string> = {
 interface MetronomeSettingsPanelProps {
   meter: MetronomeMeter
   bpm: number
+  hasTempoMap: boolean
+  localBpm?: number | null
   alignArmed: boolean
   phaseMs: number
   onPatch: (patch: Partial<MetronomeMeter>) => void
@@ -34,6 +36,8 @@ interface MetronomeSettingsPanelProps {
 export function MetronomeSettingsPanel({
   meter,
   bpm,
+  hasTempoMap,
+  localBpm,
   alignArmed,
   phaseMs,
   onPatch,
@@ -58,6 +62,37 @@ export function MetronomeSettingsPanel({
           ×
         </button>
       </div>
+
+      <section className="metro-settings-section">
+        <div className="metro-settings-label">Modo</div>
+        <div className="metro-chip-row" role="group" aria-label="Modo del metrónomo">
+          <button
+            type="button"
+            className={`metro-chip ${meter.followMode === 'fixed' ? 'active' : ''}`}
+            data-testid="tempo-mode-fixed"
+            aria-pressed={meter.followMode === 'fixed'}
+            onClick={() => onPatch({ followMode: 'fixed' })}
+          >
+            Tempo fijo
+          </button>
+          <button
+            type="button"
+            className={`metro-chip ${meter.followMode !== 'fixed' ? 'active' : ''}`}
+            data-testid="tempo-mode-follow"
+            aria-pressed={meter.followMode !== 'fixed'}
+            disabled={!hasTempoMap}
+            title={hasTempoMap ? 'El clic sigue el mapa de beats de la canción' : 'Cargá audio para crear un mapa de beats'}
+            onClick={() => onPatch({ followMode: 'follow' })}
+          >
+            Seguir la canción
+          </button>
+        </div>
+        {hasTempoMap && localBpm != null && (
+          <div className="metro-settings-hint" data-testid="local-bpm-readout">
+            Tempo local {localBpm} BPM
+          </div>
+        )}
+      </section>
 
       <section className="metro-settings-section">
         <div className="metro-settings-label">Compás</div>

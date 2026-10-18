@@ -1,3 +1,4 @@
+import { buildTempoMap } from './beatTracker'
 import { transportTimeForHit } from './drumTiming'
 import {
   canDeleteTrack,
@@ -111,6 +112,34 @@ assert(ensureMetronomeTrack(upgraded) === upgraded, 'ensure is a no-op when alre
 assert(findMetronomeIndex(upgraded) === 0, 'metronome index is 0 after upgrade')
 assert(metronomeIsOn(upgraded) === false, 'toolbar-on means track is unmuted')
 assert(metronomeIsOn([{ kind: 'metronome', mute: false }]) === true, 'unmuted track turns the toolbar on')
+
+const driftMap = buildTempoMap([0, 0.372, 0.76, 1.16], 156, 2)
+const followClicks = clickTimesInRange({
+  bpm: 120,
+  meter: { followMode: 'follow' },
+  tempoMap: driftMap,
+  end: 1
+})
+assert(followClicks.map((c) => c.songTime).join(',') === '0,0.372,0.76', 'Seguir la canción uses beat-grid times')
+const fixedOverMap = clickTimesInRange({
+  bpm: 120,
+  meter: { followMode: 'fixed' },
+  tempoMap: driftMap,
+  end: 1
+})
+assert(fixedOverMap.map((c) => c.songTime).join(',') === '0,0.5', 'Tempo fijo ignores the beat grid')
+
+const followVel = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: { followMode: 'follow' },
+  tempoMap: driftMap,
+  songTime: 0,
+  playOriginSong: 0,
+  tempoRate: 0.5,
+  songEnd: 0.4
+})
+assert(followVel.length === 2 && followVel[1].songTime === 0.372, 'Vel does not move song-time beat grid')
+assert(Math.abs(followVel[1].transportTime - 0.372 / 0.5) < 1e-9, 'Vel 0.5x stretches follow-mode transport times')
 
 assert(effectiveMetronomeGain(0.7, false) === 0.7, 'unmuted metro gain is volume')
 assert(effectiveMetronomeGain(0.7, true) === 0, 'mute silences metro')

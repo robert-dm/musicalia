@@ -11,6 +11,7 @@ interface TimelineRulerProps {
   pulseSeconds?: number
   barSeconds?: number
   phaseSeconds?: number
+  mapBeats?: Array<{ t: number; downbeat?: boolean }>
   layoutMax: number
   loopStart: number | null
   loopEnd: number | null
@@ -33,6 +34,7 @@ export function TimelineRuler({
   pulseSeconds,
   barSeconds,
   phaseSeconds = 0,
+  mapBeats,
   layoutMax,
   loopStart,
   loopEnd,
@@ -73,7 +75,8 @@ export function TimelineRuler({
         beatsPerBar,
         pulseSeconds,
         barSeconds,
-        phaseSeconds
+        phaseSeconds,
+        mapBeats
       }))
     }
     update()
@@ -85,7 +88,7 @@ export function TimelineRuler({
       scroller.removeEventListener('scroll', update)
       ro.disconnect()
     }
-  }, [scrollerRef, zoom, bpm, beatsPerBar, pulseSeconds, barSeconds, phaseSeconds, max])
+  }, [scrollerRef, zoom, bpm, beatsPerBar, pulseSeconds, barSeconds, phaseSeconds, mapBeats, max])
 
   const generated = ticks.map((tick, i) => (
     tick.kind === 'bar' ? (

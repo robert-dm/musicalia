@@ -101,6 +101,23 @@ const shifted = timelineTicks({
 })
 assert(shifted.some((t) => t.kind === 'bar' && Math.abs(t.t - 0.12) < 1e-9), 'ruler follows metronome phase')
 
+const mapped = timelineTicks({
+  layoutMax: 4,
+  pxPerSec: 80,
+  viewStart: 0,
+  viewEnd: 4,
+  bpm: 120,
+  mapBeats: [
+    { t: 0, downbeat: true },
+    { t: 0.4 },
+    { t: 0.85 },
+    { t: 1.3, downbeat: true }
+  ]
+})
+assert(mapped[0]?.kind === 'bar' && mapped[0].t === 0, 'follow-mode ruler uses the first downbeat')
+assert(mapped.some((t) => t.kind === 'beat' && t.t === 0.4), 'follow-mode ruler shows in-between beats')
+assert(mapped.some((t) => t.kind === 'bar' && t.t === 1.3 && t.label === '2'), 'follow-mode ruler numbers bars from the map')
+
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)
   process.exit(1)

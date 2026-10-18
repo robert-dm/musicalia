@@ -5,6 +5,7 @@ import {
   type MetronomeClick
 } from './metronomeTrack'
 import type { ClickSound, MetronomeMeter } from './metronomeMeter'
+import type { TempoMap } from './beatTracker'
 
 export interface ScheduledMetronomeEvent extends MetronomeClick {
   transportTime: number
@@ -66,6 +67,7 @@ export class MetronomeEngine {
     bpm: number
     beatsPerBar?: number
     meter?: Partial<MetronomeMeter> | null
+    tempoMap?: TempoMap | null
     clickSound?: ClickSound
     songTime: number
     playOriginSong: number
@@ -85,6 +87,7 @@ export class MetronomeEngine {
       bpm: args.bpm,
       beatsPerBar: args.beatsPerBar,
       meter: args.meter,
+      tempoMap: args.tempoMap,
       songTime: args.songTime,
       playOriginSong: args.playOriginSong,
       tempoRate: args.tempoRate,

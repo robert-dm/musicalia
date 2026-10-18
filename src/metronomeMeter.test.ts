@@ -87,6 +87,8 @@ const custom = hydrateMetronomeMeter({
 const saved = serializeMetronomeMeter(custom)
 assert(saved.numerator === 5 && saved.denominator === 4 && saved.clickSound === 'rim', 'persists custom meter')
 assert(saved.subdivision === 'triplets' && saved.accentDownbeat === false, 'persists subdivision and accent')
+assert(saved.followMode === 'follow', 'missing followMode hydrates to Seguir la canción')
+assert(hydrateMetronomeMeter({ followMode: 'fixed' }).followMode === 'fixed', 'Tempo fijo persists')
 assert(hydrateMetronomeMeter(undefined).numerator === 4, 'missing meter hydrates 4/4')
 
 const trackJson = { kind: 'metronome', metronome: saved }

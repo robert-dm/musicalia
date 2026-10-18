@@ -3,6 +3,7 @@ import { clampBpm, secondsPerBeatSafe } from './tempoMath'
 export type CompoundPulse = 'dotted-quarter' | 'eighth'
 export type MetronomeSubdivision = 'none' | 'eighths' | 'triplets' | 'sixteenths'
 export type ClickSound = 'wood' | 'beep' | 'rim'
+export type TempoFollowMode = 'fixed' | 'follow'
 
 export interface MetronomeMeter {
   numerator: number
@@ -12,6 +13,7 @@ export interface MetronomeMeter {
   accentDownbeat: boolean
   subdivision: MetronomeSubdivision
   clickSound: ClickSound
+  followMode: TempoFollowMode
 }
 
 export const TIME_SIGNATURE_PRESETS: ReadonlyArray<{ numerator: number; denominator: number; label: string }> = [
@@ -34,7 +36,8 @@ export const DEFAULT_METRONOME_METER: MetronomeMeter = {
   phaseSeconds: 0,
   accentDownbeat: true,
   subdivision: 'none',
-  clickSound: 'beep'
+  clickSound: 'beep',
+  followMode: 'follow'
 }
 
 const DENOMS = new Set([1, 2, 4, 8, 16])
@@ -66,6 +69,7 @@ export function normalizeMetronomeMeter(raw?: Partial<MetronomeMeter> | null): M
   const clickSound: ClickSound = CLICK_SOUNDS.includes(raw?.clickSound as ClickSound)
     ? (raw!.clickSound as ClickSound)
     : 'beep'
+  const followMode: TempoFollowMode = raw?.followMode === 'fixed' ? 'fixed' : 'follow'
   return {
     numerator,
     denominator,
@@ -73,7 +77,8 @@ export function normalizeMetronomeMeter(raw?: Partial<MetronomeMeter> | null): M
     phaseSeconds,
     accentDownbeat,
     subdivision,
-    clickSound
+    clickSound,
+    followMode
   }
 }
 

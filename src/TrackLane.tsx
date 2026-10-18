@@ -4,6 +4,9 @@ import { MetronomeWaveform } from './MetronomeWaveform'
 import { displayLoop } from './loopRegion'
 import { DEFAULT_BEATS_PER_BAR } from './metronomeTrack'
 import type { MetronomeMeter } from './metronomeMeter'
+import { pulsesPerBar } from './metronomeMeter'
+import { isFollowEnabled, type TempoMap } from './beatTracker'
+import { TempoMapMarkers } from './TempoMapMarkers'
 import { laneClipDataEqual, trackLaneDataEqual } from './trackRenderMemo'
 
 export interface LaneClip {
@@ -24,6 +27,12 @@ interface TrackLaneProps {
   bpm?: number
   beatsPerBar?: number
   meter?: MetronomeMeter
+  tempoMap?: TempoMap | null
+  onTempoMove?: (id: string, time: number) => void
+  onTempoAdd?: (time: number) => void
+  onTempoRemove?: (id: string) => void
+  onTempoDownbeat?: (id: string) => void
+  onTempoGestureStart?: () => void
   hasClips: boolean
   isAnyClipPlaying: boolean
   height: number
@@ -142,6 +151,12 @@ export const TrackLane = memo(function TrackLane({
   bpm = 120,
   beatsPerBar = DEFAULT_BEATS_PER_BAR,
   meter,
+  tempoMap,
+  onTempoMove,
+  onTempoAdd,
+  onTempoRemove,
+  onTempoDownbeat,
+  onTempoGestureStart,
   hasClips,
   isAnyClipPlaying,
   height,
@@ -181,7 +196,28 @@ export const TrackLane = memo(function TrackLane({
       onContextMenu={(e) => onContextMenuTrack(e, trackIndex, null)}
     >
       {trackKind === 'metronome' ? (
-        <MetronomeWaveform bpm={bpm} beatsPerBar={beatsPerBar} meter={meter} duration={maxDur} />
+        <>
+          <MetronomeWaveform
+            bpm={bpm}
+            beatsPerBar={beatsPerBar}
+            meter={meter}
+            tempoMap={tempoMap}
+            duration={maxDur}
+          />
+          {tempoMap && meter && onTempoMove && onTempoAdd && onTempoRemove && onTempoDownbeat && (
+            <TempoMapMarkers
+              map={tempoMap}
+              pulsesPerBar={pulsesPerBar(meter, bpm)}
+              duration={maxDur}
+              follow={isFollowEnabled(meter, tempoMap)}
+              onGestureStart={onTempoGestureStart}
+              onMove={onTempoMove}
+              onAdd={onTempoAdd}
+              onRemove={onTempoRemove}
+              onSetDownbeat={onTempoDownbeat}
+            />
+          )}
+        </>
       ) : hasClips ? (
         <div className="clip-region">
           {clips.map((clip) => (

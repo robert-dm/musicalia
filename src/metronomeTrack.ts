@@ -10,6 +10,7 @@ import {
   type ClickSound,
   type MetronomeMeter
 } from './metronomeMeter'
+import { followClicksInRange, hasTempoMap, isFollowEnabled, type TempoMap } from './beatTracker'
 import { secondsPerBeatSafe } from './tempoMath'
 
 export const METRONOME_TRACK_NAME = 'Metrónomo'
@@ -102,12 +103,21 @@ export function clickTimesInRange(args: {
   bpm: number
   beatsPerBar?: number
   meter?: Partial<MetronomeMeter> | null
+  tempoMap?: TempoMap | null
   start?: number
   end: number
 }): MetronomeClick[] {
   const meter = args.meter
     ? normalizeMetronomeMeter(args.meter)
     : meterFromBeatsPerBar(args.beatsPerBar)
+  if (isFollowEnabled(meter, args.tempoMap) && hasTempoMap(args.tempoMap)) {
+    return followClicksInRange({
+      map: args.tempoMap,
+      meter,
+      start: args.start,
+      end: args.end
+    })
+  }
   return metronomeClicksInRange({
     bpm: args.bpm,
     meter,
@@ -120,6 +130,7 @@ export function scheduledMetronomeClicks(args: {
   bpm: number
   beatsPerBar?: number
   meter?: Partial<MetronomeMeter> | null
+  tempoMap?: TempoMap | null
   songTime: number
   playOriginSong: number
   tempoRate: number
@@ -138,6 +149,7 @@ export function scheduledMetronomeClicks(args: {
     bpm: args.bpm,
     beatsPerBar: args.beatsPerBar,
     meter: args.meter,
+    tempoMap: args.tempoMap,
     start: windowStart,
     end: windowEnd
   }).map((click) => ({
@@ -226,6 +238,7 @@ export function renderMetronomeClicksOffline(
     bpm: number
     beatsPerBar?: number
     meter?: Partial<MetronomeMeter> | null
+    tempoMap?: TempoMap | null
     songEnd: number
     countInSeconds?: number
     volume?: number
@@ -239,6 +252,7 @@ export function renderMetronomeClicksOffline(
     bpm: args.bpm,
     beatsPerBar: args.beatsPerBar,
     meter,
+    tempoMap: args.tempoMap,
     start: 0,
     end: args.songEnd
   })

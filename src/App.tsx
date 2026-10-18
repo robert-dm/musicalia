@@ -19,7 +19,21 @@ import {
   hasAuth,
   type User
 } from './cloudStorage'
-import { detectBPM } from './bpmDetector'
+import {
+  addBeatAt,
+  hasTempoMap,
+  hydrateTrackTempoMap,
+  isFollowEnabled,
+  localBpmAt,
+  moveBeatTime,
+  removeBeat,
+  rulerMapBeats,
+  serializeTrackTempoMap,
+  setDownbeatAt,
+  setDownbeatAtTime,
+  type TempoMap
+} from './beatTracker'
+import { bpmFromEnvelope, envelopeForMix, trackBeatsInWorker } from './beatTrackerHost'
 import {
   appendTap,
   clampBpm,
@@ -405,6 +419,7 @@ interface TrackState {
   kind?: 'audio' | 'drum' | 'metronome'
   drum?: DrumKit
   metronome?: MetronomeMeter
+  tempoMap?: TempoMap
 }
 
 function App() {
@@ -690,6 +705,7 @@ function App() {
         drum: t.drum,
         ...serializeTrackAudio(t),
         ...serializeTrackMetronome(t),
+        ...serializeTrackTempoMap(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -726,6 +742,7 @@ function App() {
         kind: t.kind,
         ...serializeTrackAudio(t),
         ...serializeTrackMetronome(t),
+        ...serializeTrackTempoMap(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -760,6 +777,7 @@ function App() {
         kind: t.kind,
         ...serializeTrackAudio(t),
         ...serializeTrackMetronome(t),
+        ...serializeTrackTempoMap(t),
         clips: t.clips.map(c => ({
           fileName: c.fileName,
           startPosition: c.startPosition,
@@ -845,6 +863,7 @@ function App() {
         drum: t.drum,
         ...hydrateTrackAudio(t),
         ...hydrateTrackMetronome(t, trackKindOf(t.kind)),
+        ...hydrateTrackTempoMap(t, trackKindOf(t.kind)),
         clips: clips.filter(c => c !== null)
       }
     }))
@@ -1054,6 +1073,7 @@ function App() {
       bpm: bpmRef.current,
       beatsPerBar: pulsesPerBar(meter, bpmRef.current),
       meter,
+      tempoMap: track?.tempoMap,
       clickSound: meter.clickSound,
       songTime,
       playOriginSong: playOriginSongRef.current,
@@ -1168,6 +1188,7 @@ function App() {
           drum: projectDrumPayload(t.drum, i),
           ...serializeTrackAudio(t),
           ...serializeTrackMetronome(t),
+          ...serializeTrackTempoMap(t),
           clips: savedClips
         }
       }))
@@ -1363,6 +1384,7 @@ function App() {
           drum,
           ...hydrateTrackAudio(t),
           ...hydrateTrackMetronome(t, trackKindOf(t.kind)),
+          ...hydrateTrackTempoMap(t, trackKindOf(t.kind)),
           clips: loadedClips.filter(c => c !== null) as Clip[]
         }
       }))
@@ -1557,6 +1579,7 @@ function App() {
         drum: projectDrumPayload(t.drum, trackIdx),
         ...serializeTrackAudio(t),
         ...serializeTrackMetronome(t),
+        ...serializeTrackTempoMap(t),
         clips: t.clips.map((clip, clipIdx) => projectClipPayload(clip, trackIdx, clipIdx))
       }))
     }
@@ -1818,6 +1841,7 @@ function App() {
           drum,
           ...hydrateTrackAudio(t),
           ...hydrateTrackMetronome(t, trackKindOf(t.kind)),
+          ...hydrateTrackTempoMap(t, trackKindOf(t.kind)),
           clips: clips.filter(c => c !== null) as Clip[]
         }
       }))
@@ -2038,6 +2062,7 @@ function App() {
               bpm,
               beatsPerBar: pulsesPerBar(exportMeter, bpm),
               meter: exportMeter,
+              tempoMap: track.tempoMap,
               songEnd: maxDuration,
               countInSeconds,
               volume: track.volume
@@ -2105,6 +2130,7 @@ function App() {
               bpm,
               beatsPerBar: pulsesPerBar(exportMeter, bpm),
               meter: exportMeter,
+              tempoMap: track.tempoMap,
               songEnd: maxDuration,
               countInSeconds,
               volume: track.volume
@@ -3938,6 +3964,35 @@ function App() {
     if (isPlayingRef.current) scheduleMetronome(getSongTime())
   }
 
+  const patchTempoMap = (updater: (map: TempoMap) => TempoMap, opts?: { undo?: boolean }) => {
+    const idx = findMetronomeIndex(trackStatesRef.current)
+    if (idx < 0) return
+    const current = trackStatesRef.current[idx].tempoMap
+    if (!current) return
+    if (opts?.undo !== false) saveUndo()
+    const tracks = [...trackStatesRef.current]
+    tracks[idx] = { ...tracks[idx], tempoMap: updater(current) }
+    trackStatesRef.current = tracks
+    setTrackStates(tracks)
+    if (isPlayingRef.current) scheduleMetronome(getSongTime())
+  }
+
+  const handleTempoMove = (id: string, time: number) => {
+    patchTempoMap((map) => moveBeatTime(map, id, time), { undo: false })
+  }
+
+  const handleTempoAdd = (time: number) => {
+    patchTempoMap((map) => addBeatAt(map, time))
+  }
+
+  const handleTempoRemove = (id: string) => {
+    patchTempoMap((map) => removeBeat(map, id))
+  }
+
+  const handleTempoDownbeat = (id: string) => {
+    patchTempoMap((map) => setDownbeatAt(map, id))
+  }
+
   const setMetronomePhaseMs = (ms: number) => {
     const meter = currentMetronomeMeter()
     const bar = barDurationSeconds(bpmRef.current, meter)
@@ -3945,7 +4000,17 @@ function App() {
   }
 
   const alignMetronomeAt = (timeSeconds: number) => {
-    const meter = currentMetronomeMeter()
+    const idx = findMetronomeIndex(trackStatesRef.current)
+    const track = idx >= 0 ? trackStatesRef.current[idx] : undefined
+    const meter = meterOf(track)
+    if (isFollowEnabled(meter, track?.tempoMap) && track?.tempoMap) {
+      patchTempoMap((map) => setDownbeatAtTime(map, timeSeconds))
+      setMetroAlignArmed(false)
+      setToastMessage('1 alineado al mapa de tempo')
+      setShowToast(true)
+      window.setTimeout(() => setShowToast(false), 2500)
+      return
+    }
     const phase = phaseFromDownbeat(timeSeconds, bpmRef.current, meter)
     patchMetronomeMeter({ phaseSeconds: phase })
     setMetroAlignArmed(false)
@@ -4312,30 +4377,46 @@ function App() {
     setTrackStates(newTrackStates)
   }
 
+  const applyDetectedTempoMap = (map: TempoMap) => {
+    const idx = findMetronomeIndex(trackStatesRef.current)
+    if (idx < 0 || !hasTempoMap(map)) return
+    const tracks = [...trackStatesRef.current]
+    tracks[idx] = { ...tracks[idx], tempoMap: map }
+    trackStatesRef.current = tracks
+    setTrackStates(tracks)
+    if (isPlayingRef.current) scheduleMetronome(getSongTime())
+  }
+
   const maybeApplyDetectedBpm = async (buffer: AudioBuffer) => {
     const hasExistingAudio = sessionHasAudio(trackStatesRef.current)
     if (hasExistingAudio) return
-    const bpmResult = await detectBPM(buffer)
+    const env = envelopeForMix(buffer)
+    const detectedBpm = env ? bpmFromEnvelope(env) : null
     if (!shouldApplyDetectedBpm({
       hasExistingAudio,
       bpmManuallySet: bpmManuallySetRef.current,
-      detectedBpm: bpmResult.bpm
+      detectedBpm
     })) {
-      if (!bpmResult.bpm && !bpmManuallySetRef.current) {
+      if (!detectedBpm && !bpmManuallySetRef.current) {
         console.log('[BPM] Detection failed, keeping current BPM')
         setToastMessage('No se pudo detectar el tempo')
         setShowToast(true)
         setTimeout(() => setShowToast(false), 3000)
       }
-      return
+    } else {
+      console.log('[BPM] Detected:', detectedBpm)
+      const detected = clampBpm(detectedBpm as number)
+      setBpm(detected)
+      Tone.getTransport().bpm.value = effectiveBpm(detected, tempoRateRef.current)
+      setToastMessage(`Tempo detectado: ${formatBpm(detected)} BPM`)
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 4000)
     }
-    console.log('[BPM] Detected:', bpmResult.bpm)
-    const detected = clampBpm(bpmResult.bpm as number)
-    setBpm(detected)
-    Tone.getTransport().bpm.value = effectiveBpm(detected, tempoRateRef.current)
-    setToastMessage(`Tempo detectado: ${formatBpm(detected)} BPM`)
-    setShowToast(true)
-    setTimeout(() => setShowToast(false), 4000)
+    const bpmHint = detectedBpm ?? bpmRef.current
+    if (env && bpmHint > 0) {
+      const map = await trackBeatsInWorker(env, bpmHint)
+      if (map) applyDetectedTempoMap(map)
+    }
   }
 
   const processStemSeparation = async (
@@ -5554,6 +5635,7 @@ function App() {
             drum: projectDrumPayload(t.drum, i),
             ...serializeTrackAudio(t),
             ...serializeTrackMetronome(t),
+            ...serializeTrackTempoMap(t),
             clips: savedClips
           }
         }))
@@ -5594,7 +5676,10 @@ function App() {
           destinationIsTrack: metronomeEngineRef.current.destinationIsTrack,
           scheduled: lastScheduledMetronomeEvents.slice(),
           bpm: bpmRef.current,
-          meter: meterOf(track)
+          meter: meterOf(track),
+          followMode: meterOf(track).followMode,
+          tempoMapBeats: track?.tempoMap?.beats.length ?? 0,
+          localBpm: track?.tempoMap ? localBpmAt(track.tempoMap, playheadPositionRef.current) : null
         }
       },
       unmute: () => {
@@ -6897,6 +6982,11 @@ function App() {
             pulseSeconds={pulseDurationSeconds(bpm, currentMetronomeMeter())}
             barSeconds={barDurationSeconds(bpm, currentMetronomeMeter())}
             phaseSeconds={currentMetronomeMeter().phaseSeconds}
+            mapBeats={rulerMapBeats(
+              trackStates[findMetronomeIndex(trackStates)]?.tempoMap,
+              currentMetronomeMeter(),
+              bpm
+            )}
             layoutMax={getLayoutMax()}
             loopStart={loopStart}
             loopEnd={loopEnd}
@@ -6923,6 +7013,12 @@ function App() {
               bpm={bpm}
               beatsPerBar={pulsesPerBar(meterOf(trackState), bpm)}
               meter={trackState.kind === 'metronome' ? meterOf(trackState) : undefined}
+              tempoMap={trackState.kind === 'metronome' ? trackState.tempoMap : undefined}
+              onTempoMove={handleTempoMove}
+              onTempoAdd={handleTempoAdd}
+              onTempoRemove={handleTempoRemove}
+              onTempoDownbeat={handleTempoDownbeat}
+              onTempoGestureStart={saveUndo}
               hasClips={trackState.clips.length > 0}
               isAnyClipPlaying={trackState.clips.some(c => c.isPlaying)}
               height={88 * verticalZoom}
@@ -7337,6 +7433,11 @@ function App() {
           <MetronomeSettingsPanel
             meter={currentMetronomeMeter()}
             bpm={bpm}
+            hasTempoMap={hasTempoMap(trackStates[findMetronomeIndex(trackStates)]?.tempoMap)}
+            localBpm={(() => {
+              const map = trackStates[findMetronomeIndex(trackStates)]?.tempoMap
+              return map ? localBpmAt(map, playheadPosition) : null
+            })()}
             alignArmed={metroAlignArmed}
             phaseMs={Math.round(wrapPhase(currentMetronomeMeter().phaseSeconds, barDurationSeconds(bpm, currentMetronomeMeter())) * 1000)}
             onPatch={patchMetronomeMeter}
@@ -7409,7 +7510,7 @@ function App() {
                 <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
                 <li>• <strong>P (Practicar encima)</strong> - Silencia ese stem y deja el resto sonando para tocar o cantar encima. El botón del transporte usa la pista seleccionada</li>
                 <li>• <strong>Aislar</strong> - Oís SOLO esa pista (para tocar encima). Mute (M) silencia una. Solo (S) puede dejar varias. Una pista nueva se oye también. Pulsá de nuevo para oír todas. {METRONOME_AISLAR_RULE}</li>
-                <li>• <strong>Metrónomo</strong> - Pista fija «Metrónomo» (arriba, no se borra ni se renombra). Sale muteada. El botón del toolbar es el mismo Mute. El clic sigue el BPM, el compás (acento en 1) y Vel. Se exporta solo si está destildado, más la opción de entrada de 2 compases</li>
+                <li>• <strong>Metrónomo</strong> - Pista fija «Metrónomo» (arriba, no se borra ni se renombra). Sale muteada. El botón del toolbar es el mismo Mute. Al cargar el primer audio se detecta un mapa de beats. En Ajustes: Tempo fijo (BPM constante) o Seguir la canción (clics en el mapa, sigue el drift). Arrastrá las marcas en la pista; click derecho: Agregar marca de tempo, Borrar marca, Poner el 1 acá. La regla de compases sigue el mapa en modo Seguir. Vel escala los tiempos. Se exporta solo si está destildado, más la opción de entrada de 2 compases</li>
                 <li>• <strong>Botón FX</strong> - Abre el rack de efectos de esa pista (EQ, compresor, filtro, delay, reverb y pan). Cada módulo tiene knobs y bypass On/Off</li>
                 <li>• <strong>Botón A (curva)</strong> - Muestra la pista de automatización. Elegí el parámetro (volumen, pan o un knob de efecto) y dibujá la curva</li>
               </ul>

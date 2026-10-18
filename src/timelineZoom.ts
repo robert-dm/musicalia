@@ -125,12 +125,31 @@ export function timelineTicks(input: {
   pulseSeconds?: number
   barSeconds?: number
   phaseSeconds?: number
+  mapBeats?: Array<{ t: number; downbeat?: boolean }>
 }): TimelineTick[] {
   const layoutMax = Math.max(0, input.layoutMax)
   if (layoutMax <= 0 || input.pxPerSec <= 0) return []
   const start = Math.max(0, input.viewStart)
   const end = Math.min(layoutMax, input.viewEnd)
   if (end <= start) return []
+  if (input.mapBeats && input.mapBeats.length >= 2) {
+    const ticks: TimelineTick[] = []
+    let barNumber = 0
+    for (const beat of input.mapBeats) {
+      if (beat.t < start - 1e-9 || beat.t > end + 1e-9) {
+        if (beat.downbeat && beat.t < start) barNumber++
+        continue
+      }
+      if (beat.downbeat) {
+        barNumber++
+        ticks.push({ t: beat.t, kind: 'bar', label: String(barNumber) })
+      } else {
+        ticks.push({ t: beat.t, kind: 'beat' })
+      }
+      if (ticks.length >= 240) break
+    }
+    return ticks
+  }
   const beat = input.pulseSeconds && input.pulseSeconds > 0
     ? input.pulseSeconds
     : 60 / Math.max(1, input.bpm)

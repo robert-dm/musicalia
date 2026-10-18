@@ -85,6 +85,7 @@ const LaneClipView = memo(function LaneClipView({
         width: `${(clip.duration / maxDur) * 100}%`,
         height: '100%'
       }}
+      onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => onClipClick(e, trackIndex, clip.id)}
       onDoubleClick={(e) => {
         e.stopPropagation()

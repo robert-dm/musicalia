@@ -259,7 +259,10 @@ import {
   commitEditedTrackName,
   deleteTrackFromList,
   marqueeClientRect,
+  applyClipClickSelect,
+  applyClipPointerSelect,
   mergeSelection,
+  type ClipPointerSelectAction,
   nudgeDeltaSeconds,
   packClipboard,
   parseMoveAmountSeconds,
@@ -574,6 +577,7 @@ function App() {
   practiceIndexRef.current = practiceIndex
   const selectedClipIdsRef = useRef(selectedClipIds)
   selectedClipIdsRef.current = selectedClipIds
+  const clipPointerSelectRef = useRef<{ clipId: string; action: ClipPointerSelectAction } | null>(null)
   const appCommitCountRef = useRef(0)
   appCommitCountRef.current += 1
   const trimLiveRef = useRef<{
@@ -3009,6 +3013,8 @@ function App() {
 
   const handleClipClick = (e: React.MouseEvent, trackIndex: number, clipId: string) => {
     e.stopPropagation()
+    const pointer = clipPointerSelectRef.current
+    clipPointerSelectRef.current = null
     if (!isClickGesture(dragLiveRef.current.distance)) return
     
     const clip = trackStates[trackIndex].clips.find(c => c.id === clipId)
@@ -3027,18 +3033,17 @@ function App() {
       return
     }
 
-    const cmd = e.ctrlKey || e.metaKey
-    if (cmd || e.shiftKey) {
-      setSelectedClipIds(prev => mergeSelection(prev, [clipId], 'toggle'))
-    } else {
-      setSelectedClipIds(new Set([clipId]))
-      if (!(e.target as HTMLElement).closest('.clip-trim-handle')) {
-        const lane = (e.currentTarget as HTMLElement).closest('.track-content') as HTMLElement | null
-        if (lane) {
-          const rect = lane.getBoundingClientRect()
-          const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
-          seekToPositionRef.current(raw, false)
-        }
+    const next = applyClipClickSelect(selectedClipIdsRef.current, clipId, e, pointer?.clipId === clipId ? pointer.action : null)
+    if (next) {
+      selectedClipIdsRef.current = next
+      setSelectedClipIds(next)
+    }
+    if (!e.shiftKey && !e.ctrlKey && !e.metaKey && !(e.target as HTMLElement).closest('.clip-trim-handle')) {
+      const lane = (e.currentTarget as HTMLElement).closest('.track-content') as HTMLElement | null
+      if (lane) {
+        const rect = lane.getBoundingClientRect()
+        const raw = clickTimeFromX(e.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
+        seekToPositionRef.current(raw, false)
       }
     }
     isDraggingClipRef.current = false
@@ -3053,12 +3058,11 @@ function App() {
     const clip = tracks[trackIndex]?.clips.find(c => c.id === clipId)
     if (!clip) return
 
-    let selected = selectedClipIdsRef.current
-    if (!selected.has(clipId)) {
-      const cmd = e.ctrlKey || e.metaKey
-      selected = (e.shiftKey || cmd) ? new Set(selected).add(clipId) : new Set([clipId])
-      setSelectedClipIds(selected)
-    }
+    const applied = applyClipPointerSelect(selectedClipIdsRef.current, clipId, e)
+    clipPointerSelectRef.current = { clipId, action: applied.action }
+    const selected = applied.next
+    selectedClipIdsRef.current = selected
+    if (applied.action !== 'kept') setSelectedClipIds(selected)
 
     const target = e.currentTarget
     target.setPointerCapture(e.pointerId)
@@ -5077,6 +5081,8 @@ function App() {
 
       if (isClickGesture(distance)) {
         live.didDrag = false
+        const upOnClip = Boolean((ev.target as HTMLElement | null)?.closest?.('.clip-wrapper'))
+        if (upOnClip) return
         if (lane) {
           const rect = lane.getBoundingClientRect()
           const raw = clickTimeFromX(ev.clientX, rect.left, rect.width, timelineMaxRef.current || 100)
@@ -5353,6 +5359,53 @@ function App() {
           next[place.trackIndex].clips.push({
             player,
             fileName: `Seed ${i + 1}`,
+            isPlaying: false,
+            buffer,
+            startPosition: 0,
+            offsetSeconds: place.offset,
+            id,
+            sourceStart: 0,
+            duration: buffer.duration
+          })
+          ids.push(id)
+        })
+        trackStatesRef.current = next
+        setTrackStates(next)
+        return { ids, offsets: places.map((p) => p.offset), tracks: places.map((p) => p.trackIndex) }
+      },
+      seedGrid: async () => {
+        await ensureAudio()
+        const raw = nativeAudioContext(Tone.getContext().rawContext)
+        const sr = raw.sampleRate
+        const length = Math.max(8, Math.floor(sr * 0.55))
+        const buffer = raw.createBuffer(1, length, sr)
+        const channel = buffer.getChannelData(0)
+        for (let i = 0; i < length; i++) {
+          channel[i] = Math.sin((2 * Math.PI * 330 * i) / sr) * 0.35
+        }
+        const targets = trackStatesRef.current
+          .map((track, index) => ({ track, index }))
+          .filter(({ track }) => !isMetronomeTrack(track) && track.kind !== 'drum')
+        if (targets.length < 3) throw new Error('need three audio tracks')
+        const places = [
+          { trackIndex: targets[0].index, offset: 0.2 },
+          { trackIndex: targets[0].index, offset: 1.3 },
+          { trackIndex: targets[1].index, offset: 0.4 },
+          { trackIndex: targets[1].index, offset: 1.6 },
+          { trackIndex: targets[2].index, offset: 0.9 }
+        ]
+        const next = trackStatesRef.current.map((track) => ({ ...track, clips: [...track.clips] }))
+        const ids: string[] = []
+        places.forEach((place, i) => {
+          const player = makeClipPlayer()
+          player.buffer = new Tone.ToneAudioBuffer(buffer)
+          player.loop = false
+          const dest = trackGainsRef.current[place.trackIndex]
+          if (dest) player.connect(dest)
+          const id = `clip-grid-${place.trackIndex}-${i}`
+          next[place.trackIndex].clips.push({
+            player,
+            fileName: `Grid ${i + 1}`,
             isPlaying: false,
             buffer,
             startPosition: 0,

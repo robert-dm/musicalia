@@ -1,4 +1,6 @@
 import {
+  applyClipClickSelect,
+  applyClipPointerSelect,
   applyGroupTimeDelta,
   clampGroupTimeDelta,
   clampGroupTrackDelta,
@@ -13,7 +15,8 @@ import {
   parseMoveAmountSeconds,
   pastePlacement,
   resolveTrackName,
-  selectableClipIds
+  selectableClipIds,
+  selectionModifier
 } from './clipSelection'
 
 let failed = 0
@@ -103,6 +106,29 @@ assert(
   ) === null,
   'cannot delete the metronome track'
 )
+
+assert(selectionModifier({ metaKey: true }), 'Mac Cmd is a selection modifier')
+assert(selectionModifier({ ctrlKey: true }), 'Ctrl is a selection modifier')
+assert(selectionModifier({ shiftKey: true }), 'Shift is a selection modifier')
+assert(!selectionModifier({}), 'plain click is not a modifier')
+
+const ptrAdd = applyClipPointerSelect(new Set(['a']), 'b', { metaKey: true })
+assert(ptrAdd.action === 'added' && ptrAdd.next.has('a') && ptrAdd.next.has('b'), 'Cmd pointerdown adds the new clip')
+assert(applyClipClickSelect(ptrAdd.next, 'b', { metaKey: true }, 'added') == null, 'click must not toggle off the clip just added')
+
+const ptrKeep = applyClipPointerSelect(new Set(['a', 'b']), 'a', { shiftKey: true })
+assert(ptrKeep.action === 'kept' && ptrKeep.next.has('a') && ptrKeep.next.has('b'), 'Shift pointerdown on a selected clip keeps the group for a possible drag')
+const shiftClickOff = applyClipClickSelect(ptrKeep.next, 'a', { shiftKey: true }, 'kept')
+assert(!!shiftClickOff && !shiftClickOff.has('a') && shiftClickOff.has('b'), 'true Shift+click later toggles that clip off once')
+
+const ptrPlain = applyClipPointerSelect(new Set(['a', 'b']), 'a', {})
+assert(ptrPlain.action === 'kept' && ptrPlain.next.size === 2, 'plain pointerdown on a multi-select member keeps the group')
+const plainClick = applyClipClickSelect(ptrPlain.next, 'a', {}, 'kept')
+assert(!!plainClick && plainClick.size === 1 && plainClick.has('a'), 'true plain click collapses after no drag')
+assert(applyClipClickSelect(new Set(['c']), 'c', {}, 'replaced') == null, 'plain click after replace is a no-op')
+
+const ptrReplace = applyClipPointerSelect(new Set(['a']), 'c', {})
+assert(ptrReplace.action === 'replaced' && ptrReplace.next.has('c') && !ptrReplace.next.has('a'), 'plain pointerdown on another clip replaces')
 
 assert(resolveTrackName('  Voces  ', 2) === 'Voces', 'trims stored track names')
 assert(resolveTrackName('', 3) === 'Track 4', 'empty name falls back to Track N')

@@ -162,3 +162,42 @@ export function mergeSelection(
   })
   return next
 }
+
+export function selectionModifier(keys: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }): boolean {
+  return Boolean(keys.shiftKey || keys.metaKey || keys.ctrlKey)
+}
+
+export type ClipPointerSelectAction = 'added' | 'replaced' | 'kept'
+
+/** Pointerdown applies selection once so a following drag uses the new set. */
+export function applyClipPointerSelect(
+  current: Set<string>,
+  clipId: string,
+  keys: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean }
+): { next: Set<string>; action: ClipPointerSelectAction } {
+  if (selectionModifier(keys)) {
+    if (current.has(clipId)) return { next: current, action: 'kept' }
+    return { next: mergeSelection(current, [clipId], 'add'), action: 'added' }
+  }
+  if (!current.has(clipId)) return { next: new Set([clipId]), action: 'replaced' }
+  return { next: current, action: 'kept' }
+}
+
+/**
+ * Click must not undo a pointerdown add/replace. Modifier on an already-selected
+ * clip toggles it off only on a true click (not a drag).
+ */
+export function applyClipClickSelect(
+  current: Set<string>,
+  clipId: string,
+  keys: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean },
+  pointerAction: ClipPointerSelectAction | null
+): Set<string> | null {
+  if (selectionModifier(keys)) {
+    if (pointerAction === 'added') return null
+    return mergeSelection(current, [clipId], 'toggle')
+  }
+  if (pointerAction === 'replaced') return null
+  if (pointerAction === 'kept' || pointerAction == null) return new Set([clipId])
+  return null
+}

@@ -12,6 +12,7 @@ import {
   phaseMs,
   pulseDurationSeconds,
   pulsesPerBar,
+  resetMetronomeToFixedTempo,
   serializeMetronomeMeter,
   serializeTrackMetronome
 } from './metronomeMeter'
@@ -90,6 +91,15 @@ assert(saved.subdivision === 'triplets' && saved.accentDownbeat === false, 'pers
 assert(saved.followMode === 'follow', 'missing followMode hydrates to Seguir la canción')
 assert(hydrateMetronomeMeter({ followMode: 'fixed' }).followMode === 'fixed', 'Tempo fijo persists')
 assert(hydrateMetronomeMeter(undefined).numerator === 4, 'missing meter hydrates 4/4')
+
+const reset = resetMetronomeToFixedTempo({
+  ...custom,
+  followMode: 'follow',
+  phaseSeconds: 0.42
+})
+assert(reset.followMode === 'fixed', 'Resetear tempo switches to Tempo fijo')
+assert(reset.phaseSeconds === 0, 'Resetear tempo clears the phase / accent offset')
+assert(reset.numerator === 5 && reset.clickSound === 'rim', 'Resetear tempo keeps the rest of the meter')
 
 const trackJson = { kind: 'metronome', metronome: saved }
 assert(serializeTrackMetronome(trackJson).metronome?.clickSound === 'rim', 'track payload keeps rim')

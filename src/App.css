@@ -2325,6 +2325,10 @@
   gap: 6px;
 }
 
+.metro-tempo-actions {
+  margin-top: 8px;
+}
+
 .metro-chip {
   height: 28px;
   padding: 0 10px;

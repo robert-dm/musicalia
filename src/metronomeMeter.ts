@@ -161,6 +161,15 @@ export function hydrateMetronomeMeter(raw: unknown): MetronomeMeter {
   return normalizeMetronomeMeter(raw as Partial<MetronomeMeter>)
 }
 
+/** Tempo fijo at t=0: clear phase / accent offset. The caller drops the map. */
+export function resetMetronomeToFixedTempo(meter?: Partial<MetronomeMeter> | null): MetronomeMeter {
+  return normalizeMetronomeMeter({
+    ...normalizeMetronomeMeter(meter),
+    followMode: 'fixed',
+    phaseSeconds: 0
+  })
+}
+
 export function serializeTrackMetronome(track: {
   kind?: string
   metronome?: Partial<MetronomeMeter> | null

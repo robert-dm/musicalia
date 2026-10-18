@@ -6,6 +6,7 @@ import {
   type MetronomeMeter,
   type MetronomeSubdivision
 } from './metronomeMeter'
+import { formatBpm } from './tempoMath'
 
 const SUB_LABELS: Record<MetronomeSubdivision, string> = {
   none: 'Ninguna',
@@ -24,12 +25,15 @@ interface MetronomeSettingsPanelProps {
   meter: MetronomeMeter
   bpm: number
   hasTempoMap: boolean
+  mapUnreliable?: boolean
   localBpm?: number | null
   alignArmed: boolean
   phaseMs: number
   onPatch: (patch: Partial<MetronomeMeter>) => void
   onPhaseMs: (ms: number) => void
   onArmAlign: () => void
+  onReanalyze?: () => void
+  onReset?: () => void
   onClose: () => void
 }
 
@@ -37,12 +41,15 @@ export function MetronomeSettingsPanel({
   meter,
   bpm,
   hasTempoMap,
+  mapUnreliable = false,
   localBpm,
   alignArmed,
   phaseMs,
   onPatch,
   onPhaseMs,
   onArmAlign,
+  onReanalyze,
+  onReset,
   onClose
 }: MetronomeSettingsPanelProps) {
   const compound = isCompoundMeter(meter.numerator, meter.denominator)
@@ -87,9 +94,38 @@ export function MetronomeSettingsPanel({
             Seguir la canción
           </button>
         </div>
-        {hasTempoMap && localBpm != null && (
+        {(onReset || onReanalyze) && (
+          <div className="metro-chip-row metro-tempo-actions" role="group" aria-label="Acciones de tempo">
+            {onReset && (
+              <button
+                type="button"
+                className="metro-chip"
+                data-testid="reset-tempo"
+                onClick={onReset}
+              >
+                Resetear tempo
+              </button>
+            )}
+            {onReanalyze && (
+              <button
+                type="button"
+                className="metro-chip"
+                data-testid="reanalyze-tempo"
+                onClick={onReanalyze}
+              >
+                Reanalizar tempo
+              </button>
+            )}
+          </div>
+        )}
+        {hasTempoMap && localBpm != null && !mapUnreliable && (
           <div className="metro-settings-hint" data-testid="local-bpm-readout">
-            Tempo local {localBpm} BPM
+            Tempo local {formatBpm(localBpm)} BPM
+          </div>
+        )}
+        {mapUnreliable && (
+          <div className="metro-settings-hint" data-testid="tempo-map-fallback-notice">
+            Mapa de tempo inestable — usando tempo fijo.
           </div>
         )}
       </section>

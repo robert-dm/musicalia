@@ -35,7 +35,8 @@ import {
   setDownbeatAtTime,
   type TempoMap
 } from './beatTracker'
-import { bpmFromEnvelope, envelopeForMix, trackBeatsInWorker } from './beatTrackerHost'
+import { isTempoMapUsable } from './tempoMapSanitize'
+import { analyzeMixTempoMap, bpmFromEnvelope, envelopeForMix, trackBeatsInWorker } from './beatTrackerHost'
 import {
   appendTap,
   clampBpm,
@@ -53,6 +54,7 @@ import {
   phaseFromDownbeat,
   pulseDurationSeconds,
   pulsesPerBar,
+  resetMetronomeToFixedTempo,
   serializeTrackMetronome,
   wrapPhase,
   type MetronomeMeter
@@ -372,7 +374,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0097b'
+const APP_VERSION = '0.0098b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -440,6 +442,7 @@ function App() {
   const [bpm, setBpm] = useState(120)
   const [metroSettingsOpen, setMetroSettingsOpen] = useState(false)
   const [metroAlignArmed, setMetroAlignArmed] = useState(false)
+  const [tempoResetConfirm, setTempoResetConfirm] = useState(false)
   const tapTimesRef = useRef<number[]>([])
   const [tapFlash, setTapFlash] = useState(false)
   const [pitchSemitones, setPitchSemitones] = useState(0)
@@ -3973,7 +3976,7 @@ function App() {
     if (!current) return
     if (opts?.undo !== false) saveUndo()
     const tracks = [...trackStatesRef.current]
-    tracks[idx] = { ...tracks[idx], tempoMap: alignTempoMapToOrigin(updater(current)) }
+    tracks[idx] = { ...tracks[idx], tempoMap: updater(current) }
     trackStatesRef.current = tracks
     setTrackStates(tracks)
     if (isPlayingRef.current) scheduleMetronome(getSongTime())
@@ -4388,6 +4391,47 @@ function App() {
     trackStatesRef.current = tracks
     setTrackStates(tracks)
     if (isPlayingRef.current) scheduleMetronome(getSongTime())
+  }
+
+  const reanalyzeTempo = async () => {
+    const audio = trackStatesRef.current.find(
+      (t) => !isMetronomeTrack(t) && t.kind !== 'drum' && t.clips.some((c) => c.buffer)
+    )
+    const clip = audio?.clips.find((c) => c.buffer)
+    if (!clip?.buffer) {
+      setToastMessage('Cargá audio para reanalizar el tempo')
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+      return
+    }
+    setToastMessage('Reanalizando tempo…')
+    setShowToast(true)
+    const { bpm: detected, map } = await analyzeMixTempoMap(clip.buffer, bpmRef.current)
+    if (detected != null && Number.isFinite(detected)) applySessionBpm(detected)
+    if (map) {
+      applyDetectedTempoMap(map)
+      patchMetronomeMeter({ followMode: 'follow' })
+    }
+    setToastMessage(map ? 'Tempo reanalizado' : 'No se pudo reanalizar el tempo')
+    setTimeout(() => setShowToast(false), 3500)
+  }
+
+  const resetTempoToFixed = () => {
+    const idx = findMetronomeIndex(trackStatesRef.current)
+    if (idx < 0) return
+    saveUndo()
+    const tracks = [...trackStatesRef.current]
+    const current = tracks[idx]
+    const next = { ...current, metronome: resetMetronomeToFixedTempo(meterOf(current)) }
+    delete next.tempoMap
+    tracks[idx] = next
+    trackStatesRef.current = tracks
+    setTrackStates(tracks)
+    setTempoResetConfirm(false)
+    if (isPlayingRef.current) scheduleMetronome(getSongTime())
+    setToastMessage('Tempo reseteado a tempo fijo')
+    setShowToast(true)
+    setTimeout(() => setShowToast(false), 3000)
   }
 
   const maybeApplyDetectedBpm = async (buffer: AudioBuffer) => {
@@ -5682,7 +5726,9 @@ function App() {
           meter: meterOf(track),
           followMode: meterOf(track).followMode,
           tempoMapBeats: track?.tempoMap?.beats.length ?? 0,
-          localBpm: track?.tempoMap ? localBpmAt(track.tempoMap, playheadPositionRef.current) : null
+          mapUsable: isTempoMapUsable(track?.tempoMap),
+          localBpm: track?.tempoMap ? localBpmAt(track.tempoMap, playheadPositionRef.current) : null,
+          phaseSeconds: meterOf(track).phaseSeconds
         }
       },
       unmute: () => {
@@ -5705,7 +5751,9 @@ function App() {
         if (!map) return false
         applyDetectedTempoMap(map)
         return true
-      }
+      },
+      resetTempo: () => resetTempoToFixed(),
+      reanalyzeTempo: () => reanalyzeTempo()
     }
     ;(window as unknown as { __musicaliaMetronome?: typeof api }).__musicaliaMetronome = api
     return () => {
@@ -5849,17 +5897,17 @@ function App() {
         setTrackStates(next)
         return { ids, offsets: places.map((p) => p.offset), tracks: places.map((p) => p.trackIndex) }
       },
-      seedAtOrigin: async () => {
+      seedAtOrigin: async (seconds = 4) => {
         await ensureAudio()
         const raw = nativeAudioContext(Tone.getContext().rawContext)
         const sr = raw.sampleRate
-        const seconds = 4
-        const length = Math.max(16, Math.floor(sr * seconds))
+        const dur = Math.max(1, Number(seconds) || 4)
+        const length = Math.max(16, Math.floor(sr * dur))
         const buffer = raw.createBuffer(1, length, sr)
         const channel = buffer.getChannelData(0)
         for (let i = 0; i < length; i++) {
           const t = i / sr
-          const env = Math.min(1, t * 12) * Math.min(1, (seconds - t) * 4)
+          const env = Math.min(1, t * 12) * Math.min(1, (dur - t) * 4)
           channel[i] = Math.sin(2 * Math.PI * 220 * t) * 0.45 * env
         }
         const target = trackStatesRef.current
@@ -7240,6 +7288,24 @@ function App() {
                         setMetroSettingsOpen(true)
                       }}
                     />
+                    <ContextMenuItem
+                      icon={<IconClock />}
+                      label="Reanalizar tempo"
+                      testId="reanalyze-tempo-menu"
+                      onClick={() => {
+                        closeContextMenu()
+                        void reanalyzeTempo()
+                      }}
+                    />
+                    <ContextMenuItem
+                      icon={<IconMetronome />}
+                      label="Resetear tempo"
+                      testId="reset-tempo-menu"
+                      onClick={() => {
+                        closeContextMenu()
+                        setTempoResetConfirm(true)
+                      }}
+                    />
                     <div className="context-menu-sep" />
                   </>
                 )}
@@ -7374,6 +7440,24 @@ function App() {
                       onClick={() => {
                         closeContextMenu()
                         setMetroSettingsOpen(true)
+                      }}
+                    />
+                    <ContextMenuItem
+                      icon={<IconClock />}
+                      label="Reanalizar tempo"
+                      testId="reanalyze-tempo-menu-lane"
+                      onClick={() => {
+                        closeContextMenu()
+                        void reanalyzeTempo()
+                      }}
+                    />
+                    <ContextMenuItem
+                      icon={<IconMetronome />}
+                      label="Resetear tempo"
+                      testId="reset-tempo-menu-lane"
+                      onClick={() => {
+                        closeContextMenu()
+                        setTempoResetConfirm(true)
                       }}
                     />
                     <div className="context-menu-sep" />
@@ -7514,6 +7598,37 @@ function App() {
         </div>
       )}
 
+      {tempoResetConfirm && (
+        <div
+          className="confirm-modal"
+          data-testid="reset-tempo-dialog"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setTempoResetConfirm(false)
+          }}
+        >
+          <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="reset-tempo-title">
+            <h2 id="reset-tempo-title">Resetear tempo</h2>
+            <p>
+              Se borra el mapa de beats y las marcas editadas. El metrónomo y la regla vuelven a Tempo fijo
+              en el BPM del proyecto. Se puede deshacer.
+            </p>
+            <div className="confirm-actions">
+              <button type="button" className="confirm-cancel" onClick={() => setTempoResetConfirm(false)}>
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="confirm-danger"
+                data-testid="reset-tempo-confirm"
+                onClick={resetTempoToFixed}
+              >
+                Resetear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {metroSettingsOpen && (
         <>
           <div
@@ -7527,6 +7642,8 @@ function App() {
             meter={currentMetronomeMeter()}
             bpm={bpm}
             hasTempoMap={hasTempoMap(trackStates[findMetronomeIndex(trackStates)]?.tempoMap)}
+            mapUnreliable={hasTempoMap(trackStates[findMetronomeIndex(trackStates)]?.tempoMap)
+              && !isTempoMapUsable(trackStates[findMetronomeIndex(trackStates)]?.tempoMap)}
             localBpm={(() => {
               const map = trackStates[findMetronomeIndex(trackStates)]?.tempoMap
               return map ? localBpmAt(map, playheadPosition) : null
@@ -7536,6 +7653,8 @@ function App() {
             onPatch={patchMetronomeMeter}
             onPhaseMs={setMetronomePhaseMs}
             onArmAlign={() => setMetroAlignArmed((v) => !v)}
+            onReanalyze={() => { void reanalyzeTempo() }}
+            onReset={() => setTempoResetConfirm(true)}
             onClose={() => {
               setMetroSettingsOpen(false)
               setMetroAlignArmed(false)
@@ -7603,7 +7722,7 @@ function App() {
                 <li>• <strong>Círculo en la cabecera</strong> - Armar la pista para grabar (rojo = armada). Solo una a la vez</li>
                 <li>• <strong>P (Practicar encima)</strong> - Silencia ese stem y deja el resto sonando para tocar o cantar encima. El botón del transporte usa la pista seleccionada</li>
                 <li>• <strong>Aislar</strong> - Oís SOLO esa pista (para tocar encima). Mute (M) silencia una. Solo (S) puede dejar varias. Una pista nueva se oye también. Pulsá de nuevo para oír todas. {METRONOME_AISLAR_RULE}</li>
-                <li>• <strong>Metrónomo</strong> - Pista fija «Metrónomo» (arriba, no se borra ni se renombra). Sale muteada. El botón del toolbar es el mismo Mute. Al cargar el primer audio se detecta un mapa de beats. En Ajustes: Tempo fijo (BPM constante) o Seguir la canción (clics en el mapa, sigue el drift). Arrastrá las marcas en la pista; click derecho: Agregar marca de tempo, Borrar marca, Poner el 1 acá. La regla de compases sigue el mapa en modo Seguir. Vel escala los tiempos. Se exporta solo si está destildado, más la opción de entrada de 2 compases</li>
+                <li>• <strong>Metrónomo</strong> - Pista fija «Metrónomo» (arriba, no se borra ni se renombra). Sale muteada. El botón del toolbar es el mismo Mute. Al cargar el primer audio se detecta un mapa de beats. En Ajustes: Tempo fijo (BPM constante) o Seguir la canción (clics en el mapa, sigue el drift). Arrastrá las marcas en la pista; click derecho: Agregar marca de tempo, Borrar marca, Poner el 1 acá, Reanalizar tempo, Resetear tempo. Resetear borra el mapa y vuelve a Tempo fijo (se puede deshacer). La regla de compases sigue el mapa en modo Seguir. Vel escala los tiempos. Se exporta solo si está destildado, más la opción de entrada de 2 compases</li>
                 <li>• <strong>Botón FX</strong> - Abre el rack de efectos de esa pista (EQ, compresor, filtro, delay, reverb y pan). Cada módulo tiene knobs y bypass On/Off</li>
                 <li>• <strong>Botón A (curva)</strong> - Muestra la pista de automatización. Elegí el parámetro (volumen, pan o un knob de efecto) y dibujá la curva</li>
               </ul>

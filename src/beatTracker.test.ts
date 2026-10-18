@@ -132,6 +132,10 @@ const trackPayload = serializeTrackTempoMap({ kind: 'metronome', tempoMap: map }
 assert(trackPayload.tempoMap?.beats.length === map!.beats.length, 'metronome track payload keeps the grid')
 assert(hydrateTrackTempoMap(trackPayload, 'metronome').tempoMap?.beats.length === map!.beats.length, 'track hydrate reads the grid')
 assert(hydrateTrackTempoMap(trackPayload, 'audio').tempoMap == null, 'audio tracks omit the tempo map')
+assert(
+  serializeTrackTempoMap({ kind: 'metronome' }).tempoMap == null,
+  'Resetear tempo persists by omitting the map'
+)
 
 const even = buildTempoMap([0, 0.5, 1, 1.5], 120, 2)
 const mid = localBpmAt(even, 0.6)

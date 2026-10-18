@@ -205,6 +205,11 @@ export function timelineTicks(input: {
   const end = Math.min(layoutMax, input.viewEnd)
   if (end <= start) return []
   if (input.mapBeats && input.mapBeats.length >= 2) {
+    const span = input.mapBeats[input.mapBeats.length - 1].t - input.mapBeats[0].t
+    const density = input.mapBeats.length / Math.max(span, 1e-6)
+    const tooDense = density > 5.5 || span > 1e-6 && (end - start) > 0 &&
+      input.mapBeats.filter((b) => b.downbeat && b.t >= start && b.t <= end).length > 80
+    if (!tooDense) {
     const pulses = Math.max(1, input.beatsPerBar ?? 4)
     const period = mapBeatPeriodHint(input.mapBeats, input.bpm, input.pulseSeconds)
     const mapped = expandMapBeatsToOrigin(input.mapBeats, period, pulses)
@@ -224,6 +229,7 @@ export function timelineTicks(input: {
       if (ticks.length >= 240) break
     }
     return ticks
+    }
   }
   const beat = input.pulseSeconds && input.pulseSeconds > 0
     ? input.pulseSeconds

@@ -62,6 +62,18 @@ export function IconSave(props: IconProps) {
   )
 }
 
+export function IconSaveAs(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+      <path d="M17 21v-7H7v7" />
+      <path d="M7 3v5h8" />
+      <path d="M19 10h4" />
+      <path d="M21 8v4" />
+    </Svg>
+  )
+}
+
 export function IconList(props: IconProps) {
   return (
     <Svg {...props}>

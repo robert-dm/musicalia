@@ -41,6 +41,13 @@ import {
   upsertProjectRegistry,
   type ProjectRegistryEntry
 } from './projectRegistry'
+import {
+  isActivationError,
+  pickSaveFileHandle,
+  queryWritePermission,
+  saveHandleAfterGesture,
+  type SaveFilePickerFn
+} from './fileSave'
 import { TimelineRuler } from './TimelineRuler'
 import {
   applyLoopSnap,
@@ -233,6 +240,7 @@ import {
   IconRecord,
   IconRepeat,
   IconSave,
+  IconSaveAs,
   IconScissors,
   IconSkipBack,
   IconSliders,
@@ -308,7 +316,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0094b'
+const APP_VERSION = '0.0095b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -541,7 +549,14 @@ function App() {
   const [undoStack, setUndoStack] = useState<any[]>([])
   const [redoStack, setRedoStack] = useState<any[]>([])
   const [showHelp, setShowHelp] = useState(false)
-  const [currentFileHandle, setCurrentFileHandle] = useState<any>(null)
+  const [currentFileHandle, setCurrentFileHandle] = useState<FileSystemFileHandle | null>(null)
+  const currentFileHandleRef = useRef<FileSystemFileHandle | null>(null)
+  currentFileHandleRef.current = currentFileHandle
+  const [fileHandleUnsaved, setFileHandleUnsaved] = useState(false)
+  const [fileSavePrompt, setFileSavePrompt] = useState<{
+    handle: FileSystemFileHandle | null
+    projectName: string
+  } | null>(null)
   const [trackDeleteConfirm, setTrackDeleteConfirm] = useState<{
     trackIndex: number
     name: string
@@ -1099,6 +1114,13 @@ function App() {
       }
       autosaveProject(state)
       lastClipBufferSigRef.current = sig
+      // Session/IDB only. A timer is not a user gesture — never requestPermission here.
+      if (currentFileHandleRef.current) {
+        void queryWritePermission(currentFileHandleRef.current).then((status) => {
+          if (status !== 'granted') setFileHandleUnsaved(true)
+        })
+        setFileHandleUnsaved(true)
+      }
     }
     
     const timer = window.setTimeout(() => { void saveState() }, 1000)
@@ -1272,6 +1294,9 @@ function App() {
     currentProjectIdRef.current = null
     setCurrentProjectId(null)
     setCurrentFileHandle(null)
+    currentFileHandleRef.current = null
+    setFileHandleUnsaved(false)
+    setFileSavePrompt(null)
     window.location.reload()
   }
   
@@ -1332,6 +1357,7 @@ function App() {
   const registerSavedProject = async (projectName: string, fileName: string, handle?: FileSystemFileHandle | null) => {
     const id = ensureProjectId()
     if (handle) {
+      currentFileHandleRef.current = handle
       setCurrentFileHandle(handle)
       await persistFileHandle(id, handle)
     }
@@ -1350,6 +1376,103 @@ function App() {
     }
   }
 
+  const buildProjectArchiveBlob = async (projectName: string): Promise<Blob> => {
+    setExportProgress('Procesando audio...')
+    const zip = new JSZip()
+    const projectData = {
+      version: APP_VERSION,
+      id: ensureProjectId(),
+      name: projectName,
+      bpm,
+      pitchSemitones,
+      tempoRate,
+      harmony: serializeHarmony(harmony),
+      loopStart,
+      loopEnd,
+      playheadPosition,
+      metronomeEnabled,
+      magnetEnabled,
+      countInBars,
+      tracks: trackStatesRef.current.map((t, trackIdx) => ({
+        name: resolveTrackName(t.name, trackIdx),
+        mute: t.mute,
+        solo: t.solo,
+        volume: t.volume,
+        kind: trackKindOf(t.kind),
+        drum: projectDrumPayload(t.drum, trackIdx),
+        ...serializeTrackAudio(t),
+        clips: t.clips.map((clip, clipIdx) => projectClipPayload(clip, trackIdx, clipIdx))
+      }))
+    }
+    zip.file('project.json', JSON.stringify(projectData, null, 2))
+
+    const bufferMap = new Map<AudioBuffer, string>()
+    const tracks = trackStatesRef.current
+    for (let trackIdx = 0; trackIdx < tracks.length; trackIdx++) {
+      const track = tracks[trackIdx]
+      if (track.drum) {
+        for (let padIdx = 0; padIdx < track.drum.pads.length; padIdx++) {
+          const pad = track.drum.pads[padIdx]
+          if (!pad.buffer) continue
+          const wavData = encodeAudioBufferWAV(pad.buffer)
+          zip.file(padZipName(trackIdx, padIdx), wavData.buffer as ArrayBuffer, { compression: 'STORE' })
+        }
+      }
+      for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
+        const clip = track.clips[clipIdx]
+        if (isPatternClip(clip)) continue
+        let audioFileName: string
+        if (bufferMap.has(clip.buffer)) {
+          audioFileName = bufferMap.get(clip.buffer)!
+        } else {
+          audioFileName = `audio_${trackIdx}_${clipIdx}.wav`
+          bufferMap.set(clip.buffer, audioFileName)
+          const wavData = encodeAudioBufferWAV(clip.buffer)
+          zip.file(audioFileName, wavData.buffer as ArrayBuffer, { compression: 'STORE' })
+        }
+        const clipTotal = tracks.reduce((sum, t) => sum + t.clips.length, 0)
+        const progress = 10 + ((trackIdx * track.clips.length + clipIdx + 1) / Math.max(1, clipTotal)) * 80
+        setUploadProgress(progress)
+      }
+    }
+
+    setExportProgress('Empaquetando...')
+    setUploadProgress(90)
+    return zip.generateAsync({
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    })
+  }
+
+  const persistToExistingHandle = async (fileHandle: FileSystemFileHandle, projectName: string): Promise<boolean> => {
+    setUploadProgress(5)
+    setExportProgress('Preparando proyecto...')
+    try {
+      const result = await saveHandleAfterGesture(fileHandle, () => buildProjectArchiveBlob(projectName))
+      if (!result.ok) {
+        setFileHandleUnsaved(true)
+        setFileSavePrompt({ handle: fileHandle, projectName })
+        return false
+      }
+      setUploadProgress(100)
+      setFileHandleUnsaved(false)
+      setFileSavePrompt(null)
+      setToastMessage(`✅ Proyecto guardado: ${projectName}`)
+      setShowToast(true)
+      setTimeout(() => setShowToast(false), 3000)
+      await registerSavedProject(projectName, fileHandle.name || `${projectName}.musicalia`, fileHandle)
+      console.log(`[Save] Project saved successfully: ${projectName}`)
+      return true
+    } catch (err) {
+      setFileHandleUnsaved(true)
+      throw err
+    } finally {
+      setUploadProgress(0)
+      setExportProgress('')
+    }
+  }
+
   const handleSaveToLocal = async (saveAs = false) => {
     try {
       const hasAnyAudio = trackStates.some(t => t.clips.length > 0)
@@ -1358,240 +1481,71 @@ function App() {
         setTimeout(() => setErrorMessage(null), 5000)
         return
       }
-      
-      // If we have a saved file handle and this is not "Save As", reuse it
-      if (!saveAs && currentFileHandle) {
-        await saveProjectToFileHandle(currentFileHandle, currentProjectName)
+
+      const existing = currentFileHandleRef.current
+      if (!saveAs && existing) {
+        await persistToExistingHandle(existing, currentProjectName)
         return
       }
-      
-      // Otherwise, ask for file location FIRST (before any async work)
-      // This preserves user activation for showSaveFilePicker
+
       const fileName = `${sanitizeFilename(currentProjectName) || 'proyecto'}.musicalia`
-      
-      if ('showSaveFilePicker' in window) {
+
+      if (hasFileSystemAccess()) {
         try {
-          const handle = await (window as any).showSaveFilePicker({
-            suggestedName: fileName,
-            types: [{
-              description: 'Proyecto Musicalia',
-              accept: { 'application/x-musicalia': ['.musicalia'] }
-            }]
-          })
-          
-          // Keep the in-app name unless the user picked a different file name
+          const picker: SaveFilePickerFn = (opts) => {
+            const pick = (window as unknown as { showSaveFilePicker?: SaveFilePickerFn }).showSaveFilePicker
+            if (!pick) return Promise.reject(new Error('showSaveFilePicker no está disponible'))
+            return pick(opts)
+          }
+          const handle = await pickSaveFileHandle(fileName, picker) as FileSystemFileHandle
           const chosenBase = String(handle.name || fileName).replace(/\.musicalia$/i, '').trim()
           const savedFileName = chosenBase || currentProjectName
           setCurrentProjectName(savedFileName)
+          currentFileHandleRef.current = handle
           setCurrentFileHandle(handle)
-          
-          await saveProjectToFileHandle(handle, savedFileName)
+          await persistToExistingHandle(handle, savedFileName)
         } catch (e: any) {
-          if (e.name === 'AbortError') {
-            // User cancelled, do nothing
+          if (e.name === 'AbortError') return
+          if (isActivationError(e)) {
+            setFileHandleUnsaved(true)
+            setFileSavePrompt({ handle: currentFileHandleRef.current, projectName: currentProjectName })
             return
           }
           throw e
         }
       } else {
-        // Fallback for browsers without File System Access API
         await saveFallbackDownload(fileName)
       }
     } catch (err: any) {
       console.error('[Save] Error:', err)
+      if (isActivationError(err)) {
+        setFileHandleUnsaved(true)
+        setFileSavePrompt({ handle: currentFileHandleRef.current, projectName: currentProjectName })
+        return
+      }
       const errorMsg = err.message || 'Error al guardar'
       setErrorMessage(`Error al guardar: ${errorMsg}`)
       setTimeout(() => setErrorMessage(null), 5000)
     }
   }
-  
-  const saveProjectToFileHandle = async (fileHandle: any, projectName: string) => {
-    try {
-      setUploadProgress(5)
-      setExportProgress('Preparando proyecto...')
-      
-      const zip = new JSZip()
-      
-      const projectData = {
-        version: APP_VERSION,
-        id: ensureProjectId(),
-        name: projectName,
-        bpm,
-        pitchSemitones,
-        tempoRate,
-        harmony: serializeHarmony(harmony),
-        loopStart,
-        loopEnd,
-        playheadPosition,
-        metronomeEnabled,
-        magnetEnabled,
-        countInBars,
-        tracks: trackStates.map((t, trackIdx) => ({
-          name: resolveTrackName(t.name, trackIdx),
-          mute: t.mute,
-          solo: t.solo,
-          volume: t.volume,
-          kind: trackKindOf(t.kind),
-          drum: projectDrumPayload(t.drum, trackIdx),
-          ...serializeTrackAudio(t),
-          clips: t.clips.map((clip, clipIdx) => projectClipPayload(clip, trackIdx, clipIdx))
-        }))
-      }
-      
-      zip.file('project.json', JSON.stringify(projectData, null, 2))
-      
-      setExportProgress('Procesando audio...')
-      
-      const bufferMap = new Map<AudioBuffer, string>()
-      
-      for (let trackIdx = 0; trackIdx < trackStates.length; trackIdx++) {
-        const track = trackStates[trackIdx]
-        if (track.drum) {
-          for (let padIdx = 0; padIdx < track.drum.pads.length; padIdx++) {
-            const pad = track.drum.pads[padIdx]
-            if (!pad.buffer) continue
-            const wavData = encodeAudioBufferWAV(pad.buffer)
-            zip.file(padZipName(trackIdx, padIdx), wavData.buffer as ArrayBuffer, { compression: 'STORE' })
-          }
-        }
-        for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
-          const clip = track.clips[clipIdx]
-          if (isPatternClip(clip)) continue
-          
-          let audioFileName: string
-          if (bufferMap.has(clip.buffer)) {
-            audioFileName = bufferMap.get(clip.buffer)!
-          } else {
-            audioFileName = `audio_${trackIdx}_${clipIdx}.wav`
-            bufferMap.set(clip.buffer, audioFileName)
-            
-            const wavData = encodeAudioBufferWAV(clip.buffer)
-            // Use STORE (no compression) for WAV files - they're already compressed
-            // and DEFLATE is slow and doesn't save much space
-            zip.file(audioFileName, wavData.buffer as ArrayBuffer, { compression: 'STORE' })
-          }
-          
-          const progress = 10 + ((trackIdx * track.clips.length + clipIdx + 1) / 
-            trackStates.reduce((sum, t) => sum + t.clips.length, 0)) * 80
-          setUploadProgress(progress)
-        }
-      }
-      
-      setExportProgress('Empaquetando...')
-      setUploadProgress(90)
-      
-      const blob = await zip.generateAsync({ 
-        type: 'blob',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 }
-      })
-      
-      setExportProgress('Guardando en tu compu...')
-      setUploadProgress(95)
-      
-      const writable = await fileHandle.createWritable()
-      await writable.write(blob)
-      await writable.close()
-      
-      setUploadProgress(100)
-      
-      setToastMessage(`✅ Proyecto guardado: ${projectName}`)
-      setShowToast(true)
-      setTimeout(() => setShowToast(false), 3000)
-      await registerSavedProject(projectName, fileHandle.name || `${projectName}.musicalia`, fileHandle)
-      
-      console.log(`[Save] Project saved successfully: ${projectName}`)
-    } catch (err: any) {
-      console.error('[Save] Error:', err)
-      throw err
-    } finally {
-      setUploadProgress(0)
-      setExportProgress('')
+
+  const retryPermitAndSave = () => {
+    const prompt = fileSavePrompt
+    const handle = prompt?.handle ?? currentFileHandleRef.current
+    if (handle) {
+      void persistToExistingHandle(handle, prompt?.projectName || currentProjectName)
+      return
     }
+    void handleSaveToLocal(true)
   }
   
   const saveFallbackDownload = async (fileName: string) => {
     try {
       setUploadProgress(5)
       setExportProgress('Preparando proyecto...')
-      
-      const zip = new JSZip()
-      
-      const projectData = {
-        version: APP_VERSION,
-        id: ensureProjectId(),
-        name: currentProjectName,
-        bpm,
-        pitchSemitones,
-        tempoRate,
-        harmony: serializeHarmony(harmony),
-        loopStart,
-        loopEnd,
-        playheadPosition,
-        metronomeEnabled,
-        magnetEnabled,
-        countInBars,
-        tracks: trackStates.map((t, trackIdx) => ({
-          name: resolveTrackName(t.name, trackIdx),
-          mute: t.mute,
-          solo: t.solo,
-          volume: t.volume,
-          kind: trackKindOf(t.kind),
-          drum: projectDrumPayload(t.drum, trackIdx),
-          ...serializeTrackAudio(t),
-          clips: t.clips.map((clip, clipIdx) => projectClipPayload(clip, trackIdx, clipIdx))
-        }))
-      }
-      
-      zip.file('project.json', JSON.stringify(projectData, null, 2))
-      
-      setExportProgress('Procesando audio...')
-      
-      const bufferMap = new Map<AudioBuffer, string>()
-      
-      for (let trackIdx = 0; trackIdx < trackStates.length; trackIdx++) {
-        const track = trackStates[trackIdx]
-        if (track.drum) {
-          for (let padIdx = 0; padIdx < track.drum.pads.length; padIdx++) {
-            const pad = track.drum.pads[padIdx]
-            if (!pad.buffer) continue
-            const wavData = encodeAudioBufferWAV(pad.buffer)
-            zip.file(padZipName(trackIdx, padIdx), wavData.buffer as ArrayBuffer, { compression: 'STORE' })
-          }
-        }
-        for (let clipIdx = 0; clipIdx < track.clips.length; clipIdx++) {
-          const clip = track.clips[clipIdx]
-          if (isPatternClip(clip)) continue
-          
-          let audioFileName: string
-          if (bufferMap.has(clip.buffer)) {
-            audioFileName = bufferMap.get(clip.buffer)!
-          } else {
-            audioFileName = `audio_${trackIdx}_${clipIdx}.wav`
-            bufferMap.set(clip.buffer, audioFileName)
-            
-            const wavData = encodeAudioBufferWAV(clip.buffer)
-            zip.file(audioFileName, wavData.buffer as ArrayBuffer, { compression: 'STORE' })
-          }
-          
-          const progress = 10 + ((trackIdx * track.clips.length + clipIdx + 1) / 
-            trackStates.reduce((sum, t) => sum + t.clips.length, 0)) * 80
-          setUploadProgress(progress)
-        }
-      }
-      
-      setExportProgress('Empaquetando...')
-      setUploadProgress(90)
-      
-      const blob = await zip.generateAsync({ 
-        type: 'blob',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 }
-      })
-      
+      const blob = await buildProjectArchiveBlob(currentProjectName)
       setExportProgress('Descargando...')
       setUploadProgress(95)
-      
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -1600,14 +1554,11 @@ function App() {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      
       setUploadProgress(100)
-      
       setToastMessage(`✅ Proyecto descargado: ${currentProjectName}`)
       setShowToast(true)
       setTimeout(() => setShowToast(false), 3000)
       await registerSavedProject(currentProjectName, fileName)
-      
       console.log(`[Save] Project downloaded: ${currentProjectName}`)
     } catch (err: any) {
       console.error('[Save] Error:', err)
@@ -1645,8 +1596,12 @@ function App() {
       currentProjectIdRef.current = resolvedId
       setCurrentProjectId(resolvedId)
       if (opts?.fileHandle) {
+        currentFileHandleRef.current = opts.fileHandle
         setCurrentFileHandle(opts.fileHandle)
         void persistFileHandle(resolvedId, opts.fileHandle)
+        void queryWritePermission(opts.fileHandle).then((status) => {
+          setFileHandleUnsaved(status !== 'granted')
+        })
       }
       
       setUploadProgress(20)
@@ -5568,12 +5523,25 @@ function App() {
             </button>
           )}
           <button
-            className="header-btn"
+            className={`header-btn${fileHandleUnsaved ? ' unsaved' : ''}`}
+            data-testid="save-button"
             onClick={() => handleSaveToLocal(false)}
-            title="Guardar proyecto (Cmd/Ctrl+S, Shift+Cmd/Ctrl+S para guardar como...)"
+            title={fileHandleUnsaved
+              ? 'Hay cambios sin guardar en el archivo (Cmd/Ctrl+S)'
+              : 'Guardar proyecto (Cmd/Ctrl+S)'}
           >
             <IconSave />
-            <span className="btn-label">Guardar</span>
+            <span className="btn-label">Guardar{fileHandleUnsaved ? ' •' : ''}</span>
+          </button>
+          <button
+            className="header-btn"
+            data-testid="save-as-button"
+            onClick={() => handleSaveToLocal(true)}
+            title="Guardar como… (Shift+Cmd/Ctrl+S)"
+            aria-label="Guardar como"
+          >
+            <IconSaveAs />
+            <span className="btn-label">Guardar como…</span>
           </button>
           <button
             className="header-btn"
@@ -5965,6 +5933,60 @@ function App() {
         <div className="error-toast">
           {errorMessage}
           <button onClick={() => setErrorMessage(null)}>×</button>
+        </div>
+      )}
+
+      {fileSavePrompt && (
+        <div
+          className="confirm-modal"
+          data-testid="file-save-permission"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setFileSavePrompt(null)
+          }}
+        >
+          <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="file-save-permission-title">
+            <h2 id="file-save-permission-title">Chrome necesita permiso para guardar en tu archivo</h2>
+            <p>
+              El clic de Guardar se usó para armar el proyecto y Chrome ya no deja escribir.
+              Tocá un botón para autorizar de nuevo. No se perdió nada: el proyecto sigue en esta sesión.
+            </p>
+            <div className="confirm-actions file-save-prompt-actions">
+              <button
+                type="button"
+                className="modal-button-primary"
+                data-testid="file-save-permit"
+                onClick={retryPermitAndSave}
+              >
+                Permitir y guardar
+              </button>
+              <button
+                type="button"
+                className="confirm-cancel"
+                data-testid="file-save-save-as"
+                onClick={() => {
+                  setFileSavePrompt(null)
+                  void handleSaveToLocal(true)
+                }}
+              >
+                Guardar como…
+              </button>
+              <button
+                type="button"
+                className="confirm-cancel"
+                data-testid="file-save-download"
+                onClick={() => {
+                  const name = `${sanitizeFilename(fileSavePrompt.projectName || currentProjectName) || 'proyecto'}.musicalia`
+                  setFileSavePrompt(null)
+                  void saveFallbackDownload(name)
+                }}
+              >
+                Descargar .musicalia
+              </button>
+              <button type="button" className="confirm-cancel" onClick={() => setFileSavePrompt(null)}>
+                Ahora no
+              </button>
+            </div>
+          </div>
         </div>
       )}
       
@@ -6780,8 +6802,8 @@ function App() {
               
               <h3>Teclado</h3>
               <ul>
-                <li>• <strong>Cmd/Ctrl+S</strong> - Guardar proyecto localmente</li>
-                <li>• <strong>Shift+Cmd/Ctrl+S</strong> - Guardar como... (nueva ubicación)</li>
+                <li>• <strong>Cmd/Ctrl+S</strong> - Guardar proyecto localmente. El permiso del archivo se pide en el mismo gesto, antes de armar el zip</li>
+                <li>• <strong>Shift+Cmd/Ctrl+S</strong> o <strong>Guardar como…</strong> - Nueva ubicación (showSaveFilePicker)</li>
                 <li>• <strong>S</strong> o <strong>Cmd/Ctrl+E</strong> - Dividir clip en playhead (S dispara el pad si el editor de batería está abierto)</li>
                 <li>• <strong>Q W E R / A S D F</strong> - Dispara los pads de la pista de batería seleccionada o con el editor abierto</li>
                 <li>• <strong>Cmd/Ctrl+X</strong> - Cortar clips seleccionados</li>
@@ -6800,6 +6822,7 @@ function App() {
               <h3>Guardar y Abrir</h3>
               <ul>
                 <li>• <strong>Guardar</strong> - Guardar proyecto en tu computadora (primera vez elige ubicación, después sobrescribe). El audio nunca sube a la nube</li>
+                <li>• <strong>Guardar como…</strong> - Elige otro archivo .musicalia. Si Chrome pide permiso de nuevo, usá Permitir y guardar; el proyecto no se pierde (sigue en la sesión)</li>
                 <li>• <strong>Abrir</strong> - Abrir proyecto .musicalia desde tu computadora</li>
                 <li>• <strong>Mis proyectos</strong> - Con sesión iniciada, cada Guardar anota nombre, archivo, fecha, BPM y pistas. Solo metadatos: el .musicalia sigue en tu disco. Si el archivo está en esta computadora se abre directo; si no, elegís el .musicalia. Quitar borra la entrada, no el archivo</li>
                 <li>• <strong>Ubicación</strong> - El navegador no revela la ruta completa. Podés anotar carpeta o disco a mano</li>

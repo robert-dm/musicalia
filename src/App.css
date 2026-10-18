@@ -181,6 +181,18 @@
   color: var(--accent-hover);
 }
 
+.header-btn.unsaved {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.file-save-prompt-actions {
+  justify-content: stretch;
+}
+
+.file-save-prompt-actions button {
+  min-height: var(--control-h);
+}
+
 .btn-primary,
 .modal-button-primary {
   background: var(--accent);

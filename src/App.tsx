@@ -22,6 +22,7 @@ import {
 import {
   addBeatAt,
   alignTempoMapToOrigin,
+  buildTempoMap,
   hasTempoMap,
   hydrateTempoMap,
   hydrateTrackTempoMap,
@@ -374,7 +375,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0098b'
+const APP_VERSION = '0.0099b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -2408,11 +2409,16 @@ function App() {
     setIsPaused(false)
     
     let lastUpdateTime = 0
+    let lastMetroAhead = startTime
     isPlayingRef.current = true
     const updatePlayhead = (timestamp: number) => {
       if (Tone.getTransport().state === 'started') {
         let currentTime = getSongTime()
         applyAllTrackAudio(currentTime)
+        if (currentTime - lastMetroAhead > 2.5) {
+          lastMetroAhead = currentTime
+          scheduleMetronome(currentTime)
+        }
         if (timestamp - lastUpdateTime < 50) {
           playheadAnimationRef.current = requestAnimationFrame(updatePlayhead)
           return
@@ -5935,6 +5941,49 @@ function App() {
         trackStatesRef.current = next
         setTrackStates(next)
         return { id, trackIndex: target.index, offsetSeconds: 0, duration: buffer.duration }
+      },
+      seedPerfSession: async (seconds = 600, trackCount = 5, bpm = 160) => {
+        await ensureAudio()
+        const raw = nativeAudioContext(Tone.getContext().rawContext)
+        const sr = raw.sampleRate
+        const dur = Math.max(8, Number(seconds) || 600)
+        const clipDur = 0.35
+        const length = Math.max(16, Math.floor(sr * clipDur))
+        const buffer = raw.createBuffer(1, length, sr)
+        const channel = buffer.getChannelData(0)
+        for (let i = 0; i < length; i++) channel[i] = Math.sin((2 * Math.PI * 220 * i) / sr) * 0.2
+        const next = trackStatesRef.current.map((track) => ({ ...track, clips: [...track.clips] }))
+        const audio = next
+          .map((track, index) => ({ track, index }))
+          .filter(({ track }) => !isMetronomeTrack(track) && track.kind !== 'drum')
+        const used = audio.slice(0, Math.max(1, trackCount))
+        used.forEach(({ index }, i) => {
+          const player = makeClipPlayer()
+          player.buffer = new Tone.ToneAudioBuffer(buffer)
+          player.loop = false
+          const dest = trackGainsRef.current[index]
+          if (dest) player.connect(dest)
+          next[index].clips = [{
+            player,
+            fileName: `Stem ${i + 1}`,
+            isPlaying: false,
+            buffer,
+            startPosition: 0,
+            offsetSeconds: 0,
+            id: `clip-perf-${index}`,
+            sourceStart: 0,
+            duration: i === 0 ? dur : clipDur
+          }]
+        })
+        trackStatesRef.current = next
+        setTrackStates(next)
+        const period = 60 / Math.max(1, bpm)
+        const times: number[] = []
+        for (let t = 0; t < dur; t += period) times.push(t)
+        applySessionBpm(bpm)
+        applyDetectedTempoMap(buildTempoMap(times, bpm, dur))
+        patchMetronomeMeter({ followMode: 'follow' })
+        return { beats: times.length, tracks: used.length, duration: dur, bpm }
       },
       seedWaveform: async () => {
         await ensureAudio()

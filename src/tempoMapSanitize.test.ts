@@ -8,7 +8,10 @@ import {
 } from './tempoMapSanitize'
 import {
   buildTempoMap,
+  followClicksInRange,
   hydrateTempoMap,
+  localBpmAt,
+  rulerMapBeats,
   trackBeatsFromMono,
   trueBeatTimesForLinearDrift,
   type TempoMap
@@ -153,6 +156,22 @@ console.log(`local BPM start/mid/end ${startLocal} / ${midLocal} / ${endLocal}, 
 assert(startLocal >= 140 && startLocal <= 180, `start local BPM in 140–180 (got ${startLocal})`)
 assert(midLocal >= 140 && midLocal <= 180, `mid local BPM in 140–180 (got ${midLocal})`)
 assert(endLocal >= 140 && endLocal <= 180, `end local BPM in 140–180 (got ${endLocal})`)
+
+const perfTimes: number[] = []
+for (let t = 0; t < 600; t += 0.375) perfTimes.push(t)
+const perfMap = buildTempoMap(perfTimes, 160, 600)
+const warm = sanitizeTempoMap(perfMap)
+const t0 = performance.now()
+let bpmSum = 0
+for (let i = 0; i < 1600; i++) bpmSum += localBpmAt(warm, warm.beats[i % warm.beats.length].time + 1e-4)
+for (let i = 0; i < 200; i++) {
+  rulerMapBeats(warm, { followMode: 'follow', numerator: 4, denominator: 4 }, 160)
+  followClicksInRange({ map: warm, meter: { followMode: 'follow' }, start: i, end: i + 8 })
+  isTempoMapUsable(warm)
+}
+const perfMs = performance.now() - t0
+console.log(`hot-path 1600 localBpm + 200 ruler/clicks: ${perfMs.toFixed(2)}ms (sum ${bpmSum})`)
+assert(perfMs < 50, `cached hot paths stay under 50ms (0.0098b was ~1900ms; got ${perfMs.toFixed(1)}ms)`)
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

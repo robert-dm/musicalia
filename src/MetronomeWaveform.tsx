@@ -18,11 +18,10 @@ import {
 } from './waveform'
 
 function tempoMapChecksum(map: TempoMap): number {
-  let hash = map.downbeatIndex * 1000 + map.beats.length
-  for (const beat of map.beats) {
-    hash = (hash * 33 + Math.round(beat.time * 10000)) % 2147483647
-  }
-  return hash
+  const n = map.beats.length
+  const first = n ? Math.round(map.beats[0].time * 10000) : 0
+  const last = n ? Math.round(map.beats[n - 1].time * 10000) : 0
+  return map.downbeatIndex * 1000 + n + first + last
 }
 
 interface MetronomeWaveformProps {

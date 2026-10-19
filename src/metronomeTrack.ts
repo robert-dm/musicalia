@@ -126,6 +126,8 @@ export function clickTimesInRange(args: {
   })
 }
 
+export const METRONOME_LOOKAHEAD_SECONDS = 8
+
 export function scheduledMetronomeClicks(args: {
   bpm: number
   beatsPerBar?: number
@@ -145,6 +147,7 @@ export function scheduledMetronomeClicks(args: {
     windowStart = Math.max(windowStart, args.loopStart)
     windowEnd = Math.min(windowEnd, args.loopEnd)
   }
+  windowEnd = Math.min(windowEnd, windowStart + METRONOME_LOOKAHEAD_SECONDS)
   return clickTimesInRange({
     bpm: args.bpm,
     beatsPerBar: args.beatsPerBar,

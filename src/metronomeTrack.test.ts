@@ -8,6 +8,7 @@ import {
   effectiveMetronomeGain,
   ensureMetronomeTrack,
   findMetronomeIndex,
+  METRONOME_LOOKAHEAD_SECONDS,
   METRONOME_TRACK_NAME,
   metronomeIsOn,
   scheduledMetronomeClicks,
@@ -139,6 +140,25 @@ const followVel = scheduledMetronomeClicks({
   songEnd: 0.4
 })
 assert(followVel.length === 2 && followVel[1].songTime === 0.372, 'Vel does not move song-time beat grid')
+
+const longTimes: number[] = []
+for (let t = 0; t < 600; t += 0.375) longTimes.push(t)
+const longMap = buildTempoMap(longTimes, 160, 600)
+const lookahead = scheduledMetronomeClicks({
+  bpm: 160,
+  meter: { followMode: 'follow' },
+  tempoMap: longMap,
+  songTime: 0,
+  playOriginSong: 0,
+  tempoRate: 1,
+  songEnd: 600
+})
+assert(lookahead.length > 4, 'lookahead still schedules the opening clicks')
+assert(
+  lookahead.every((c) => c.songTime < METRONOME_LOOKAHEAD_SECONDS + 1e-6),
+  `follow clicks stay in the ${METRONOME_LOOKAHEAD_SECONDS}s lookahead, not the whole song`
+)
+assert(lookahead.length < 50, `does not schedule ~1600 clicks at once (got ${lookahead.length})`)
 assert(Math.abs(followVel[1].transportTime - 0.372 / 0.5) < 1e-9, 'Vel 0.5x stretches follow-mode transport times')
 
 assert(effectiveMetronomeGain(0.7, false) === 0.7, 'unmuted metro gain is volume')

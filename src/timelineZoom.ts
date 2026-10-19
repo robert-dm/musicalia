@@ -144,13 +144,26 @@ function mapBeatPeriodHint(
  * Fill the grid back to t=0. The first bar line is always at the origin
  * and labeled 1 — no empty pre-roll before the first click.
  */
+function beatTickIndexAtOrAfter(beats: MapBeatTick[], time: number): number {
+  let lo = 0
+  let hi = beats.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (beats[mid].t < time) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
 export function expandMapBeatsToOrigin(
   beats: MapBeatTick[],
   periodHint: number,
   pulsesPerBar = 4
 ): MapBeatTick[] {
   if (beats.length < 2) return beats
-  const sorted = [...beats].sort((a, b) => a.t - b.t)
+  const alreadySorted = beats[0].t <= beats[beats.length - 1].t
+  const sorted = alreadySorted ? beats : [...beats].sort((a, b) => a.t - b.t)
+  if (sorted[0].t <= 1e-6 && sorted[0].bar === 1) return sorted
   const period = mapBeatPeriodHint(sorted, 60 / Math.max(1e-6, periodHint), periodHint)
   if (!(period > 1e-6)) return sorted
   const snap = Math.min(ORIGIN_SNAP_SECONDS, period * 0.15)
@@ -207,19 +220,18 @@ export function timelineTicks(input: {
   if (input.mapBeats && input.mapBeats.length >= 2) {
     const span = input.mapBeats[input.mapBeats.length - 1].t - input.mapBeats[0].t
     const density = input.mapBeats.length / Math.max(span, 1e-6)
-    const tooDense = density > 5.5 || span > 1e-6 && (end - start) > 0 &&
-      input.mapBeats.filter((b) => b.downbeat && b.t >= start && b.t <= end).length > 80
-    if (!tooDense) {
     const pulses = Math.max(1, input.beatsPerBar ?? 4)
+    const estimatedBars = ((end - start) * density) / pulses
+    const tooDense = density > 5.5 || estimatedBars > 80
+    if (!tooDense) {
     const period = mapBeatPeriodHint(input.mapBeats, input.bpm, input.pulseSeconds)
     const mapped = expandMapBeatsToOrigin(input.mapBeats, period, pulses)
     const ticks: TimelineTick[] = []
     let fallbackBar = 0
-    for (const beat of mapped) {
-      if (beat.t < start - 1e-9 || beat.t > end + 1e-9) {
-        if (beat.downbeat && beat.t < start && beat.bar == null) fallbackBar++
-        continue
-      }
+    const i0 = beatTickIndexAtOrAfter(mapped, start - 1e-9)
+    for (let i = i0; i < mapped.length; i++) {
+      const beat = mapped[i]
+      if (beat.t > end + 1e-9) break
       if (beat.downbeat) {
         const label = beat.bar != null ? String(beat.bar) : String(++fallbackBar)
         ticks.push({ t: beat.t, kind: 'bar', label })

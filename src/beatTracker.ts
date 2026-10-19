@@ -8,6 +8,7 @@ import {
 } from './metronomeMeter'
 import { clampBpm } from './tempoMath'
 import {
+  beatIndexAtOrAfter,
   isTempoMapUsable,
   openingMedianPeriod,
   prependTimesToOrigin,
@@ -81,6 +82,8 @@ export function alignTempoMapToOrigin(map: TempoMap): TempoMap {
   return sanitizeTempoMap(map)
 }
 
+const rulerBeatsCache = new WeakMap<TempoMap, { pulses: number; beats: RulerMapBeat[] }>()
+
 /** Bar/beat ticks for the ruler when Seguir la canción is on. */
 export function rulerMapBeats(
   map: TempoMap | null | undefined,
@@ -90,7 +93,9 @@ export function rulerMapBeats(
   if (!isFollowEnabled(meter, map) || !map) return undefined
   const aligned = sanitizeTempoMap(map)
   const pulses = pulsesPerBar(normalizeMetronomeMeter(meter), bpm)
-  return aligned.beats.map((beat, index) => {
+  const cached = rulerBeatsCache.get(aligned)
+  if (cached && cached.pulses === pulses) return cached.beats
+  const beats = aligned.beats.map((beat, index) => {
     const downbeat = index % pulses === 0
     return {
       t: beat.time,
@@ -98,6 +103,8 @@ export function rulerMapBeats(
       bar: downbeat ? Math.floor(index / pulses) + 1 : undefined
     }
   })
+  rulerBeatsCache.set(aligned, { pulses, beats })
+  return beats
 }
 
 export function buildTempoMap(times: number[], bpm: number, duration: number): TempoMap {
@@ -351,8 +358,9 @@ export function followClicksInRange(args: {
   if (!(end > start)) return []
   const clicks: MeterClick[] = []
   const map = sanitizeTempoMap(args.map)
-  const beats = map.beats.slice()
-  for (let i = 0; i < beats.length; i++) {
+  const beats = map.beats
+  const first = beatIndexAtOrAfter(beats, start)
+  for (let i = first; i < beats.length; i++) {
     const time = beats[i].time
     if (time >= end - 1e-12) break
     if (time < start) continue

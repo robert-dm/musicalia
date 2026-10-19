@@ -1,11 +1,15 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   alignTempoMapToOrigin,
   isDownbeat,
   localBpmAt,
   type TempoMap
 } from './beatTracker'
+import { beatIndexAtOrAfter } from './tempoMapSanitize'
 import { formatBpm } from './tempoMath'
+import { viewTimeWindow } from './timelineZoom'
+
+const MAX_VISIBLE_MARKERS = 240
 
 interface TempoMapMarkersProps {
   map: TempoMap
@@ -25,7 +29,7 @@ export function TempoMapMarkers({
   map,
   pulsesPerBar,
   duration,
-  viewStart = 0,
+  viewStart,
   viewEnd,
   follow,
   onGestureStart,
@@ -34,22 +38,72 @@ export function TempoMapMarkers({
   onRemove,
   onSetDownbeat
 }: TempoMapMarkersProps) {
-  const end = viewEnd ?? duration
   const aligned = useMemo(() => alignTempoMapToOrigin(map), [map])
   const [hoverId, setHoverId] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ id: string; x: number; y: number; time: number } | null>(null)
-  const visible = useMemo(
-    () => aligned.beats.filter((b) => b.time >= viewStart - 0.05 && b.time <= end + 0.05),
-    [aligned.beats, viewStart, end]
-  )
+  const [view, setView] = useState<{ start: number; end: number }>({
+    start: viewStart ?? 0,
+    end: viewEnd ?? duration
+  })
+
+  useEffect(() => {
+    if (viewStart != null && viewEnd != null) {
+      setView({ start: viewStart, end: viewEnd })
+      return
+    }
+    const host = document.querySelector('[data-testid="metronome-lane"]') as HTMLElement | null
+    const scroller = host?.closest('.lanes-scroll-content') as HTMLElement | null
+    const update = () => {
+      if (!scroller) {
+        setView({ start: 0, end: duration })
+        return
+      }
+      setView(viewTimeWindow({
+        scrollLeft: scroller.scrollLeft,
+        viewportWidth: scroller.clientWidth || 1,
+        zoom: Math.max(1e-6, (scroller.scrollWidth || 1) / Math.max(1, scroller.clientWidth || 1)),
+        layoutMax: duration,
+        padPx: 80
+      }))
+    }
+    update()
+    if (!scroller) return
+    scroller.addEventListener('scroll', update, { passive: true })
+    const ro = new ResizeObserver(update)
+    ro.observe(scroller)
+    return () => {
+      scroller.removeEventListener('scroll', update)
+      ro.disconnect()
+    }
+  }, [duration, viewStart, viewEnd])
+
+  const visible = useMemo(() => {
+    const start = view.start - 0.05
+    const end = view.end + 0.05
+    const beats = aligned.beats
+    const i0 = beatIndexAtOrAfter(beats, start)
+    const out: Array<{ beat: (typeof beats)[number]; index: number }> = []
+    for (let i = i0; i < beats.length; i++) {
+      if (beats[i].time > end) break
+      out.push({ beat: beats[i], index: i })
+    }
+    if (out.length <= MAX_VISIBLE_MARKERS) return out
+    const downs = out.filter((row) => isDownbeat(aligned, row.index, pulsesPerBar))
+    if (downs.length > 0 && downs.length <= MAX_VISIBLE_MARKERS) return downs
+    const stride = Math.ceil(out.length / MAX_VISIBLE_MARKERS)
+    return out.filter((_, i) => i % stride === 0)
+  }, [aligned, pulsesPerBar, view.start, view.end])
+
+  const hoverBpm = hoverId
+    ? localBpmAt(aligned, aligned.beats.find((b) => b.id === hoverId)?.time ?? 0)
+    : null
+
   if (!follow || duration <= 0) return null
 
   return (
     <div className="tempo-map-overlay" data-testid="tempo-map-overlay">
-      {visible.map((beat, i) => {
-        const index = aligned.beats.findIndex((b) => b.id === beat.id)
+      {visible.map(({ beat, index }, i) => {
         const down = isDownbeat(aligned, index, pulsesPerBar)
-        const local = localBpmAt(aligned, beat.time + 1e-4)
         return (
           <button
             key={beat.id}
@@ -60,7 +114,7 @@ export function TempoMapMarkers({
             data-beat-time={String(beat.time)}
             data-downbeat={down ? '1' : '0'}
             style={{ left: `${(beat.time / duration) * 100}%` }}
-            title={`${formatBpm(local)} BPM`}
+            title={hoverId === beat.id && hoverBpm != null ? `${formatBpm(hoverBpm)} BPM` : undefined}
             onPointerDown={(e) => {
               if (e.button !== 0) return
               e.preventDefault()
@@ -90,8 +144,8 @@ export function TempoMapMarkers({
             onMouseEnter={() => setHoverId(beat.id)}
             onMouseLeave={() => setHoverId((cur) => (cur === beat.id ? null : cur))}
           >
-            {hoverId === beat.id && (
-              <span className="tempo-marker-bpm">{formatBpm(local)}</span>
+            {hoverId === beat.id && hoverBpm != null && (
+              <span className="tempo-marker-bpm">{formatBpm(hoverBpm)}</span>
             )}
           </button>
         )

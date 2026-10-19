@@ -91,8 +91,25 @@ try {
   assert(seeded.followMode === 'follow', `follow mode, got ${seeded.followMode}`)
   assert((seeded.version || '').includes('0.0099b'), `UI is 0.0099b, got ${seeded.version}`)
   assert(seeded.markers > 4, `visible markers render, got ${seeded.markers}`)
-  assert(seeded.markers <= 240, `markers only for the visible/capped range (got ${seeded.markers}, 0.0098b mounted ~1600)`)
+  assert(seeded.markers <= 48, `idle marker lane stays capped (got ${seeded.markers}; 0.0098b mounted ~1600, first 0.0099b pass 229)`)
   console.log(`seed+first paint ${seeded.seedMs.toFixed(1)}ms (0.0098b marker pass alone was ~1900ms)`)
+
+  const idle = await page.evaluate(async () => {
+    window.__musicaliaMetronome.resetRenderStats()
+    await new Promise((r) => setTimeout(r, 2000))
+    const stats = window.__musicaliaMetronome.getRenderStats()
+    return {
+      app: stats.app,
+      markers: stats.markers,
+      appPerSec: stats.app / 2,
+      markersPerSec: stats.markers / 2,
+      markerNodes: document.querySelectorAll('[data-testid^="tempo-marker-"]').length
+    }
+  })
+  console.log('idle renders/2s', idle)
+  assert(idle.appPerSec < 2, `idle App renders/sec stay near zero (got ${idle.appPerSec}; a loop would be tens/sec)`)
+  assert(idle.markersPerSec < 1, `idle marker lane does not re-render (got ${idle.markersPerSec}/sec)`)
+  assert(idle.markerNodes <= 48, `idle DOM markers stay capped (got ${idle.markerNodes})`)
 
   await page.evaluate(() => window.__musicaliaMetronome.unmute())
   await page.waitForTimeout(200)

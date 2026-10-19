@@ -2,6 +2,15 @@ import { useLayoutEffect, useState, type MutableRefObject, type ReactNode } from
 import { RULER_HEIGHT_PX, displayLoop, rulerCursor, type LoopHit } from './loopRegion'
 import { pxPerSecond, timelineTicks, viewTimeWindow, type MapBeatTick, type TimelineTick } from './timelineZoom'
 
+function sameTicks(a: TimelineTick[], b: TimelineTick[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].t !== b[i].t || a[i].kind !== b[i].kind || a[i].label !== b[i].label) return false
+  }
+  return true
+}
+
 interface TimelineRulerProps {
   bars?: ReactNode
   scrollerRef?: MutableRefObject<HTMLDivElement | null>
@@ -66,7 +75,7 @@ export function TimelineRuler({
         layoutMax: max,
         padPx: 80
       })
-      setTicks(timelineTicks({
+      const next = timelineTicks({
         layoutMax: max,
         pxPerSec: pps,
         viewStart: view.start,
@@ -77,7 +86,8 @@ export function TimelineRuler({
         barSeconds,
         phaseSeconds,
         mapBeats
-      }))
+      })
+      setTicks((prev) => (sameTicks(prev, next) ? prev : next))
     }
     update()
     if (!scroller) return

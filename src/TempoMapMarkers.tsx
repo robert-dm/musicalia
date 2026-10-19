@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import {
   alignTempoMapToOrigin,
   isDownbeat,
@@ -9,7 +9,7 @@ import { beatIndexAtOrAfter } from './tempoMapSanitize'
 import { formatBpm } from './tempoMath'
 import { viewTimeWindow } from './timelineZoom'
 
-const MAX_VISIBLE_MARKERS = 240
+const MAX_VISIBLE_MARKERS = 48
 
 interface TempoMapMarkersProps {
   map: TempoMap
@@ -25,7 +25,11 @@ interface TempoMapMarkersProps {
   onSetDownbeat: (id: string) => void
 }
 
-export function TempoMapMarkers({
+function sameView(a: { start: number; end: number }, b: { start: number; end: number }): boolean {
+  return Math.abs(a.start - b.start) < 1e-4 && Math.abs(a.end - b.end) < 1e-4
+}
+
+export const TempoMapMarkers = memo(function TempoMapMarkers({
   map,
   pulsesPerBar,
   duration,
@@ -38,6 +42,10 @@ export function TempoMapMarkers({
   onRemove,
   onSetDownbeat
 }: TempoMapMarkersProps) {
+  if (typeof window !== 'undefined') {
+    const w = window as unknown as { __musicaliaMarkerRenders?: number }
+    w.__musicaliaMarkerRenders = (w.__musicaliaMarkerRenders ?? 0) + 1
+  }
   const aligned = useMemo(() => alignTempoMapToOrigin(map), [map])
   const [hoverId, setHoverId] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ id: string; x: number; y: number; time: number } | null>(null)
@@ -48,32 +56,33 @@ export function TempoMapMarkers({
 
   useEffect(() => {
     if (viewStart != null && viewEnd != null) {
-      setView({ start: viewStart, end: viewEnd })
+      const next = { start: viewStart, end: viewEnd }
+      setView((prev) => (sameView(prev, next) ? prev : next))
       return
     }
     const host = document.querySelector('[data-testid="metronome-lane"]') as HTMLElement | null
     const scroller = host?.closest('.lanes-scroll-content') as HTMLElement | null
     const update = () => {
       if (!scroller) {
-        setView({ start: 0, end: duration })
+        setView((prev) => (sameView(prev, { start: 0, end: duration }) ? prev : { start: 0, end: duration }))
         return
       }
-      setView(viewTimeWindow({
+      const next = viewTimeWindow({
         scrollLeft: scroller.scrollLeft,
         viewportWidth: scroller.clientWidth || 1,
         zoom: Math.max(1e-6, (scroller.scrollWidth || 1) / Math.max(1, scroller.clientWidth || 1)),
         layoutMax: duration,
         padPx: 80
-      }))
+      })
+      setView((prev) => (sameView(prev, next) ? prev : next))
     }
     update()
     if (!scroller) return
     scroller.addEventListener('scroll', update, { passive: true })
-    const ro = new ResizeObserver(update)
-    ro.observe(scroller)
+    window.addEventListener('resize', update)
     return () => {
       scroller.removeEventListener('scroll', update)
-      ro.disconnect()
+      window.removeEventListener('resize', update)
     }
   }, [duration, viewStart, viewEnd])
 
@@ -168,4 +177,4 @@ export function TempoMapMarkers({
       )}
     </div>
   )
-}
+})

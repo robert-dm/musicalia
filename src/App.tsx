@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react'
 import { flushSync } from 'react-dom'
 import * as Tone from 'tone'
 import JSZip from 'jszip'
@@ -657,6 +657,10 @@ function App() {
   const clipPointerSelectRef = useRef<{ clipId: string; action: ClipPointerSelectAction } | null>(null)
   const appCommitCountRef = useRef(0)
   appCommitCountRef.current += 1
+  if (typeof window !== 'undefined') {
+    const w = window as unknown as { __musicaliaAppRenders?: number }
+    w.__musicaliaAppRenders = (w.__musicaliaAppRenders ?? 0) + 1
+  }
   const trimLiveRef = useRef<{
     active: boolean
     trackIndex: number
@@ -689,6 +693,23 @@ function App() {
     const track = idx >= 0 ? trackStatesRef.current[idx] : undefined
     return meterOf(track)
   }
+
+  const metroTrackIndex = findMetronomeIndex(trackStates)
+  const metroTrack = metroTrackIndex >= 0 ? trackStates[metroTrackIndex] : undefined
+  const metroMeter = metroTrack?.metronome
+  const metroMapBeats = useMemo(
+    () => rulerMapBeats(metroTrack?.tempoMap, metroMeter, bpm),
+    [metroTrack?.tempoMap, metroMeter, bpm]
+  )
+  const metroRuler = useMemo(() => {
+    const meter = normalizeMetronomeMeter(metroMeter)
+    return {
+      beatsPerBar: pulsesPerBar(meter, bpm),
+      pulseSeconds: pulseDurationSeconds(bpm, meter),
+      barSeconds: barDurationSeconds(bpm, meter),
+      phaseSeconds: meter.phaseSeconds
+    }
+  }, [metroMeter, bpm])
 
   const getCountInSeconds = () => {
     return countInBars * barDurationSeconds(bpm, currentMetronomeMeter())
@@ -5759,7 +5780,15 @@ function App() {
         return true
       },
       resetTempo: () => resetTempoToFixed(),
-      reanalyzeTempo: () => reanalyzeTempo()
+      reanalyzeTempo: () => reanalyzeTempo(),
+      getRenderStats: () => ({
+        app: (window as unknown as { __musicaliaAppRenders?: number }).__musicaliaAppRenders ?? 0,
+        markers: (window as unknown as { __musicaliaMarkerRenders?: number }).__musicaliaMarkerRenders ?? 0
+      }),
+      resetRenderStats: () => {
+        ;(window as unknown as { __musicaliaAppRenders?: number }).__musicaliaAppRenders = 0
+        ;(window as unknown as { __musicaliaMarkerRenders?: number }).__musicaliaMarkerRenders = 0
+      }
     }
     ;(window as unknown as { __musicaliaMetronome?: typeof api }).__musicaliaMetronome = api
     return () => {
@@ -7168,15 +7197,11 @@ function App() {
             scrollerRef={lanesScrollRef}
             zoom={horizontalZoom}
             bpm={bpm}
-            beatsPerBar={pulsesPerBar(currentMetronomeMeter(), bpm)}
-            pulseSeconds={pulseDurationSeconds(bpm, currentMetronomeMeter())}
-            barSeconds={barDurationSeconds(bpm, currentMetronomeMeter())}
-            phaseSeconds={currentMetronomeMeter().phaseSeconds}
-            mapBeats={rulerMapBeats(
-              trackStates[findMetronomeIndex(trackStates)]?.tempoMap,
-              currentMetronomeMeter(),
-              bpm
-            )}
+            beatsPerBar={metroRuler.beatsPerBar}
+            pulseSeconds={metroRuler.pulseSeconds}
+            barSeconds={metroRuler.barSeconds}
+            phaseSeconds={metroRuler.phaseSeconds}
+            mapBeats={metroMapBeats}
             layoutMax={getLayoutMax()}
             loopStart={loopStart}
             loopEnd={loopEnd}
@@ -7202,7 +7227,7 @@ function App() {
               trackKind={trackState.kind}
               bpm={bpm}
               beatsPerBar={pulsesPerBar(meterOf(trackState), bpm)}
-              meter={trackState.kind === 'metronome' ? meterOf(trackState) : undefined}
+              meter={trackState.kind === 'metronome' ? trackState.metronome : undefined}
               tempoMap={trackState.kind === 'metronome' ? trackState.tempoMap : undefined}
               onTempoMove={handleTempoMove}
               onTempoAdd={handleTempoAdd}

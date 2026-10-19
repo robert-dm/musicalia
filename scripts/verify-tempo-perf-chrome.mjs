@@ -89,7 +89,7 @@ try {
   assert(seeded.beats >= 1500, `10-minute 160 BPM map (~1600 beats), got ${seeded.beats}`)
   assert(seeded.tracks >= 5, `5 tracks, got ${seeded.tracks}`)
   assert(seeded.followMode === 'follow', `follow mode, got ${seeded.followMode}`)
-  assert((seeded.version || '').includes('0.0100b'), `UI is 0.0100b, got ${seeded.version}`)
+  assert((seeded.version || '').includes('0.0101b'), `UI is 0.0101b, got ${seeded.version}`)
   assert(seeded.markers > 4, `visible markers render, got ${seeded.markers}`)
   assert(seeded.markers <= 48, `idle marker lane stays capped (got ${seeded.markers}; 0.0098b mounted ~1600, first 0.0099b pass 229)`)
   console.log(`seed+first paint ${seeded.seedMs.toFixed(1)}ms (0.0098b marker pass alone was ~1900ms)`)

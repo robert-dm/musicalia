@@ -6,6 +6,7 @@ import {
   WAVEFORM_VIEW_PAD_PX,
   bestAvailableLod,
   canvasDeviceSize,
+  clipTimelineCssWidth,
   drawWaveformRange,
   getOrComputeMips,
   pickWaveformLod,
@@ -25,6 +26,11 @@ function findScrollPort(el: HTMLElement | null): HTMLElement | null {
   return (el?.closest('.lanes-scroll-content') as HTMLElement | null) || null
 }
 
+function findTimelineInner(el: HTMLElement | null): HTMLElement | null {
+  return (el?.closest('[data-testid="lanes-scroll-inner"]') as HTMLElement | null)
+    || (el?.closest('.lanes-scroll-inner') as HTMLElement | null)
+}
+
 function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const tilesRef = useRef<HTMLCanvasElement[]>([])
@@ -39,9 +45,16 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
     const paint = () => {
       if (isClipInteractLocked()) return
       const port = findScrollPort(host)
+      const inner = findTimelineInner(host)
       const range = visibleHostRange(host, port, WAVEFORM_VIEW_PAD_PX)
       const cssH = Math.max(1, host.clientHeight || host.getBoundingClientRect().height || 1)
-      const hostW = Math.max(1, host.clientWidth || host.getBoundingClientRect().width || 1)
+      const layoutMax = Number(inner?.dataset.layoutMax || 0)
+      const timelineW = inner?.clientWidth || 0
+      const expectedW = clipTimelineCssWidth(duration, layoutMax, timelineW)
+      const hostW = Math.max(
+        1,
+        expectedW > 1 ? expectedW : (host.clientWidth || host.getBoundingClientRect().width || 1)
+      )
       if (!range) {
         for (const tile of tilesRef.current) tile.style.display = 'none'
         return
@@ -51,6 +64,7 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
       const sampleCount = Math.max(1, Math.round(duration * buffer.sampleRate))
       const spp = samplesPerDevicePixel({ sampleCount, cssWidth: hostW, dpr })
       const lod = bestAvailableLod(getOrComputeMips(buffer), pickWaveformLod(spp))
+      const zoomKey = inner?.dataset.horizontalZoom || ''
       const key = [
         buffer.length,
         buffer.sampleRate,
@@ -58,6 +72,8 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
         duration.toFixed(5),
         dpr.toFixed(3),
         lod,
+        hostW.toFixed(1),
+        zoomKey,
         tiles.map((t) => `${t.cssLeft.toFixed(1)}:${t.cssWidth.toFixed(1)}`).join('|'),
         cssH.toFixed(1)
       ].join('/')
@@ -94,6 +110,7 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
       host.dataset.waveformLod = String(lod)
       host.dataset.waveformTiles = String(tiles.length)
       host.dataset.waveformDpr = String(dpr)
+      host.dataset.waveformHostW = hostW.toFixed(1)
     }
 
     const schedule = () => {
@@ -106,6 +123,7 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
 
     paint()
     const port = findScrollPort(host)
+    const inner = findTimelineInner(host)
     const observer = new ResizeObserver(() => {
       if (isClipInteractLocked()) return
       drawnKeyRef.current = ''
@@ -116,6 +134,15 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
       observer.observe(port)
       port.addEventListener('scroll', schedule, { passive: true })
     }
+    if (inner) observer.observe(inner)
+    const zoomWatch = inner
+      ? new MutationObserver(() => {
+        if (isClipInteractLocked()) return
+        drawnKeyRef.current = ''
+        schedule()
+      })
+      : null
+    zoomWatch?.observe(inner!, { attributes: true, attributeFilter: ['data-horizontal-zoom', 'data-layout-max'] })
     window.addEventListener('resize', schedule)
     const unlock = new MutationObserver(() => {
       if (!isClipInteractLocked()) {
@@ -133,6 +160,7 @@ function ClipWaveformInner({ buffer, sourceStart, duration }: ClipWaveformProps)
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       observer.disconnect()
+      zoomWatch?.disconnect()
       port?.removeEventListener('scroll', schedule)
       window.removeEventListener('resize', schedule)
       unlock.disconnect()

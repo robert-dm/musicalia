@@ -71,7 +71,7 @@ try {
   await page.waitForFunction(() => window.__musicaliaMetronome, { timeout: 15000 })
 
   const version = await page.locator('.version-label').textContent()
-  assert((version || '').includes('0.0100b'), `UI is 0.0100b, got ${version}`)
+  assert((version || '').includes('0.0101b'), `UI is 0.0101b, got ${version}`)
 
   await page.locator('[data-testid="metronome-settings-gear"]').click()
   await page.waitForSelector('[data-testid="metronome-settings"]')

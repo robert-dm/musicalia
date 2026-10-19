@@ -376,7 +376,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0100b'
+const APP_VERSION = '0.0101b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -4383,20 +4383,16 @@ function App() {
     beginImportUndo()
     console.log('[DEBUG] loadSingleTrack: trackIndex=', trackIndex, 'gain exists=', !!trackGainsRef.current[trackIndex])
 
-    const url = URL.createObjectURL(file)
     const trackGain = trackGainsRef.current[trackIndex]
     if (!trackGain) return
-    
-    const loader = new Tone.Player()
-    console.log('[DEBUG] Before load')
-    await loader.load(url)
-    console.log('[DEBUG] After load: player.loaded=', loader.loaded, 'duration=', loader.buffer.duration)
-    const buffer = loader.buffer.get() as AudioBuffer
+
+    const arrayBuffer = await file.arrayBuffer()
+    const raw = nativeAudioContext(Tone.getContext().rawContext)
+    const buffer = await raw.decodeAudioData(arrayBuffer.slice(0))
     const player = makeClipPlayer(buffer)
     player.loop = false
     applyClipPlayback(player, tempoRateRef.current, pitchRef.current)
     player.connect(trackGain)
-    loader.dispose()
 
     await maybeApplyDetectedBpm(buffer)
 
@@ -6123,7 +6119,57 @@ function App() {
         setHorizontalZoom(next)
         return next
       },
-      getZoom: () => horizontalZoomRef.current
+      getZoom: () => horizontalZoomRef.current,
+      addEmptyTrack: () => addEmptyTrack(),
+      seedClipOnTrack: async (trackIndex: number, seconds = 8) => {
+        await ensureAudio()
+        const raw = nativeAudioContext(Tone.getContext().rawContext)
+        const sr = raw.sampleRate
+        const dur = Math.max(0.4, Number(seconds) || 8)
+        const length = Math.max(16, Math.floor(sr * dur))
+        const buffer = raw.createBuffer(1, length, sr)
+        const channel = buffer.getChannelData(0)
+        for (let i = 0; i < length; i++) {
+          const t = i / sr
+          channel[i] = Math.sin(2 * Math.PI * 220 * t) * Math.min(1, t * 8) * Math.min(1, (dur - t) * 4) * 0.55
+        }
+        const next = trackStatesRef.current.map((track) => ({ ...track, clips: [...track.clips] }))
+        const dest = next[trackIndex]
+        if (!dest || isMetronomeTrack(dest) || dest.kind === 'drum') throw new Error('need an audio track')
+        const player = makeClipPlayer()
+        player.buffer = new Tone.ToneAudioBuffer(buffer)
+        player.loop = false
+        const gain = trackGainsRef.current[trackIndex]
+        if (gain) player.connect(gain)
+        const id = `clip-added-${trackIndex}`
+        dest.clips = [{
+          player,
+          fileName: 'Added track',
+          isPlaying: false,
+          buffer,
+          startPosition: 0,
+          offsetSeconds: 0,
+          id,
+          sourceStart: 0,
+          duration: buffer.duration
+        }]
+        trackStatesRef.current = next
+        setTrackStates(next)
+        return { id, trackIndex, duration: buffer.duration }
+      },
+      setVerticalZoom: (zoom: number) => {
+        const next = Math.max(0.5, Math.min(3, Number(zoom) || 1))
+        setVerticalZoom(next)
+        return next
+      },
+      markUnsaved: () => {
+        setProjectDirty(true)
+        setFileHandleUnsaved(true)
+      },
+      clearUnsaved: () => {
+        setProjectDirty(false)
+        setFileHandleUnsaved(false)
+      }
     }
     ;(window as unknown as { __musicaliaClips?: typeof api }).__musicaliaClips = api
     return () => {
@@ -6221,6 +6267,8 @@ function App() {
       delete (window as unknown as { __musicaliaRecord?: typeof recordApi }).__musicaliaRecord
     }
   })
+
+  const saveUnsaved = projectDirty || fileHandleUnsaved
 
   return (
     <div
@@ -6329,15 +6377,16 @@ function App() {
             </button>
           )}
           <button
-            className={`header-btn${fileHandleUnsaved ? ' unsaved' : ''}`}
+            className={`header-btn${saveUnsaved ? ' unsaved' : ''}`}
             data-testid="save-button"
+            data-unsaved={saveUnsaved ? 'true' : 'false'}
             onClick={() => handleSaveToLocal(false)}
-            title={fileHandleUnsaved
-              ? 'Hay cambios sin guardar en el archivo (Cmd/Ctrl+S)'
+            title={saveUnsaved
+              ? 'Cambios sin guardar · Cmd+S'
               : 'Guardar proyecto (Cmd/Ctrl+S)'}
           >
             <IconSave />
-            <span className="btn-label">Guardar{fileHandleUnsaved ? ' •' : ''}</span>
+            <span className="btn-label">Guardar{saveUnsaved ? ' •' : ''}</span>
           </button>
           <button
             className="header-btn"
@@ -7413,6 +7462,50 @@ function App() {
                   disabled={isMetronomeTrack(trackStates[contextMenu.trackIndex])}
                   onClick={() => startRenameTrack(contextMenu.trackIndex)}
                 />
+                <ContextMenuItem
+                  icon={<IconPlay />}
+                  label="Practicar encima"
+                  disabled={isMetronomeTrack(trackStates[contextMenu.trackIndex])}
+                  onClick={() => {
+                    handlePractice(contextMenu.trackIndex)
+                    closeContextMenu()
+                  }}
+                />
+                <ContextMenuItem
+                  icon={<IconVolume2 />}
+                  label="Aislar"
+                  disabled={isMetronomeTrack(trackStates[contextMenu.trackIndex])}
+                  onClick={() => {
+                    handleAislar(contextMenu.trackIndex)
+                    closeContextMenu()
+                  }}
+                />
+                <ContextMenuItem
+                  icon={<IconRecord />}
+                  label="Armar grabación"
+                  disabled={isMetronomeTrack(trackStates[contextMenu.trackIndex])}
+                  onClick={() => {
+                    handleRecordArm(contextMenu.trackIndex)
+                    closeContextMenu()
+                  }}
+                />
+                <ContextMenuItem
+                  icon={<IconSliders />}
+                  label="Efectos"
+                  onClick={() => {
+                    toggleFxPanel(contextMenu.trackIndex)
+                    closeContextMenu()
+                  }}
+                />
+                <ContextMenuItem
+                  icon={<IconSpline />}
+                  label="Automatización"
+                  onClick={() => {
+                    toggleAutoPanel(contextMenu.trackIndex)
+                    closeContextMenu()
+                  }}
+                />
+                <div className="context-menu-sep" />
                 <ContextMenuItem
                   icon={<IconMoveVertical />}
                   label="Insertar pista arriba"

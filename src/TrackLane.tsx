@@ -7,6 +7,7 @@ import type { MetronomeMeter } from './metronomeMeter'
 import { pulsesPerBar } from './metronomeMeter'
 import { isFollowEnabled, type TempoMap } from './beatTracker'
 import { TempoMapMarkers } from './TempoMapMarkers'
+import { clipLabelMode } from './headerDensity'
 import { laneClipDataEqual, trackLaneDataEqual } from './trackRenderMemo'
 
 export interface LaneClip {
@@ -187,6 +188,7 @@ export const TrackLane = memo(function TrackLane({
       className={`track-content ${hasClips ? 'has-clip' : ''} ${isAnyClipPlaying ? 'playing' : ''}`}
       data-track-index={trackIndex}
       data-track-kind={trackKind === 'drum' ? 'drum' : trackKind === 'metronome' ? 'metronome' : 'audio'}
+      data-lane-density={clipLabelMode(height)}
       data-testid={trackKind === 'metronome' ? 'metronome-lane' : undefined}
       data-render-count={renderCountRef.current}
       style={{ height: `${height}px` }}

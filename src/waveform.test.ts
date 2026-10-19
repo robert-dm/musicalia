@@ -5,6 +5,7 @@ import {
   WAVEFORM_TILE_CSS_PX,
   bestAvailableLod,
   canvasDeviceSize,
+  clipTimelineCssWidth,
   columnsFromMip,
   getOrComputeMips,
   getOrComputePeaks,
@@ -122,6 +123,20 @@ assert(bestAvailableLod(mips, WAVEFORM_SAMPLE_LOD) === WAVEFORM_SAMPLE_LOD, 'sam
 const bitmap = canvasDeviceSize(200, 44, 2)
 assert(bitmap.width === 400 && bitmap.height === 88, 'bitmap follows devicePixelRatio, not CSS stretch')
 assert(canvasDeviceSize(20000, 40, 3).width === 8192, 'giant tiles stay capped')
+
+const stemW = clipTimelineCssWidth(600, 600, 1400)
+const addedW = clipTimelineCssWidth(30, 600, 1400)
+assert(almost(stemW, 1400), 'full-session stem clip fills the timeline')
+assert(almost(addedW, 70), 'short added clip is a fraction of the session')
+assert(
+  almost(clipTimelineCssWidth(30, 600, 5600) / addedW, 4),
+  'added-clip waveform host must scale with zoom (4× timeline width)'
+)
+assert(
+  almost(clipTimelineCssWidth(600, 600, 5600) / stemW, 4),
+  'stem clip host scales the same 4×'
+)
+assert(clipTimelineCssWidth(30, 0, 1400) === 0, 'no layout max → no host width')
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`)

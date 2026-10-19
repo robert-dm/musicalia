@@ -203,6 +203,16 @@ export function samplesPerDevicePixel(input: {
   return Math.max(0, input.sampleCount) / devicePx
 }
 
+/** CSS width of a clip on the timeline. Zoom changes `timelineWidthPx`. */
+export function clipTimelineCssWidth(
+  duration: number,
+  layoutMax: number,
+  timelineWidthPx: number
+): number {
+  if (!(duration > 0) || !(layoutMax > 0) || !(timelineWidthPx > 0)) return 0
+  return (duration / layoutMax) * timelineWidthPx
+}
+
 export function visibleHostRange(
   host: { getBoundingClientRect(): { left: number; right: number; width: number; height: number } },
   viewport: { getBoundingClientRect(): { left: number; right: number } } | null,

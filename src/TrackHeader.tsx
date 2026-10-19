@@ -39,6 +39,7 @@ interface TrackHeaderProps {
   onReorderMouseDown?: (e: React.MouseEvent, trackIndex: number) => void
   onSelectTrackClips?: (trackIndex: number, mode: 'add' | 'toggle' | 'replace') => void
   metroSettingsOpen?: boolean
+  metroClickBadge?: string | null
   onOpenMetronomeSettings?: (trackIndex: number) => void
 }
 
@@ -76,6 +77,7 @@ export const TrackHeader = memo(function TrackHeader({
   onReorderMouseDown,
   onSelectTrackClips,
   metroSettingsOpen = false,
+  metroClickBadge = null,
   onOpenMetronomeSettings
 }: TrackHeaderProps) {
   const renderCountRef = useRef(0)
@@ -143,6 +145,11 @@ export const TrackHeader = memo(function TrackHeader({
           >
             {displayName}
           </div>
+        )}
+        {isMetronome && metroClickBadge && (
+          <span className="metro-click-badge" data-testid="metro-click-badge">
+            {metroClickBadge}
+          </span>
         )}
         {isMetronome && (
           <button

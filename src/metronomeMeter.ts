@@ -14,7 +14,14 @@ export interface MetronomeMeter {
   subdivision: MetronomeSubdivision
   clickSound: ClickSound
   followMode: TempoFollowMode
+  /** null = Siempre. First N bars after Play, then the click goes silent. */
+  clickBars: number | null
+  /** When true, each loop wrap restarts the N-bar count. Default off. */
+  clickRepeatEachLoop: boolean
 }
+
+export const CLICK_DURATION_PRESETS = [2, 4, 8, 16] as const
+export const CLICK_BARS_MAX = 99
 
 export const TIME_SIGNATURE_PRESETS: ReadonlyArray<{ numerator: number; denominator: number; label: string }> = [
   { numerator: 4, denominator: 4, label: '4/4' },
@@ -37,7 +44,9 @@ export const DEFAULT_METRONOME_METER: MetronomeMeter = {
   accentDownbeat: true,
   subdivision: 'none',
   clickSound: 'beep',
-  followMode: 'follow'
+  followMode: 'follow',
+  clickBars: null,
+  clickRepeatEachLoop: false
 }
 
 const DENOMS = new Set([1, 2, 4, 8, 16])
@@ -70,6 +79,9 @@ export function normalizeMetronomeMeter(raw?: Partial<MetronomeMeter> | null): M
     ? (raw!.clickSound as ClickSound)
     : 'beep'
   const followMode: TempoFollowMode = raw?.followMode === 'fixed' ? 'fixed' : 'follow'
+  const barsIn = Math.floor(Number(raw?.clickBars))
+  const clickBars = Number.isFinite(barsIn) && barsIn > 0 ? Math.min(CLICK_BARS_MAX, barsIn) : null
+  const clickRepeatEachLoop = raw?.clickRepeatEachLoop === true
   return {
     numerator,
     denominator,
@@ -78,8 +90,15 @@ export function normalizeMetronomeMeter(raw?: Partial<MetronomeMeter> | null): M
     accentDownbeat,
     subdivision,
     clickSound,
-    followMode
+    followMode,
+    clickBars,
+    clickRepeatEachLoop
   }
+}
+
+export function formatClickBarsBadge(bars: number | null | undefined): string | null {
+  if (bars == null || !(bars > 0)) return null
+  return bars === 1 ? 'Clic: 1 compás' : `Clic: ${bars} compases`
 }
 
 export function meterFromBeatsPerBar(beatsPerBar?: number): MetronomeMeter {

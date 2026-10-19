@@ -639,6 +639,18 @@
   min-width: 0;
 }
 
+.metro-click-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
 .track-name {
   font-size: 13px;
   color: var(--text);
@@ -2464,6 +2476,10 @@
   align-items: center;
   gap: 8px;
   font-size: 13px;
+}
+
+.metro-loop-repeat {
+  margin-top: 8px;
 }
 
 .metro-settings-copy {

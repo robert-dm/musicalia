@@ -1,6 +1,7 @@
 import {
   DEFAULT_METRONOME_METER,
   barDurationSeconds,
+  formatClickBarsBadge,
   formatTimeSignature,
   hydrateMetronomeMeter,
   hydrateTrackMetronome,
@@ -83,14 +84,27 @@ const custom = hydrateMetronomeMeter({
   phaseSeconds: 0.2,
   accentDownbeat: false,
   subdivision: 'triplets',
-  clickSound: 'rim'
+  clickSound: 'rim',
+  clickBars: 8,
+  clickRepeatEachLoop: true
 })
 const saved = serializeMetronomeMeter(custom)
 assert(saved.numerator === 5 && saved.denominator === 4 && saved.clickSound === 'rim', 'persists custom meter')
 assert(saved.subdivision === 'triplets' && saved.accentDownbeat === false, 'persists subdivision and accent')
 assert(saved.followMode === 'follow', 'missing followMode hydrates to Seguir la canción')
+assert(saved.clickBars === 8 && saved.clickRepeatEachLoop === true, 'click duration persists in .musicalia')
 assert(hydrateMetronomeMeter({ followMode: 'fixed' }).followMode === 'fixed', 'Tempo fijo persists')
 assert(hydrateMetronomeMeter(undefined).numerator === 4, 'missing meter hydrates 4/4')
+assert(
+  hydrateMetronomeMeter({ numerator: 4 }).clickBars == null
+    && hydrateMetronomeMeter({ numerator: 4 }).clickRepeatEachLoop === false,
+  'missing duration hydrates to Siempre'
+)
+assert(hydrateMetronomeMeter({ clickBars: 0 }).clickBars == null, 'clickBars 0 is Siempre')
+assert(hydrateMetronomeMeter({ clickBars: 140 }).clickBars === 99, 'clickBars clamps at 99')
+assert(formatClickBarsBadge(4) === 'Clic: 4 compases', 'badge for 4 bars')
+assert(formatClickBarsBadge(1) === 'Clic: 1 compás', 'badge singular')
+assert(formatClickBarsBadge(null) == null, 'Siempre has no badge')
 
 const reset = resetMetronomeToFixedTempo({
   ...custom,
@@ -100,6 +114,7 @@ const reset = resetMetronomeToFixedTempo({
 assert(reset.followMode === 'fixed', 'Resetear tempo switches to Tempo fijo')
 assert(reset.phaseSeconds === 0, 'Resetear tempo clears the phase / accent offset')
 assert(reset.numerator === 5 && reset.clickSound === 'rim', 'Resetear tempo keeps the rest of the meter')
+assert(reset.clickBars === 8, 'Resetear tempo keeps click duration')
 
 const trackJson = { kind: 'metronome', metronome: saved }
 assert(serializeTrackMetronome(trackJson).metronome?.clickSound === 'rim', 'track payload keeps rim')

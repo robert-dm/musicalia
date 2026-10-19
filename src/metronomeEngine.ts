@@ -76,6 +76,9 @@ export class MetronomeEngine {
     loopStart: number | null
     loopEnd: number | null
     loopEnabled: boolean
+    clickOriginSong?: number
+    clickPassStart?: number
+    clickElapsedSong?: number
   }): ScheduledMetronomeEvent[] {
     this.clearSchedule()
     if (!args.enabled || !args.destination) {
@@ -94,7 +97,10 @@ export class MetronomeEngine {
       songEnd: args.songEnd,
       loopStart: args.loopStart,
       loopEnd: args.loopEnd,
-      loopEnabled: args.loopEnabled
+      loopEnabled: args.loopEnabled,
+      clickOriginSong: args.clickOriginSong,
+      clickPassStart: args.clickPassStart,
+      clickElapsedSong: args.clickElapsedSong
     })
     const transport = Tone.getTransport()
     this.eventIds = events.map((event) =>

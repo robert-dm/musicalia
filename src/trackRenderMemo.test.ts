@@ -48,6 +48,17 @@ assert(
   'record-arm change re-renders that header'
 )
 assert(
+  trackHeaderDataEqual(headerA, { ...headerA, metroClickBadge: undefined }),
+  'missing click badge matches undefined'
+)
+assert(
+  !trackHeaderDataEqual(
+    { ...headerA, metroClickBadge: 'Clic: 4 compases' },
+    { ...headerA, metroClickBadge: 'Clic: 8 compases' }
+  ),
+  'click-duration badge change re-renders the metro header'
+)
+assert(
   !trackHeaderDataEqual(headerA, { ...headerA, fxOpen: true }),
   'FX panel open re-renders that header'
 )

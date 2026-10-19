@@ -15,6 +15,7 @@ export interface TrackHeaderDataProps {
   practiceActive?: boolean
   isolated?: boolean
   metroSettingsOpen?: boolean
+  metroClickBadge?: string | null
 }
 
 export interface TrackLaneDataProps {
@@ -57,6 +58,7 @@ export function trackHeaderDataEqual(prev: TrackHeaderDataProps, next: TrackHead
     prev.practiceActive === next.practiceActive &&
     prev.isolated === next.isolated &&
     prev.metroSettingsOpen === next.metroSettingsOpen &&
+    prev.metroClickBadge === next.metroClickBadge &&
     (!next.isRenaming || prev.renameDraft === next.renameDraft)
   )
 }

@@ -7,10 +7,12 @@ import {
   meterFromBeatsPerBar,
   metronomeClicksInRange,
   normalizeMetronomeMeter,
+  pulsesPerBar,
   type ClickSound,
   type MetronomeMeter
 } from './metronomeMeter'
 import { followClicksInRange, hasTempoMap, isFollowEnabled, type TempoMap } from './beatTracker'
+import { beatIndexAtOrAfter, sanitizeTempoMap } from './tempoMapSanitize'
 import { secondsPerBeatSafe } from './tempoMath'
 
 export const METRONOME_TRACK_NAME = 'Metrónomo'
@@ -128,6 +130,47 @@ export function clickTimesInRange(args: {
 
 export const METRONOME_LOOKAHEAD_SECONDS = 8
 
+/**
+ * Song-time duration of the first N bars from origin, or null when the click
+ * plays for the whole session (Siempre). Follow mode counts beats on the map.
+ */
+export function metronomeClickLimitSeconds(args: {
+  bpm: number
+  meter?: Partial<MetronomeMeter> | null
+  tempoMap?: TempoMap | null
+  originSong?: number
+}): number | null {
+  const meter = args.meter
+    ? normalizeMetronomeMeter(args.meter)
+    : meterFromBeatsPerBar(undefined)
+  const bars = meter.clickBars
+  if (bars == null || bars <= 0) return null
+  const origin = Math.max(0, args.originSong ?? 0)
+  if (isFollowEnabled(meter, args.tempoMap) && hasTempoMap(args.tempoMap)) {
+    const map = sanitizeTempoMap(args.tempoMap as TempoMap)
+    const beats = map.beats
+    const pulses = pulsesPerBar(meter)
+    const i0 = beatIndexAtOrAfter(beats, origin)
+    const stopIndex = i0 + bars * pulses
+    if (stopIndex < beats.length) return Math.max(0, beats[stopIndex].time - origin)
+    if (beats.length < 2) return bars * barDurationSeconds(args.bpm, meter)
+    const period = (beats[beats.length - 1].time - beats[0].time) / (beats.length - 1)
+    return Math.max(0, beats[0].time + stopIndex * period - origin)
+  }
+  return bars * barDurationSeconds(args.bpm, meter)
+}
+
+export function metronomeClickStopAt(args: {
+  bpm: number
+  meter?: Partial<MetronomeMeter> | null
+  tempoMap?: TempoMap | null
+  originSong?: number
+}): number | null {
+  const origin = Math.max(0, args.originSong ?? 0)
+  const limit = metronomeClickLimitSeconds(args)
+  return limit == null ? null : origin + limit
+}
+
 export function scheduledMetronomeClicks(args: {
   bpm: number
   beatsPerBar?: number
@@ -140,6 +183,9 @@ export function scheduledMetronomeClicks(args: {
   loopStart?: number | null
   loopEnd?: number | null
   loopEnabled?: boolean
+  clickOriginSong?: number
+  clickPassStart?: number
+  clickElapsedSong?: number
 }): Array<MetronomeClick & { transportTime: number }> {
   let windowStart = Math.max(0, args.songTime)
   let windowEnd = Math.max(windowStart, args.songEnd)
@@ -147,7 +193,21 @@ export function scheduledMetronomeClicks(args: {
     windowStart = Math.max(windowStart, args.loopStart)
     windowEnd = Math.min(windowEnd, args.loopEnd)
   }
+  const origin = args.clickOriginSong ?? args.playOriginSong
+  const limit = metronomeClickLimitSeconds({
+    bpm: args.bpm,
+    meter: args.meter,
+    tempoMap: args.tempoMap,
+    originSong: origin
+  })
+  if (limit != null) {
+    const remaining = limit - Math.max(0, args.clickElapsedSong ?? 0)
+    if (remaining <= 1e-9) return []
+    const passStart = args.clickPassStart ?? origin
+    windowEnd = Math.min(windowEnd, passStart + remaining)
+  }
   windowEnd = Math.min(windowEnd, windowStart + METRONOME_LOOKAHEAD_SECONDS)
+  if (!(windowEnd > windowStart)) return []
   return clickTimesInRange({
     bpm: args.bpm,
     beatsPerBar: args.beatsPerBar,
@@ -251,13 +311,19 @@ export function renderMetronomeClicksOffline(
   if (volume <= 0) return 0
   const shift = Math.max(0, args.countInSeconds ?? 0)
   const meter = args.meter ? normalizeMetronomeMeter(args.meter) : meterFromBeatsPerBar(args.beatsPerBar)
+  const stopAt = metronomeClickStopAt({
+    bpm: args.bpm,
+    meter,
+    tempoMap: args.tempoMap,
+    originSong: 0
+  })
   const clicks = clickTimesInRange({
     bpm: args.bpm,
     beatsPerBar: args.beatsPerBar,
     meter,
     tempoMap: args.tempoMap,
     start: 0,
-    end: args.songEnd
+    end: stopAt == null ? args.songEnd : Math.min(args.songEnd, stopAt)
   })
   const accentBuf = createClickAudioBuffer(ctx, true, meter.clickSound)
   const beatBuf = createClickAudioBuffer(ctx, false, meter.clickSound)
@@ -290,7 +356,7 @@ export function renderCountInClicksOffline(
   return renderMetronomeClicksOffline(ctx, dest, {
     bpm: args.bpm,
     beatsPerBar: args.beatsPerBar,
-    meter,
+    meter: { ...meter, clickBars: null },
     songEnd,
     countInSeconds: 0,
     volume: args.volume ?? 0.5

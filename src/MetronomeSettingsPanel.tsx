@@ -1,4 +1,5 @@
 import {
+  CLICK_DURATION_PRESETS,
   TIME_SIGNATURE_PRESETS,
   formatTimeSignature,
   isCompoundMeter,
@@ -127,6 +128,65 @@ export function MetronomeSettingsPanel({
           <div className="metro-settings-hint" data-testid="tempo-map-fallback-notice">
             Mapa de tempo inestable — usando tempo fijo.
           </div>
+        )}
+      </section>
+
+      <section className="metro-settings-section">
+        <div className="metro-settings-label">Duración</div>
+        <div className="metro-chip-row" role="group" aria-label="Duración del clic">
+          <button
+            type="button"
+            className={`metro-chip ${meter.clickBars == null ? 'active' : ''}`}
+            data-testid="click-duration-always"
+            aria-pressed={meter.clickBars == null}
+            onClick={() => onPatch({ clickBars: null })}
+          >
+            Siempre
+          </button>
+          {CLICK_DURATION_PRESETS.map((bars) => (
+            <button
+              key={bars}
+              type="button"
+              className={`metro-chip ${meter.clickBars === bars ? 'active' : ''}`}
+              data-testid={`click-duration-${bars}`}
+              aria-pressed={meter.clickBars === bars}
+              onClick={() => onPatch({ clickBars: bars })}
+            >
+              {bars} compases
+            </button>
+          ))}
+        </div>
+        <div className="metro-custom-meter">
+          <span>Personalizado</span>
+          <input
+            type="number"
+            min={1}
+            max={99}
+            className="metro-nd"
+            data-testid="click-duration-custom"
+            aria-label="Compases de clic"
+            placeholder="N"
+            value={meter.clickBars ?? ''}
+            onChange={(e) => {
+              const raw = e.target.value
+              if (raw === '') {
+                onPatch({ clickBars: null })
+                return
+              }
+              onPatch({ clickBars: Number(raw) })
+            }}
+          />
+        </div>
+        {meter.clickBars != null && (
+          <label className="metro-toggle metro-loop-repeat">
+            <input
+              type="checkbox"
+              checked={meter.clickRepeatEachLoop}
+              data-testid="click-repeat-loop"
+              onChange={(e) => onPatch({ clickRepeatEachLoop: e.target.checked })}
+            />
+            <span>Repetir en cada vuelta del loop</span>
+          </label>
         )}
       </section>
 

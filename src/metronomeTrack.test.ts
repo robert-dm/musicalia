@@ -1,5 +1,6 @@
 import { buildTempoMap } from './beatTracker'
 import { transportTimeForHit } from './drumTiming'
+import { DEFAULT_METRONOME_METER } from './metronomeMeter'
 import {
   canDeleteTrack,
   canRenameTrack,
@@ -10,6 +11,8 @@ import {
   findMetronomeIndex,
   METRONOME_LOOKAHEAD_SECONDS,
   METRONOME_TRACK_NAME,
+  metronomeClickLimitSeconds,
+  metronomeClickStopAt,
   metronomeIsOn,
   scheduledMetronomeClicks,
   secondsPerBeat,
@@ -160,6 +163,165 @@ assert(
 )
 assert(lookahead.length < 50, `does not schedule ~1600 clicks at once (got ${lookahead.length})`)
 assert(Math.abs(followVel[1].transportTime - 0.372 / 0.5) < 1e-9, 'Vel 0.5x stretches follow-mode transport times')
+
+function clickDurMeter(bars: number, extra: Partial<typeof DEFAULT_METRONOME_METER> = {}) {
+  return { ...DEFAULT_METRONOME_METER, clickBars: bars, ...extra }
+}
+
+for (const bars of [2, 4, 8] as const) {
+  const four = clickDurMeter(bars, { numerator: 4, denominator: 4 })
+  const three = clickDurMeter(bars, { numerator: 3, denominator: 4 })
+  assert(metronomeClickLimitSeconds({ bpm: 120, meter: four }) === bars * 2, `4/4 ${bars} bars is ${bars * 2}s at 120`)
+  assert(metronomeClickLimitSeconds({ bpm: 120, meter: three }) === bars * 1.5, `3/4 ${bars} bars is ${bars * 1.5}s at 120`)
+  const stop4 = metronomeClickStopAt({ bpm: 120, meter: four, originSong: 1 })
+  assert(stop4 === 1 + bars * 2, `4/4 ${bars} bars from t=1 stops at ${1 + bars * 2}`)
+}
+
+assert(metronomeClickLimitSeconds({ bpm: 120, meter: DEFAULT_METRONOME_METER }) == null, 'Siempre has no cutoff')
+
+const cut2 = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(2, { numerator: 4, denominator: 4 }),
+  songTime: 0,
+  playOriginSong: 0,
+  tempoRate: 1,
+  songEnd: 20
+})
+assert(cut2.length === 8, `2 bars 4/4 schedules 8 clicks (got ${cut2.length})`)
+assert(cut2[0].songTime === 0 && cut2[cut2.length - 1].songTime === 3.5, '2 bars 4/4 last click is 3.5')
+assert(cut2.every((c) => c.songTime < 4), '2 bars 4/4 never schedules t>=4')
+
+const cut4 = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(4, { numerator: 4, denominator: 4 }),
+  songTime: 0,
+  playOriginSong: 0,
+  tempoRate: 1,
+  songEnd: 20
+})
+assert(cut4.length === 16, `4 bars 4/4 schedules 16 clicks (got ${cut4.length})`)
+assert(cut4[cut4.length - 1].songTime === 7.5, '4 bars 4/4 last click is 7.5')
+
+const cut8 = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(8, { numerator: 4, denominator: 4 }),
+  songTime: 12,
+  playOriginSong: 0,
+  clickOriginSong: 0,
+  tempoRate: 1,
+  songEnd: 30
+})
+assert(cut8.length === 8, `8 bars 4/4 from t=12 still has 4s left (got ${cut8.length})`)
+assert(cut8[0].songTime === 12 && cut8[cut8.length - 1].songTime === 15.5, '8 bars 4/4 cuts at 16')
+assert(
+  scheduledMetronomeClicks({
+    bpm: 120,
+    meter: clickDurMeter(8),
+    songTime: 16,
+    playOriginSong: 0,
+    clickOriginSong: 0,
+    tempoRate: 1,
+    songEnd: 30
+  }).length === 0,
+  '8 bars 4/4 is silent after the stop'
+)
+
+const waltz2 = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(2, { numerator: 3, denominator: 4 }),
+  songTime: 0,
+  playOriginSong: 0,
+  tempoRate: 1,
+  songEnd: 20
+})
+assert(waltz2.length === 6, `2 bars 3/4 schedules 6 clicks (got ${waltz2.length})`)
+assert(waltz2[waltz2.length - 1].songTime === 2.5, '2 bars 3/4 last click is 2.5')
+
+const waltz4 = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(4, { numerator: 3, denominator: 4 }),
+  songTime: 0,
+  playOriginSong: 0,
+  tempoRate: 1,
+  songEnd: 20
+})
+assert(waltz4.length === 12, `4 bars 3/4 schedules 12 clicks (got ${waltz4.length})`)
+
+const waltz8 = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(8, { numerator: 3, denominator: 4 }),
+  songTime: 10,
+  playOriginSong: 0,
+  clickOriginSong: 0,
+  tempoRate: 1,
+  songEnd: 30
+})
+assert(waltz8.length === 4, `8 bars 3/4 from t=10 has 2s left (got ${waltz8.length})`)
+assert(waltz8[waltz8.length - 1].songTime === 11.5, '8 bars 3/4 cuts at 12')
+
+const velCut = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(4, { numerator: 4, denominator: 4 }),
+  songTime: 0,
+  playOriginSong: 0,
+  tempoRate: 0.75,
+  songEnd: 20
+})
+assert(velCut.length === 16, 'Vel 0.75 keeps the 4-bar song-time grid')
+assert(
+  velCut.every((c, i) => Math.abs(c.songTime - i * 0.5) < 1e-9),
+  'Vel 0.75 does not move 4-bar song times'
+)
+assert(
+  velCut.every((c) => Math.abs(c.transportTime - c.songTime / 0.75) < 1e-9),
+  'Vel 0.75 stretches 4-bar transport times by 1/0.75'
+)
+
+const evenFollow = buildTempoMap([0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5], 120, 6)
+const followCut = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(2, { followMode: 'follow', numerator: 4, denominator: 4 }),
+  tempoMap: evenFollow,
+  songTime: 0,
+  playOriginSong: 0,
+  tempoRate: 1,
+  songEnd: 6
+})
+assert(followCut.length === 8, `follow 2 bars is 8 map beats (got ${followCut.length})`)
+assert(followCut[followCut.length - 1].songTime === 3.5, 'follow 2 bars last click is the 8th beat')
+assert(followCut.every((c) => c.songTime < 4), 'follow 2 bars never schedules the 9th beat')
+
+const exhausted = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(2),
+  songTime: 0,
+  playOriginSong: 0,
+  clickOriginSong: 0,
+  clickPassStart: 0,
+  clickElapsedSong: 4,
+  tempoRate: 1,
+  songEnd: 8,
+  loopEnabled: true,
+  loopStart: 0,
+  loopEnd: 8
+})
+assert(exhausted.length === 0, 'repeat-off after 2 bars of elapsed song stays silent on wrap')
+
+const repeatOn = scheduledMetronomeClicks({
+  bpm: 120,
+  meter: clickDurMeter(2),
+  songTime: 0,
+  playOriginSong: 0,
+  clickOriginSong: 0,
+  clickPassStart: 0,
+  clickElapsedSong: 0,
+  tempoRate: 1,
+  songEnd: 8,
+  loopEnabled: true,
+  loopStart: 0,
+  loopEnd: 8
+})
+assert(repeatOn.length === 8, 'repeat-on restarts the 2-bar count at loop start')
 
 assert(effectiveMetronomeGain(0.7, false) === 0.7, 'unmuted metro gain is volume')
 assert(effectiveMetronomeGain(0.7, true) === 0, 'mute silences metro')

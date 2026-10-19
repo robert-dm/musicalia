@@ -49,6 +49,7 @@ import {
 } from './tempoMath'
 import {
   barDurationSeconds,
+  formatClickBarsBadge,
   hydrateTrackMetronome,
   meterOf,
   normalizeMetronomeMeter,
@@ -375,7 +376,7 @@ import {
   trackKindOf
 } from './drumProject'
 
-const APP_VERSION = '0.0099b'
+const APP_VERSION = '0.0100b'
 
 interface ClipboardClip {
   buffer: AudioBuffer
@@ -458,6 +459,8 @@ function App() {
   const playOriginSongRef = useRef(0)
   const playOriginWallRef = useRef(0)
   const playOriginContextRef = useRef(0)
+  const clickPassStartRef = useRef(0)
+  const clickElapsedSongRef = useRef(0)
   const [isLoopEnabled, setIsLoopEnabled] = useState(false)
   const [countInBars, _setCountInBars] = useState(2)
   const [isDraggingLoop, setIsDraggingLoop] = useState(false)
@@ -1108,7 +1111,10 @@ function App() {
       songEnd: Math.max(getMaxDuration(), timelineMaxRef.current || 0, 8 * (60 / Math.max(1, bpmRef.current))),
       loopStart: loopStartRef.current,
       loopEnd: loopEndRef.current,
-      loopEnabled: isLoopEnabledRef.current
+      loopEnabled: isLoopEnabledRef.current,
+      clickOriginSong: clickPassStartRef.current,
+      clickPassStart: clickPassStartRef.current,
+      clickElapsedSong: clickElapsedSongRef.current
     })
   }
 
@@ -2406,6 +2412,8 @@ function App() {
     Tone.getTransport().seconds = startTime
     Tone.getTransport().start()
     stampPlayOrigin(startTime)
+    clickPassStartRef.current = startTime
+    clickElapsedSongRef.current = 0
     applyAllClipPlayback()
     
     const maxDuration = getMaxDuration()
@@ -2450,10 +2458,19 @@ function App() {
           const span = Math.max(0.05, loopEnd - loopStart)
           currentTime = loopStart + ((currentTime - loopStart) % span)
           stampPlayOrigin(currentTime)
+          const meter = currentMetronomeMeter()
+          if (meter.clickRepeatEachLoop) {
+            clickElapsedSongRef.current = 0
+          } else {
+            clickElapsedSongRef.current += Math.max(0, loopEnd - clickPassStartRef.current)
+          }
+          clickPassStartRef.current = loopStart
           retargetPlayingClips(currentTime)
         } else if (!isLoopEnabled && !recordLiveRef.current && maxDuration > 0 && currentTime >= maxDuration) {
           currentTime = 0
           stampPlayOrigin(0)
+          clickPassStartRef.current = 0
+          clickElapsedSongRef.current = 0
           Tone.getTransport().seconds = 0
           retargetPlayingClips(0)
         }
@@ -5755,7 +5772,9 @@ function App() {
           tempoMapBeats: track?.tempoMap?.beats.length ?? 0,
           mapUsable: isTempoMapUsable(track?.tempoMap),
           localBpm: track?.tempoMap ? localBpmAt(track.tempoMap, playheadPositionRef.current) : null,
-          phaseSeconds: meterOf(track).phaseSeconds
+          phaseSeconds: meterOf(track).phaseSeconds,
+          clickBars: meterOf(track).clickBars,
+          clickRepeatEachLoop: meterOf(track).clickRepeatEachLoop
         }
       },
       unmute: () => {
@@ -7059,6 +7078,11 @@ function App() {
                   onReorderMouseDown={handleTrackReorderMouseDown}
                   onSelectTrackClips={handleSelectTrackClips}
                   metroSettingsOpen={isMetronomeTrack(trackState) && metroSettingsOpen}
+                  metroClickBadge={
+                    isMetronomeTrack(trackState)
+                      ? formatClickBarsBadge(trackState.metronome?.clickBars)
+                      : null
+                  }
                   onOpenMetronomeSettings={() => {
                     setMetroSettingsOpen(true)
                     setMetroAlignArmed(false)
